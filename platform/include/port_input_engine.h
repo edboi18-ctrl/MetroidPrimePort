@@ -146,6 +146,7 @@ enum class ActionKind : uint8_t {
   X(VisorThermal, Digital, "visor_thermal", "Thermal Visor")                                       \
   X(VisorXray, Digital, "visor_xray", "X-Ray Visor")                                               \
   X(SpringBall, Digital, "spring_ball", "Spring Ball")                                             \
+  X(Stasis, Digital, "stasis", "Stasis (Dead Space)")                                              \
   X(Layer1, Digital, "layer_1", "Layer 1 (hold)")                                                  \
   X(Layer2, Digital, "layer_2", "Layer 2 (hold)")                                                  \
   X(Layer3, Digital, "layer_3", "Layer 3 (hold)")                                                  \

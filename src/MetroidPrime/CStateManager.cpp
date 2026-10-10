@@ -16,6 +16,7 @@
 #include "port_skip_cutscenes.h"
 #include "port_viewmodel.h"
 #include "port_console.h"
+#include "port_dead_space.h"
 #ifdef MP_ENABLE_SMOKE_DRIVER
 #include "port_smoke.h"
 #endif
@@ -1328,7 +1329,10 @@ void CStateManager::MoveDoors(float dt) {
       }
 
       if (actor != x84c_player && !CPlatformAndDoorList::IsPlatform(actor)) {
-        CGameCollision::Move(*this, *actor, dt, 0);
+        // Dead Space Prime: Think's root motion becomes a force sized for its
+        // own (scaled) step (CPhysicsActor::MoveToOR divides by it), so a
+        // Stasis-held enemy only travels slowly if it moves on the same step.
+        CGameCollision::Move(*this, *actor, dt * PortDeadSpace::TimeScale(actor->GetUniqueId()), 0);
       }
     }
   }
@@ -1416,7 +1420,9 @@ void CStateManager::Think(float dt) {
         }
 
         if (camList->GetObjectById(ent->GetUniqueId()) == nullptr) {
-          ent->Think(dt, *this);
+          // Dead Space Prime: a Stasis-held enemy thinks (animates, runs its AI
+          // and timers) on a scaled time step.
+          ent->Think(dt * PortDeadSpace::TimeScale(ent->GetUniqueId()), *this);
         }
       }
     }
@@ -1443,7 +1449,7 @@ void CStateManager::PreThinkObjects(float dt) {
     for (int i = allList->GetFirstObjectIndex(); i != -1; i = allList->GetNextObjectIndex(i)) {
       CEntity* ent = (*allList)[i];
       if (ent != nullptr && camList->GetObjectById(ent->GetUniqueId()) == nullptr) {
-        ent->PreThink(dt, *this);
+        ent->PreThink(dt * PortDeadSpace::TimeScale(ent->GetUniqueId()), *this);
       }
     }
   }
@@ -1573,6 +1579,7 @@ void CStateManager::Update(float dt) {
     }
   }
   if (PortSaveState::Tick(*this)) {
+    PortDeadSpace::Reset();
     return;
   }
 
@@ -1602,6 +1609,9 @@ void CStateManager::Update(float dt) {
       ++filt;
       ++blur;
     }
+    // Dead Space Prime: Stasis takes its press and runs its holds down before
+    // anything thinks or moves, so a held enemy is slowed for the whole tick.
+    PortDeadSpace::Tick(*this, dt);
   }
 
   if (x904_gameState != kGS_Paused) {

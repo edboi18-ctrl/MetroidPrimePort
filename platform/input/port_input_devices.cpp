@@ -272,6 +272,38 @@ void BindPortControls(Profile& p) {
   }
 }
 
+// Dead Space Prime's Stasis, when it's on and nothing binds it yet: R, and LB on
+// a controller (L3 when LB already does something), each only where no other
+// binding uses the input, and only in gameplay. Runs last, so the user's own
+// bindings win both ways.
+void BindDeadSpaceDefaults(Profile& p) {
+  if (!PortDebug::Stasis()) return;
+  const auto bound = [&p](auto&& match) {
+    return std::any_of(p.bindings.begin(), p.bindings.end(), match);
+  };
+  if (bound([](const Binding& b) { return b.action == Action::Stasis; })) return;
+  const auto taken = [&bound](const Input& in) {
+    return bound([&in](const Binding& b) { return b.Uses(in); });
+  };
+  const auto bindGameplay = [&p](const Input& in) {
+    Binding b;
+    b.action = Action::Stasis;
+    b.inputs[0] = in;
+    b.count = 1;
+    b.contexts = PortInput::kCtxGameplay;
+    p.bindings.push_back(b);
+  };
+  const Input key = Make(Device::Key, SDL_SCANCODE_R);
+  if (!taken(key)) bindGameplay(key);
+  for (const s32 native : {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, SDL_GAMEPAD_BUTTON_LEFT_STICK}) {
+    const Input button = NativeInput(native);
+    if (!taken(button)) {
+      bindGameplay(button);
+      break;
+    }
+  }
+}
+
 float StickValue(s16 raw, u16 deadZone, bool useDeadZones) {
   if (useDeadZones && std::abs(static_cast< int >(raw)) <= deadZone) return 0.f;
   return std::clamp(static_cast< float >(raw) / 32767.f, -1.f, 1.f);
@@ -365,6 +397,9 @@ void RouteDirectActions(const PortInput::Output& out) {
     if (out.Pressed(kVisors[i])) PortDebug::RequestVisor(i);
   }
   if (out.Pressed(Action::SpringBall)) PortDebug::RequestSpringBall();
+  // The game's pad input is blanked while the overlay is up; Stasis follows it,
+  // so typing R in an overlay field doesn't fire it.
+  if (out.Pressed(Action::Stasis) && !PortDebug::Visible()) PortDebug::RequestStasis();
   if (out.Pressed(Action::PortMenu)) PortDebug::RequestToggle();
   if (out.Pressed(Action::SaveState)) PortDebug::RequestSaveStateHotkey(1);
   if (out.Pressed(Action::LoadState)) PortDebug::RequestSaveStateHotkey(2);
@@ -543,6 +578,7 @@ void BuildProfile(Profile& out) {
   sTouchBound.store(TouchBoundMask(user), std::memory_order_relaxed);
   if (user.sel.base != nullptr) PortInput::Overlay(out, *user.sel.base);
   if (user.sel.pad != nullptr) PortInput::Overlay(out, *user.sel.pad);
+  BindDeadSpaceDefaults(out);
 }
 
 PADStatus Synthesize(const PortInput::Output& out) {

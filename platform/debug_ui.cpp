@@ -266,6 +266,7 @@ std::atomic<uint64_t> sVisorRequestUntilNs{0};
 std::atomic<int> sBeamRequest{-1};
 std::atomic<uint64_t> sBeamRequestUntilNs{0};
 std::atomic<uint64_t> sSpringRequestUntilNs{0};
+std::atomic<uint64_t> sStasisRequestUntilNs{0};
 constexpr uint64_t kWheelRequestNs = 120'000'000;
 std::mutex sMinimapMutex;
 bool sMinimapValid = false;
@@ -1693,6 +1694,42 @@ void SetSpringBall(bool enabled) {
   MarkDirty();
 }
 
+bool Stasis() {
+  EnsureInitialized();
+  return sInput.stasis && !sOriginalExperience;
+}
+
+void SetStasis(bool enabled) {
+  EnsureInitialized();
+  sInput.stasis = enabled;
+  MarkDirty();
+}
+
+float StasisSlow() {
+  EnsureInitialized();
+  return sInput.stasisSlow;
+}
+
+void SetStasisSlow(float fraction) {
+  EnsureInitialized();
+  if (!std::isfinite(fraction)) return;
+  sInput.stasisSlow = std::clamp(fraction, PortInput::kStasisSlowMin, PortInput::kStasisSlowMax);
+  MarkDirty();
+}
+
+float StasisDuration() {
+  EnsureInitialized();
+  return sInput.stasisDuration;
+}
+
+void SetStasisDuration(float seconds) {
+  EnsureInitialized();
+  if (!std::isfinite(seconds)) return;
+  sInput.stasisDuration =
+      std::clamp(seconds, PortInput::kStasisDurationMin, PortInput::kStasisDurationMax);
+  MarkDirty();
+}
+
 bool SwapScanXray() {
   EnsureInitialized();
   return sInput.swapScanXray && !TouchActive() && !sOriginalExperience;
@@ -2504,6 +2541,15 @@ bool BeamRequested(int beam) {
 void RequestSpringBall() { sSpringRequestUntilNs.store(SDL_GetTicksNS() + kWheelRequestNs); }
 
 bool SpringBallRequested() { return SDL_GetTicksNS() < sSpringRequestUntilNs.load(); }
+
+// Like the Spring Ball's, a press keeps for kWheelRequestNs, so one made while
+// the game isn't ticking (a soft pause) doesn't fire long after; and it is used once.
+void RequestStasis() { sStasisRequestUntilNs.store(SDL_GetTicksNS() + kWheelRequestNs); }
+
+bool ConsumeStasisRequest() {
+  const uint64_t until = sStasisRequestUntilNs.exchange(0);
+  return until != 0 && SDL_GetTicksNS() < until;
+}
 
 void RequestSaveStateHotkey(int which) {
   if (which == 1 || which == 2) {
@@ -5985,6 +6031,28 @@ void DrawControlsOptions() {
              "held. Twin stick still passes the right stick up to it, and the beam shift (X in the "
              "Remastered preset) springs too.");
   }
+
+  ImGui::SeparatorText("Dead Space");
+  bool stasis = sInput.stasis;
+  if (ImGui::Checkbox("Stasis", &stasis)) {
+    SetStasis(stasis);
+  }
+  ItemHelp("From Dead Space: press Stasis (R on the keyboard; LB on a controller, or L3 when LB is "
+           "taken; rebind it under Controls > Remap) and the enemy you are locked on to, or the "
+           "one your shots would home in on, slows down and glows blue for a few seconds. Each "
+           "use spends half the meter at the bottom of the screen, which refills over time.");
+  ImGui::BeginDisabled(!sInput.stasis);
+  float stasisPercent = sInput.stasisSlow * 100.f;
+  if (ImGui::SliderFloat("Stasis speed", &stasisPercent, PortInput::kStasisSlowMin * 100.f,
+                         PortInput::kStasisSlowMax * 100.f, "%.0f%% of normal")) {
+    SetStasisSlow(stasisPercent / 100.f);
+  }
+  float stasisDuration = sInput.stasisDuration;
+  if (ImGui::SliderFloat("Stasis duration", &stasisDuration, PortInput::kStasisDurationMin,
+                         PortInput::kStasisDurationMax, "%.1f s")) {
+    SetStasisDuration(stasisDuration);
+  }
+  ImGui::EndDisabled();
   EndOriginalLocked(locked);
 }
 
@@ -7698,7 +7766,8 @@ void DrawOriginalSection() {
   }
   ItemHelp("Plays the game as on the GameCube: 640x480 at 4:3, 60 Hz with no interpolation, no "
            "mods, the retail HUD, font, button icons, FOV and cutscenes, and none of the gameplay extras (spring ball, "
-           "fast morph, charge and lock-on options, turbo fire, unlocks). The other settings keep "
+           "fast morph, charge and lock-on options, turbo fire, unlocks, Dead Space's Stasis). "
+           "The other settings keep "
            "their values and come back when it's turned off. Controls, cheats, save states, the "
            "randomizer, Archipelago and the timer still work.");
 }

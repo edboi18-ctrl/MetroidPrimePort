@@ -181,6 +181,18 @@ bool ApplySetting(std::string_view keyView, std::string_view valueView) {
     s.rapidCharge = ParseBool(value);
   } else if (key == "remastered_movement") {
     s.remasteredMovement = ParseBool(value);
+  } else if (key == "stasis") {
+    s.stasis = ParseBool(value);
+  } else if (key == "stasis_slow") {
+    const float f = ParseFloat(value);
+    if (std::isfinite(f) && f >= kStasisSlowMin && f <= kStasisSlowMax) {
+      s.stasisSlow = f;
+    }
+  } else if (key == "stasis_duration") {
+    const float f = ParseFloat(value);
+    if (std::isfinite(f) && f >= kStasisDurationMin && f <= kStasisDurationMax) {
+      s.stasisDuration = f;
+    }
   } else if (key == "spring_ball_flick") {
     s.springFlick = ParseBool(value);
   } else if (key == "spring_ball_flick_rate") {
@@ -229,6 +241,9 @@ void WriteGameplaySettings(std::ostream& out) {
   const Settings& s = Get();
   out << "lock_on_toggle=" << (s.lockOnToggle ? 1 : 0) << '\n';
   out << "sticky_charge=" << (s.stickyCharge ? 1 : 0) << '\n';
+  out << "stasis=" << (s.stasis ? 1 : 0) << '\n';
+  out << "stasis_slow=" << s.stasisSlow << '\n';
+  out << "stasis_duration=" << s.stasisDuration << '\n';
   out << "rapid_charge=" << (s.rapidCharge ? 1 : 0) << '\n';
   out << "remastered_movement=" << (s.remasteredMovement ? 1 : 0) << '\n';
 }

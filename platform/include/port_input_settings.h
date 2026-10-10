@@ -30,6 +30,14 @@ constexpr float kTouchButtonInsetDefault = 0.f;
 constexpr std::size_t kTouchLayoutMaxLen = 4096;
 // SDL_SCANCODE_LSHIFT (SDL3), the default beam-shift key; debug_ui.cpp checks it.
 constexpr int kScancodeLShift = 225;
+// Dead Space Prime's Stasis (port_dead_space.h): how slow a held enemy runs, as a
+// fraction of normal speed, and how long a hold lasts, in seconds.
+constexpr float kStasisSlowMin = 0.05f;
+constexpr float kStasisSlowMax = 0.5f;
+constexpr float kStasisSlowDefault = 0.15f;
+constexpr float kStasisDurationMin = 1.f;
+constexpr float kStasisDurationMax = 15.f;
+constexpr float kStasisDurationDefault = 5.f;
 
 struct Settings {
   bool mouseAim = false;
@@ -41,6 +49,10 @@ struct Settings {
   bool stickyCharge = false;
   bool rapidCharge = false;
   bool remasteredMovement = true;
+  // Dead Space Prime: Stasis, off by default.
+  bool stasis = false;
+  float stasisSlow = kStasisSlowDefault;
+  float stasisDuration = kStasisDurationDefault;
   bool springFlick = false;
   float springFlickRate = 6.f;
   float stickAimRate = 900.f;

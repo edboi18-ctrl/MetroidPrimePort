@@ -51,6 +51,7 @@
 // Port: drives the streamed-audio AI DMA callback (see platform/ai_dma.cpp).
 extern "C" void AIPortPoll(void);
 #include "port_console.h"
+#include "port_dead_space.h"
 #include "port_speedrun_timer.h"
 #ifdef MP_ENABLE_SMOKE_DRIVER
 #include "port_smoke.h"
@@ -1089,6 +1090,7 @@ int CMain::RsMain(int argc, const char* const* argv) {
         aurora::phase::set(aurora::phase::Main, "game draw");
         archSupport->GetIOWinManager().Draw();
         CCameraManager::SetPresentationInterpolation(-1.f);
+        PortDeadSpace::DrawHud();
         PortSpeedrunTimer::Draw();
         DrawDebugMetrics(t1, archSupport->GetStopwatch2());
 

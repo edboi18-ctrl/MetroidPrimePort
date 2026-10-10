@@ -316,6 +316,16 @@ bool TouchTurboFire();
 // Morph Ball Bombs are held. A connected Archipelago seed overrides it.
 bool SpringBall();
 void SetSpringBall(bool enabled);
+// Dead Space Prime's Stasis (port_dead_space.h): press Stasis while locked on and
+// the target runs slow for a while. Off by default and under Original experience.
+bool Stasis();
+void SetStasis(bool enabled);
+// A held enemy's speed as a fraction of normal, and how long a hold lasts in
+// seconds; the setters clamp to PortInput::kStasisSlow* / kStasisDuration*.
+float StasisSlow();
+void SetStasisSlow(float fraction);
+float StasisDuration();
+void SetStasisDuration(float seconds);
 // The Scan and X-Ray visors trade D-pad directions (Remastered's Dual Sticks
 // layout), off by default.
 bool SwapScanXray();
@@ -533,6 +543,9 @@ bool BeamRequested(int beam);
 // save-state hotkeys (1 save, 2 load; F5/F9 send the same).
 void RequestSpringBall();
 bool SpringBallRequested();
+// One Stasis press, used by the game's next tick (PortDeadSpace::Tick).
+void RequestStasis();
+bool ConsumeStasisRequest();
 void RequestSaveStateHotkey(int which);
 bool TouchMapTap();
 void SetTouchMapTap(bool on);

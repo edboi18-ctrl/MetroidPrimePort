@@ -39,6 +39,7 @@
 #include "MetroidPrime/Weapons/CProjectileInfo.hpp"
 #include "dolphin/gx/GXStruct.h"
 #include "dolphin/types.h"
+#include "port_dead_space.h"
 
 const float CPatterned::skDamageHitTime = 0.33f;
 const float CPatterned::skActorApproachDistance = 3.f;
@@ -1300,6 +1301,13 @@ void CPatterned::PreRender(CStateManager& mgr, const CFrustumPlanes& frustum) {
     if (xray) {
       alpha = 76;
     }
+  }
+
+  // Dead Space Prime: a Stasis-held enemy glows blue. Opaque models only: the
+  // branch below draws a non-black color with the damage flash's blend mode,
+  // which adds it to the lit model, while a fading model's color modulates.
+  if (alpha == 255) {
+    PortDeadSpace::Tint(GetUniqueId(), color);
   }
 
   if (alpha < 255) {

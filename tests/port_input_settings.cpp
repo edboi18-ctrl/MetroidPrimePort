@@ -62,6 +62,24 @@ int main() {
   ApplySetting("mouse_right", "not_an_action");
   Check(Text() == before, "unknown mouse action ignored");
 
+  // Dead Space Prime's Stasis: off by default, its two numbers held to their ranges.
+  Check(!Get().stasis && Get().stasisSlow == kStasisSlowDefault &&
+            Get().stasisDuration == kStasisDurationDefault,
+        "stasis defaults");
+  Check(defaults.find("stasis=0\nstasis_slow=0.15\nstasis_duration=5\n") != std::string::npos,
+        "stasis lines");
+  Check(ApplySetting("stasis", "1") && Get().stasis, "stasis");
+  Check(ApplySetting("stasis_slow", "0.25") && Get().stasisSlow == 0.25f, "stasis_slow");
+  ApplySetting("stasis_slow", "0.9");
+  Check(Get().stasisSlow == 0.25f, "stasis_slow above range");
+  ApplySetting("stasis_slow", "0");
+  Check(Get().stasisSlow == 0.25f, "stasis_slow below range");
+  Check(ApplySetting("stasis_duration", "8") && Get().stasisDuration == 8.f, "stasis_duration");
+  ApplySetting("stasis_duration", "0.5");
+  Check(Get().stasisDuration == 8.f, "stasis_duration below range");
+  ApplySetting("stasis_duration", "nan");
+  Check(Get().stasisDuration == 8.f, "stasis_duration not a number");
+
   // Touch layout.
   Check(ApplySetting("touch_layout", "1:0.5,0.5,1") && TouchLayout() == "1:0.5,0.5,1", "touch_layout");
   Check(!SetTouchLayout(std::string(kTouchLayoutMaxLen + 1, 'x')), "touch layout length");
