@@ -770,10 +770,46 @@ void CPlayer::UpdateGunTransform(const CVector3f& gunPos, CStateManager& mgr) {
     break;
   }
 
+#ifdef TARGET_PC
+  // Dead Space Prime's gun sway leans the gun about its own origin, and its aim with it, so shots
+  // follow the crosshair, which leans the same way (CTargetReticles).
+  if (mPortGunSway.Yaw() != 0.f || mPortGunSway.Pitch() != 0.f) {
+    gunXf = PortGunLean(camXf) * gunXf.GetRotation();
+    gunXf.SetTranslation(viewGunPos);
+  }
+#endif
   x490_gun->SetTransform(gunXf);
   CTransform4f out = gunXf;
   UpdateAimTargetPrediction(out, mgr);
   UpdateAssistedAiming(out, mgr);
+}
+
+// Dead Space Prime's gun sway: follows the first-person view's turn each tick, and straightens
+// whenever the gun isn't Samus's own first-person view (morph ball, a cinematic, a camera of the
+// level's), so it starts afresh from the next view.
+void CPlayer::PortUpdateGunSway(float dt, CStateManager& mgr) {
+  const float maxRadians = PortDebug::GunSway() * (M_PIF / 180.f);
+  if (maxRadians <= 0.f || x2f8_morphBallState != kMS_Unmorphed ||
+      GetCameraState() != kCS_FirstPerson || !mgr.GetCameraManager()->IsInFPCamera() ||
+      mgr.GetCameraManager()->IsInCinematicCamera()) {
+    mPortGunSway.Reset();
+    return;
+  }
+  const CVector3f forward = mgr.GetCameraManager()->GetCurrentCameraTransform(mgr).GetColumn(kDY);
+  mPortGunSway.Update(forward.GetX(), forward.GetY(), forward.GetZ(), dt, maxRadians);
+}
+
+CTransform4f CPlayer::PortGunLean(const CTransform4f& camXf) const {
+  if (mPortGunSway.Yaw() == 0.f && mPortGunSway.Pitch() == 0.f) {
+    return CTransform4f::Identity();
+  }
+  // Yaw about the view's up axis, then pitch about its right axis.
+  const CQuaternion lean =
+      CQuaternion::AxisAngle(CUnitVector3f(camXf.GetColumn(kDZ), CUnitVector3f::kN_Yes),
+                             CRelAngle::FromRadians(mPortGunSway.Yaw())) *
+      CQuaternion::AxisAngle(CUnitVector3f(camXf.GetColumn(kDX), CUnitVector3f::kN_Yes),
+                             CRelAngle::FromRadians(mPortGunSway.Pitch()));
+  return lean.BuildTransform4f();
 }
 
 const CTransform4f& CPlayer::GetFirstPersonCameraTransform(CStateManager& mgr) const {
@@ -3295,6 +3331,7 @@ void CPlayer::DoPostCameraStuff(float dt, CStateManager& mgr) {
     x9c4_25_showCrosshairs = PortDebug::MouseCrosshair();
     if (PortDebug::AimInitialized()) x3ec_freeLookPitchAngle = PortDebug::AimPitch();
   }
+  PortUpdateGunSway(dt, mgr);
   UpdateArmAndGunTransforms(dt, mgr);
 
   float grappleSwingT;

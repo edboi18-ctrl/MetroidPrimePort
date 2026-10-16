@@ -3,7 +3,8 @@
 This branch (`dead-space-prime`) of the Metroid Prime native port adds Dead
 Space mechanics to Metroid Prime, keeping Prime's own controls and HUD. Each
 addition is off by default except a slightly faster walk (see
-[Walk speed](#walk-speed)), and **Original experience** turns that off too.
+[Walk speed](#walk-speed)) and the gun's sway (see [Gun sway](#gun-sway)), and
+**Original experience** turns those off too.
 
 Everything else about the port, including building, running and its other
 options, is in [README.md](README.md) and [docs/NATIVE_PORT.md](docs/NATIVE_PORT.md).
@@ -181,15 +182,17 @@ key instead.
   back, left or right, relative to where she faces. Holding a key never
   dashes, and a key of another direction pressed in between starts over.
 - Keyboard only: a stick flicked twice doesn't dash.
-- The dash is a straight burst, 30 m/s easing to 14 m/s over 0.3 s (about
-  6.7 m; it was 26 to 10 m/s over 0.28 s, about 5.2 m), slower in water and
-  the like as walking is, but never slower than Samus walks there. It has
-  retail's dash sound and rumble. A wall ends it. You can jump out of it, dash
-  once in the air per jump, and dash again 0.35 s after the last. Locked on,
-  retail's dash works as before.
-- **Dash speed** (F1 > Game > Dead Space, 75-150%) scales both speeds, and so
-  the distance, since the dash always lasts 0.3 s: 75% covers about 5.1 m and
-  150% about 10.1 m.
+- The dash is a straight burst lasting 0.3 s. At the default **Dash speed**
+  of 130% it goes from 39 m/s easing to 18.2 m/s, about 8.7 m. It is slower in
+  water and the like as walking is, but never slower than Samus walks there.
+  It has retail's dash sound and rumble. A wall ends it. You can jump out of
+  it, dash once in the air per jump, and dash again 0.35 s after the last.
+  Locked on, retail's dash works as before.
+- **Dash speed** (F1 > Game > Dead Space, 75-150%, 130% by default) scales
+  both speeds, and so the distance, since the dash always lasts 0.3 s. At 100%
+  it goes from 30 to 14 m/s, about 6.7 m; 75% covers about 5.1 m and 150%
+  about 10.1 m. The first version was 26 to 10 m/s over 0.28 s, about 5.2 m;
+  130% is what felt right in play.
 - The rest are constants, to be tuned in play: `kPortDashTime`,
   `kPortDashStartSpeed`, `kPortDashEndSpeed` and `kPortDashCooldown` in
   `src/MetroidPrime/Player/CPlayerDynamics.cpp`, and `kWindowMs` in
@@ -219,6 +222,29 @@ of the original game's by default, from 100% to 150%, saved as `walk_speed`.
   term that doesn't change, so it goes up by 15% of the tweak's top speed: a
   little more than 15% of her actual speed.
 
+## Gun sway
+
+As in Metroid Prime Hunters, the arm cannon leans the way you turn, and the
+crosshair leans with it: shots still go to the crosshair. **Gun sway** (F1 >
+Game > Dead Space) is the most it leans, 3 degrees by default, from 0 (off) to
+10, saved as `gun_sway`. **Original experience** turns it off.
+
+- It leans left, right, up or down, toward the turn, in proportion to how fast
+  the view turns: all the way at 180 degrees a second or faster. When the turn
+  stops it settles back to centre.
+- It follows the turn smoothly, closing 63% of the gap every 0.08 s, at any
+  tick rate. A view that jumps more than about 29 degrees in one tick (a cut
+  or a teleport) doesn't move it, and morph ball, cinematics and level
+  cameras reset it.
+- The gun turns about its own origin. Its aim turns with it, so shots,
+  missiles and their seeking (manual aim) and the Stasis throw all go along
+  the leaned crosshair.
+- For scale: on a screen showing 90 degrees across, a 3 degree lean moves the
+  crosshair about 2.6% of the screen's width from centre (tan 3 degrees =
+  0.052, over the 2 x tan 45 degrees = 2 the screen spans).
+- `kFullTurnRate`, `kFollowTime` and `kCutAngle` are in
+  `platform/include/port_gun_sway.h`.
+
 ## Where the code is
 
 | File | What it does |
@@ -227,6 +253,7 @@ of the original game's by default, from 100% to 150%, saved as `walk_speed`.
 | `platform/include/port_dead_space.h`, `platform/port_dead_space.cpp` | Ties it to the game: picks the target, flies and draws the charge and its burst, scales the held enemy's time step, its glow, what the meter shows, and its label's text. |
 | `platform/include/port_dead_space_sound.h`, `platform/port_dead_space_sound.cpp` | Plays your own WAV files for the throw and the hit through an SDL audio stream of their own (covered by `tests/port_dead_space_sound.cpp`). |
 | `platform/include/port_double_tap.h`, `platform/port_double_tap.cpp` | Spots a movement key double-tapped (covered by `tests/port_double_tap.cpp`). |
+| `platform/include/port_gun_sway.h`, `platform/port_gun_sway.cpp` | The gun sway's lean from each tick's view direction (covered by `tests/port_gun_sway.cpp`). |
 | `platform/include/port_input_engine.h` | The `stasis` action in the binding engine. |
 | `platform/input/port_input_devices.cpp` | Routes the Stasis action and adds its default bindings, and feeds the keyboard's movement keys to the double-tap check. |
 | `platform/include/port_input_settings.h`, `platform/port_input_settings.cpp` | The settings and their `port_settings.ini` lines (covered by `tests/port_input_settings.cpp`). |
@@ -234,7 +261,8 @@ of the original game's by default, from 100% to 150%, saved as `walk_speed`.
 | `src/MetroidPrime/CStateManager.cpp` | Runs Stasis each tick, scales a held enemy's `PreThink`, `Think` and collision move, and draws the charges after the rooms. |
 | `src/MetroidPrime/Player/CGrappleArm.cpp`, `include/MetroidPrime/Player/CGrappleArm.hpp` | The throw: the grapple animations in order, and the charge let go at the thrust's projectile event. |
 | `src/MetroidPrime/Player/CPlayerOrbit.cpp` | Points the throwing hand at the enemy; manual aim's limits on lock-on and the aim assist. |
-| `src/MetroidPrime/Player/CPlayerDynamics.cpp`, `src/MetroidPrime/Player/CPlayer.cpp`, `include/MetroidPrime/Player/CPlayer.hpp` | The double-tap dash, and the walk speed (`PortWalkMaxSpeed`, `PortWalkAcceleration`). |
+| `src/MetroidPrime/Player/CPlayerDynamics.cpp`, `src/MetroidPrime/Player/CPlayer.cpp`, `include/MetroidPrime/Player/CPlayer.hpp` | The double-tap dash, the walk speed (`PortWalkMaxSpeed`, `PortWalkAcceleration`), and the gun sway (`PortUpdateGunSway`, `PortGunLean`, applied in `UpdateGunTransform`). |
+| `src/MetroidPrime/CTargetReticles.cpp` | Leans the crosshair with the gun. |
 | `src/MetroidPrime/Player/CPlayerGun.cpp` | Draws the throwing hand, and keeps the suit's right arm drawn while it throws; under manual aim, has missiles, Super Missiles and the Wave Beam seek the target nearest the crosshair. |
 | `src/MetroidPrime/Enemies/CPatterned.cpp` | The glow, in `PreRender`. |
 | `src/GuiSys/CAuiEnergyBarT01.cpp`, `include/GuiSys/CAuiEnergyBarT01.hpp` | Draws the meter and its label along the energy bar, inside the bar's own draw. |

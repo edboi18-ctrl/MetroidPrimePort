@@ -46,7 +46,12 @@ constexpr float kWalkSpeedMax = 1.5f;
 constexpr float kWalkSpeedDefault = 1.15f;
 constexpr float kDashSpeedMin = 0.75f;
 constexpr float kDashSpeedMax = 1.5f;
-constexpr float kDashSpeedDefault = 1.f;
+constexpr float kDashSpeedDefault = 1.3f;
+// Dead Space Prime's gun sway: the most the arm cannon leans toward a turn, in
+// degrees (port_gun_sway.h); 0 keeps it still.
+constexpr float kGunSwayMin = 0.f;
+constexpr float kGunSwayMax = 10.f;
+constexpr float kGunSwayDefault = 3.f;
 
 struct Settings {
   bool mouseAim = false;
@@ -66,9 +71,10 @@ struct Settings {
   // points, no aim assist) and dashing on a double-tapped movement key; off.
   bool manualAim = false;
   bool doubleTapDash = false;
-  // Dead Space Prime: a faster walk, on by default, and the dash's speed.
+  // Dead Space Prime: a faster walk and the gun's sway, on by default, and the dash's speed.
   float walkSpeed = kWalkSpeedDefault;
   float dashSpeed = kDashSpeedDefault;
+  float gunSway = kGunSwayDefault;
   bool springFlick = false;
   float springFlickRate = 6.f;
   float stickAimRate = 900.f;

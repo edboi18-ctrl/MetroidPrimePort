@@ -207,6 +207,11 @@ bool ApplySetting(std::string_view keyView, std::string_view valueView) {
     if (std::isfinite(f) && f >= kDashSpeedMin && f <= kDashSpeedMax) {
       s.dashSpeed = f;
     }
+  } else if (key == "gun_sway") {
+    const float f = ParseFloat(value);
+    if (std::isfinite(f) && f >= kGunSwayMin && f <= kGunSwayMax) {
+      s.gunSway = f;
+    }
   } else if (key == "spring_ball_flick") {
     s.springFlick = ParseBool(value);
   } else if (key == "spring_ball_flick_rate") {
@@ -262,6 +267,7 @@ void WriteGameplaySettings(std::ostream& out) {
   out << "double_tap_dash=" << (s.doubleTapDash ? 1 : 0) << '\n';
   out << "walk_speed=" << s.walkSpeed << '\n';
   out << "dash_speed=" << s.dashSpeed << '\n';
+  out << "gun_sway=" << s.gunSway << '\n';
   out << "rapid_charge=" << (s.rapidCharge ? 1 : 0) << '\n';
   out << "remastered_movement=" << (s.remasteredMovement ? 1 : 0) << '\n';
 }

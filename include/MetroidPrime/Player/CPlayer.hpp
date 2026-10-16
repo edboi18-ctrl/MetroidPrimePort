@@ -15,6 +15,8 @@
 #include "rstl/auto_ptr.hpp"
 #include "rstl/vector.hpp"
 
+#include "port_gun_sway.h"
+
 class CPlayerGun;
 class CMorphBall;
 class CPlayerCameraBob;
@@ -520,6 +522,12 @@ public:
   void PortStartDash(int direction, CStateManager& mgr);
   bool PortUpdateDash(float dt);
   void PortEndDash();
+  // Dead Space Prime's gun sway (PortDebug::GunSway): once a tick, follows the view's turn.
+  void PortUpdateGunSway(float dt, CStateManager& mgr);
+  // The sway's lean, a rotation in the world for the view `camXf` (identity when straight). The
+  // gun, its aim and the crosshair all lean by it, as in Metroid Prime Hunters, so shots still go
+  // to the crosshair.
+  CTransform4f PortGunLean(const CTransform4f& camXf) const;
 
   float GetAttachedActorStruggle() const;
   CPlayerEnergyDrain& GetPlayerEnergyDrain() { return x274_energyDrain; }
@@ -750,6 +758,7 @@ private:
   float mPortDashTime;          // seconds left of the dash; 0 when not dashing
   float mPortDashCooldown;
   bool mPortAirDashUsed; // one dash a jump
+  PortGunSway::State mPortGunSway;
 };
 NESTED_CHECK_SIZEOF(CPlayer, CPlayerStuckTracker, 0x2e0);
 CHECK_SIZEOF(CPlayer, (VERSION >= VERSION_GM8P_00 ? 0xa48 : 0xa38))

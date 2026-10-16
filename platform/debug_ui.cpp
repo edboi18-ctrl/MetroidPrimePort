@@ -1779,6 +1779,18 @@ void SetDashSpeed(float scale) {
   MarkDirty();
 }
 
+float GunSway() {
+  EnsureInitialized();
+  return sOriginalExperience ? 0.f : sInput.gunSway;
+}
+
+void SetGunSway(float degrees) {
+  EnsureInitialized();
+  if (!std::isfinite(degrees)) return;
+  sInput.gunSway = std::clamp(degrees, PortInput::kGunSwayMin, PortInput::kGunSwayMax);
+  MarkDirty();
+}
+
 bool SwapScanXray() {
   EnsureInitialized();
   return sInput.swapScanXray && !TouchActive() && !sOriginalExperience;
@@ -6151,8 +6163,9 @@ void DrawControlsOptions() {
                          PortInput::kDashSpeedMax * 100.f, "%.0f%%")) {
     SetDashSpeed(dashPercent / 100.f);
   }
-  ItemHelp("How fast the double-tap dash goes, and so how far: it always lasts 0.3 s, and at 100% "
-           "it covers about 6.7 m, starting at 30 m/s. It never goes slower than you walk.");
+  ItemHelp("How fast the double-tap dash goes, and so how far: it always lasts 0.3 s. At 130%, the "
+           "default, it covers about 8.7 m, starting at 39 m/s; at 100%, about 6.7 m. It never goes "
+           "slower than you walk.");
   ImGui::EndDisabled();
   float walkPercent = sInput.walkSpeed * 100.f;
   if (ImGui::SliderFloat("Walk speed", &walkPercent, PortInput::kWalkSpeedMin * 100.f,
@@ -6162,6 +6175,15 @@ void DrawControlsOptions() {
   ItemHelp("Samus's top walking speed, on foot, in any direction and in the air, as a share of "
            "the original game's. She reaches it as quickly as she reaches the original speed. "
            "Morph ball is unchanged.");
+  float gunSway = sInput.gunSway;
+  if (ImGui::SliderFloat("Gun sway", &gunSway, PortInput::kGunSwayMin, PortInput::kGunSwayMax,
+                         "%.1f degrees")) {
+    SetGunSway(gunSway);
+  }
+  ItemHelp("As in Metroid Prime Hunters, the arm cannon leans the way you turn, left, right, up or "
+           "down, and settles back when you stop: this far at most, reached when turning 180 "
+           "degrees a second. The crosshair leans with it and shots go to the crosshair; Stasis "
+           "and seeking shots aim along it too. 0 turns it off.");
   EndOriginalLocked(locked);
 }
 
@@ -7876,7 +7898,7 @@ void DrawOriginalSection() {
   ItemHelp("Plays the game as on the GameCube: 640x480 at 4:3, 60 Hz with no interpolation, no "
            "mods, the retail HUD, font, button icons, FOV and cutscenes, and none of the gameplay extras (spring ball, "
            "fast morph, charge and lock-on options, turbo fire, unlocks, Dead Space's Stasis, "
-           "manual aim, double-tap dash and the faster walk). "
+           "manual aim, double-tap dash, the faster walk and gun sway). "
            "The other settings keep "
            "their values and come back when it's turned off. Controls, cheats, save states, the "
            "randomizer, Archipelago and the timer still work.");

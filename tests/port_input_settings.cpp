@@ -89,11 +89,14 @@ int main() {
   Check(ApplySetting("double_tap_dash", "1") && Get().doubleTapDash, "double_tap_dash");
   Check(ApplySetting("manual_aim", "0") && !Get().manualAim, "manual_aim off");
 
-  // Dead Space Prime's walk and dash speeds: a faster walk by default, both held to their ranges.
-  Check(Get().walkSpeed == kWalkSpeedDefault && Get().dashSpeed == kDashSpeedDefault,
-        "walk and dash speed defaults");
-  Check(defaults.find("double_tap_dash=0\nwalk_speed=1.15\ndash_speed=1\n") != std::string::npos,
-        "walk and dash speed lines");
+  // Dead Space Prime's walk and dash speeds and gun sway: a faster walk, a 130% dash and a 3
+  // degree sway by default, each held to its range.
+  Check(Get().walkSpeed == kWalkSpeedDefault && Get().dashSpeed == kDashSpeedDefault &&
+            Get().gunSway == kGunSwayDefault,
+        "walk, dash and sway defaults");
+  Check(defaults.find("double_tap_dash=0\nwalk_speed=1.15\ndash_speed=1.3\ngun_sway=3\n") !=
+            std::string::npos,
+        "walk, dash and sway lines");
   Check(ApplySetting("walk_speed", "1.3") && Get().walkSpeed == 1.3f, "walk_speed");
   ApplySetting("walk_speed", "0.5");
   Check(Get().walkSpeed == 1.3f, "walk_speed below range");
@@ -102,6 +105,12 @@ int main() {
   Check(ApplySetting("dash_speed", "1.25") && Get().dashSpeed == 1.25f, "dash_speed");
   ApplySetting("dash_speed", "2");
   Check(Get().dashSpeed == 1.25f, "dash_speed above range");
+  Check(ApplySetting("gun_sway", "0") && Get().gunSway == 0.f, "gun_sway off");
+  Check(ApplySetting("gun_sway", "5.5") && Get().gunSway == 5.5f, "gun_sway");
+  ApplySetting("gun_sway", "11");
+  Check(Get().gunSway == 5.5f, "gun_sway above range");
+  ApplySetting("gun_sway", "-1");
+  Check(Get().gunSway == 5.5f, "gun_sway below range");
 
   // Touch layout.
   Check(ApplySetting("touch_layout", "1:0.5,0.5,1") && TouchLayout() == "1:0.5,0.5,1", "touch_layout");

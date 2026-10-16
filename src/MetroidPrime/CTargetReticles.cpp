@@ -1287,6 +1287,12 @@ CVector3f CCompoundTargetReticle::CalculateOrbitZoneReticlePosition(const CState
   if (lag) {
     fwd = x10_laggingOrientation.Transform(fwd);
   }
+#ifdef TARGET_PC
+  else {
+    // Dead Space Prime's gun sway: the crosshair leans with the gun and its shots.
+    fwd = mgr.GetPlayer()->PortGunLean(camXf).Rotate(fwd);
+  }
+#endif
 
   return camXf.GetTranslation() + dist * fwd;
 }

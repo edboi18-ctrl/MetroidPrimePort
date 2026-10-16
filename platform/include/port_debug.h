@@ -343,6 +343,11 @@ float WalkSpeed();
 void SetWalkSpeed(float scale);
 float DashSpeed();
 void SetDashSpeed(float scale);
+// Dead Space Prime's gun sway: the most the arm cannon leans toward a turn, in
+// degrees (port_gun_sway.h); 0 under Original experience. The setter clamps to
+// PortInput::kGunSway*.
+float GunSway();
+void SetGunSway(float degrees);
 // The Scan and X-Ray visors trade D-pad directions (Remastered's Dual Sticks
 // layout), off by default.
 bool SwapScanXray();

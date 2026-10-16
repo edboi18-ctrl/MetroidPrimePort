@@ -262,13 +262,19 @@ TUniqueId FirstEnemyOnLine(CStateManager& mgr, const CVector3f& from, const CVec
   return best;
 }
 
+// Where the crosshair points from the view `cam`: straight ahead, leaned with the gun when it
+// sways (CPlayer::PortGunLean). A unit vector.
+CVector3f AimForward(const CStateManager& mgr, const CTransform4f& cam) {
+  return mgr.GetPlayer()->PortGunLean(cam).Rotate(cam.GetForward()).AsNormalized();
+}
+
 // Manual aim: the live enemy the crosshair is on, if any - the nearest the crosshair's line
 // meets, before a wall, within kAimTolerance of its body - and where a throw lands: on it,
 // else on the first wall along the line, or kAimRange out.
 TUniqueId CrosshairTarget(CStateManager& mgr, CVector3f& aimPoint) {
   const CTransform4f& cam = mgr.GetCameraManager()->GetCurrentCamera(mgr).GetTransform();
   const CVector3f eye = cam.GetTranslation();
-  const CVector3f dir = cam.GetForward().AsNormalized();
+  const CVector3f dir = AimForward(mgr, cam);
   const CRayCastResult wall = mgr.RayStaticIntersection(eye, dir, kAimRange, SightFilter());
   const float reach = wall.IsInvalid() ? kAimRange : wall.GetTime();
   aimPoint = eye + dir * reach;
@@ -615,7 +621,7 @@ bool ThrowSoundReplacesArm() {
 TUniqueId SeekTarget(CStateManager& mgr) {
   const CTransform4f& cam = mgr.GetCameraManager()->GetCurrentCamera(mgr).GetTransform();
   const CVector3f eye = cam.GetTranslation();
-  const CVector3f dir = cam.GetForward().AsNormalized();
+  const CVector3f dir = AimForward(mgr, cam);
   const float radians = kSeekAngle * 0.017453293f;
   const float minCosine = std::cos(radians);
   // Everything targetable near the cone: the box around its axis, as wide as its far end.
@@ -661,7 +667,7 @@ CVector3f ThrowDirection(const CStateManager& mgr, const CVector3f& from) {
     const CVector3f toGoal = ToVec(sArmGoal) - from;
     if (toGoal.CanBeNormalized()) return toGoal.AsNormalized();
   }
-  return mgr.GetCameraManager()->GetCurrentCamera(mgr).GetTransform().GetForward();
+  return AimForward(mgr, mgr.GetCameraManager()->GetCurrentCamera(mgr).GetTransform());
 }
 
 void DrawWorldEffects(const CStateManager& mgr) {
