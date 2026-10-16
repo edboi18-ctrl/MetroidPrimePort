@@ -88,6 +88,8 @@ CHudEnergyInterface::CHudEnergyInterface(CGuiFrame& hud, float energy, int total
   const CTweakGuiColors::SPerVisorColors& colors = gpTweakGuiColors->GetVisorColors(x0_hudType);
   x2c_energybart01_energybar->SetCoordFunc(skEnergyCoordFuncs[x0_hudType]);
   x2c_energybart01_energybar->SetTesselation(skEnergyTesselations[x0_hudType]);
+  // Dead Space Prime: the Stasis meter is drawn along this bar, outside morph ball.
+  x2c_energybart01_energybar->PortSetStasisMeter(x0_hudType != kHT_Ball);
   x20_textpane_energydigits->TextSupport().SetFontColor(colors.x14_energyDigitsFont);
   x20_textpane_energydigits->TextSupport().SetOutlineColor(colors.x18_energyDigitsOutline);
   x2c_energybart01_energybar->SetMaxEnergy(CPlayerState::GetBaseHealthCapacity());

@@ -11,6 +11,7 @@
 #include "rstl/math.hpp"
 #include "rstl/pair.hpp"
 
+#include "port_dead_space.h"
 #include "port_hud_bars.h"
 
 #include <cstdio>
@@ -50,7 +51,8 @@ CAuiEnergyBarT01::CAuiEnergyBarT01(const CGuiWidgetParms& parms, IObjectStore* s
 , mShadowEnergy(0.f)
 , mShadowDrainDelayTimer(0.f)
 , mPortBar(nullptr)
-, mPortBarLooked(false) {
+, mPortBarLooked(false)
+, mPortStasisMeter(false) {
   if (CGuiSys::GetGlobalGuiSys()->GetUsageMode() != CGuiSys::kUM_Two) {
     mTexture = sp->GetObj(SObjectTag('TXTR', mTextureId));
     mTexture->Lock();
@@ -274,7 +276,106 @@ void CAuiEnergyBarT01::Draw(const CGuiWidgetDrawParms& parms) const {
     }
     CGraphics::StreamEnd();
   }
+  // Dead Space Prime: drawn here, it shares the bar's transform (HUD lag, HUD scale, the
+  // widescreen layout), its blend, depth test and fades. A mod's bar shape has no curve to
+  // follow.
+  if (mPortStasisMeter && !portBar && PortDeadSpace::StasisMeterVisible()) {
+    PortDrawStasis(parms, color);
+  }
   CGraphics::SetDepthWriteMode(true, kE_LEqual, true);
+}
+
+// The Stasis strip's edges at t: the bar's own pair moved to its inside, past the edge with
+// the lower z (below a level bar, within X-Ray's arc), by kStasisGap of the bar's thickness,
+// and kStasisThickness of it thick. The edge nearer the bar comes first.
+static const float kStasisGap = 0.3f;
+static const float kStasisThickness = 0.5f;
+// Half the notch between two uses' worth of meter, in t.
+static const float kStasisNotch = 0.006f;
+// The label: its line's height and its distance past the strip's end, in bar thicknesses,
+// and how far back from the end, in t, the strip's direction there is taken.
+static const float kStasisLabelHeight = 1.f;
+static const float kStasisLabelGap = 0.5f;
+static const float kStasisLabelLook = 0.02f;
+
+rstl::pair< CVector3f, CVector3f > CAuiEnergyBarT01::PortStasisEdges(float t) const {
+  const rstl::pair< CVector3f, CVector3f > bar = mCoordFunc(t);
+  const bool firstHigher = bar.first.GetZ() >= bar.second.GetZ();
+  const CVector3f& top = firstHigher ? bar.first : bar.second;
+  const CVector3f& bottom = firstHigher ? bar.second : bar.first;
+  const CVector3f across = top - bottom;
+  return rstl::pair< CVector3f, CVector3f >(bottom - across * kStasisGap,
+                                            bottom - across * (kStasisGap + kStasisThickness));
+}
+
+void CAuiEnergyBarT01::PortDrawStasisSpan(float from, float to, const CColor& color) const {
+  if (to <= from) {
+    return;
+  }
+  // At least 0.05: CGraphics's stream holds 160 positions (see PortDrawBar).
+  const float step = rstl::max_val(mTesselation, 0.05f);
+  CGraphics::StreamBegin(kP_TriangleStrip);
+  CGraphics::StreamColor(color);
+  for (float t = from;; t = rstl::min_val(t + step, to)) {
+    const rstl::pair< CVector3f, CVector3f > edges = PortStasisEdges(t);
+    CGraphics::StreamTexcoord(t, 0.f);
+    CGraphics::StreamVertex(edges.first);
+    CGraphics::StreamTexcoord(t, 1.f);
+    CGraphics::StreamVertex(edges.second);
+    if (t >= to) {
+      break;
+    }
+  }
+  CGraphics::StreamEnd();
+}
+
+void CAuiEnergyBarT01::PortDrawStasis(const CGuiWidgetDrawParms& parms, const CColor& tint) const {
+  CTexture* tex = mTexture->GetObject();
+  const float alpha = parms.GetAlpha();
+  const float meter = PortDeadSpace::StasisMeterFraction();
+  const CColor filled =
+      CColor::Modulate(tint, PortDeadSpace::StasisMeterColor().WithAlphaModulatedBy(alpha));
+  const CColor empty =
+      CColor::Modulate(tint, CColor::Lerp(mEmptyColor, PortDeadSpace::StasisRefusedColor(),
+                                          PortDeadSpace::StasisRefusedFlash())
+                                 .WithAlphaModulatedBy(alpha));
+
+  CGraphics::SetTevOp(kTS_Stage0, CGraphics::kEnvModulate);
+  CGraphics::SetTevOp(kTS_Stage1, CGraphics::kEnvPassthru);
+  tex->Load(GX_TEXMAP0, CTexture::kCM_Repeat);
+  // A segment per use's worth of meter, notched apart.
+  const float step = PortDeadSpace::StasisMeterStep();
+  for (float from = 0.f; from < 1.f; from += step) {
+    const float start = from > 0.f ? from + kStasisNotch : 0.f;
+    const float end = from + step < 1.f ? from + step - kStasisNotch : 1.f;
+    PortDrawStasisSpan(start, rstl::min_val(end, meter), filled);
+    PortDrawStasisSpan(rstl::max_val(start, meter), end, empty);
+  }
+
+  // The label carries on past the strip's end, along the strip's direction there and upright
+  // on its surface, so on a curved bar it follows the curve as the strip does.
+  const rstl::pair< CVector3f, CVector3f > bar = mCoordFunc(1.f);
+  const float thickness = (bar.first - bar.second).Magnitude();
+  const rstl::pair< CVector3f, CVector3f > end = PortStasisEdges(1.f);
+  const rstl::pair< CVector3f, CVector3f > back = PortStasisEdges(1.f - kStasisLabelLook);
+  const CVector3f middle = (end.first + end.second) * 0.5f;
+  CVector3f along = middle - (back.first + back.second) * 0.5f;
+  if (!along.IsMagnitudeSafe()) {
+    return;
+  }
+  along = along.AsNormalized();
+  CVector3f up = end.first - end.second;
+  up = up - along * CVector3f::Dot(up, along);
+  if (!up.IsMagnitudeSafe()) {
+    return;
+  }
+  up = up.AsNormalized();
+  const float height = thickness * kStasisLabelHeight;
+  const CVector3f topLeft = middle + along * (thickness * kStasisLabelGap) + up * (height * 0.5f);
+  PortDeadSpace::DrawStasisLabel(
+      GetWorldTransform() *
+          CTransform4f::FromColumns(along, CVector3f::Cross(up, along), up, topLeft),
+      height, filled);
 }
 
 float CAuiEnergyBarT01::GetActualFraction() const {

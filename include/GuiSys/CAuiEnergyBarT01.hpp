@@ -53,10 +53,17 @@ public:
 
   // Port: the strip a mod gives this bar in place of mCoordFunc, if any (port_hud_bars.h).
   const PortHudBars::Bar* PortBar() const;
+  // Port: Dead Space Prime's Stasis meter rides along this bar (port_dead_space.h). Set on
+  // the player's energy bar in every visor but morph ball, by CHudEnergyInterface.
+  void PortSetStasisMeter(bool on) { mPortStasisMeter = on; }
 
 private:
   void PortDrawBar(const PortHudBars::Bar& bar, float from, float to,
                    const CColor& color) const;
+  // The Stasis meter: a thinner strip along the inside of this bar, and its label.
+  void PortDrawStasis(const CGuiWidgetDrawParms& parms, const CColor& tint) const;
+  void PortDrawStasisSpan(float from, float to, const CColor& color) const;
+  rstl::pair< CVector3f, CVector3f > PortStasisEdges(float t) const;
 
   CAssetId mTextureId;                                        // 0xb8
   rstl::optional_object< TCachedToken< CTexture > > mTexture; // 0xbc
@@ -79,6 +86,7 @@ private:
   mutable std::shared_ptr< const void > mPortBars;
   mutable const PortHudBars::Bar* mPortBar;
   mutable bool mPortBarLooked;
+  bool mPortStasisMeter;
 };
 
 #endif // _CAUIENERGYBART01

@@ -1,6 +1,6 @@
-// Dead Space Prime's Stasis in the game (port_dead_space.h). The meter is drawn
-// the way PortSpeedrunTimer draws the in-game time: after the frame's IOWins,
-// with the game's own font, here in the HUD's missile-bar colours.
+// Dead Space Prime's Stasis in the game (port_dead_space.h). The meter is drawn by
+// CAuiEnergyBarT01, along the player's energy bar in the helmet HUD; this says what
+// it shows and draws its label in the game's own font.
 #include "port_dead_space.h"
 
 #include "port_debug.h"
@@ -11,20 +11,18 @@
 #include "Kyoto/CSimplePool.hpp"
 #include "Kyoto/Graphics/CColor.hpp"
 #include "Kyoto/Graphics/CGraphics.hpp"
+#include "Kyoto/Math/CTransform4f.hpp"
 #include "Kyoto/TToken.hpp"
 #include "Kyoto/Text/CDrawStringOptions.hpp"
 #include "Kyoto/Text/CRasterFont.hpp"
 #include "Kyoto/Text/CTextColor.hpp"
 #include "Kyoto/Text/CTextRenderBuffer.hpp"
-#include "MetaRender/CCubeRenderer.hpp"
 #include "MetroidPrime/CStateManager.hpp"
-#include "MetroidPrime/Cameras/CCameraManager.hpp"
 #include "MetroidPrime/Enemies/CPatterned.hpp"
 #include "MetroidPrime/Player/CPlayer.hpp"
 #include "MetroidPrime/SFX/UI.h"
 #include "MetroidPrime/TCastTo.hpp"
 #include "MetroidPrime/TGameTypes.hpp"
-#include "MetroidPrime/Tweaks/CTweakGuiColors.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -43,18 +41,13 @@ const float kRefusedFlashTime = 0.4f;
 const uchar kGlowRed = 24;
 const uchar kGlowGreen = 96;
 const uchar kGlowBlue = 220;
+// The meter's charge, and its empty part's flash after a refused press. The HUD
+// draws both additively, tinted and faded with the energy bar.
+const CColor kMeterColor(static_cast< uchar >(90), 170, 255, 255);
 const CColor kRefusedColor(static_cast< uchar >(255), 64, 48, 255);
-
-// The meter, as fractions of the viewport: its width, height, and how far its
-// bottom edge sits above the screen's.
-const float kBarWidth = 0.2f;
-const float kBarHeight = 0.011f;
-const float kBarBottom = 0.07f;
-const float kLabelGap = 4.f;
 
 TCachedToken< CRasterFont >* sFont = nullptr;
 CTextRenderBuffer* sLabel = nullptr;
-int sLabelWidth = 0;
 int sLabelHeight = 0;
 
 PortStasis::Tuning CurrentTuning() {
@@ -98,12 +91,8 @@ void Blip(ushort sfx) {
                         CSfxManager::kAllAreas);
 }
 
-int Advance(const CRasterFont& font, wchar_t c) {
-  const CGlyph* glyph = font.GetGlyph(c);
-  return glyph != nullptr ? glyph->GetA() + glyph->GetB() + glyph->GetC() : 0;
-}
-
-// "STASIS" in the HUD font, laid out once the font has loaded.
+// "STASIS" in the HUD font, laid out once the font has loaded: its rows run down
+// from 0 at the top of the line to sLabelHeight.
 bool BuildLabel() {
   if (sLabel != nullptr) return true;
   if (gpResourceFactory == nullptr || gpSimplePool == nullptr) return false;
@@ -132,33 +121,8 @@ bool BuildLabel() {
     int yOut = 0;
     font.DrawString(options, 0, font.GetBaseLine(), xOut, yOut, sLabel, kText, length);
   }
-  sLabelWidth = 0;
-  for (int i = 0; i < length; ++i) sLabelWidth += Advance(font, kText[i]);
   sLabelHeight = font.GetMonoHeight();
   return true;
-}
-
-// An axis-aligned box in the z-up ortho view SetViewportOrtho(false, ...) gives.
-void Box(float left, float bottom, float right, float top, const CColor& color) {
-  gpRender->BeginTriangleStrip(4);
-  gpRender->PrimColor(color);
-  gpRender->PrimVertex(CVector3f(left, 0.f, top));
-  gpRender->PrimVertex(CVector3f(left, 0.f, bottom));
-  gpRender->PrimVertex(CVector3f(right, 0.f, top));
-  gpRender->PrimVertex(CVector3f(right, 0.f, bottom));
-  gpRender->EndPrimitive();
-}
-
-// The meter shows in plain gameplay: not on the pause or map screens, in a
-// cinematic, in morph ball or once Samus is dead.
-bool HudVisible(const CStateManager& mgr) {
-  if (&mgr != sOwner || mgr.GetGameState() != CStateManager::kGS_Running) return false;
-  if (PortDebug::PauseScreenOpen() || PortDebug::MapScreenOpen()) return false;
-  const CCameraManager* cameras = mgr.GetCameraManager();
-  if (cameras == nullptr || cameras->IsInCinematicCamera()) return false;
-  const CPlayer* player = mgr.GetPlayer();
-  return player != nullptr && player->GetDeathTime() <= 0.f &&
-         player->GetMorphballTransitionState() == CPlayer::kMS_Unmorphed;
 }
 
 } // namespace
@@ -223,52 +187,35 @@ void Reset() {
   sRefusedFlash = 0.f;
 }
 
-void DrawHud() {
-  if (!PortDebug::Stasis() || gpRender == nullptr || gpTweakGuiColors == nullptr) return;
+bool StasisMeterVisible() {
+  if (!PortDebug::Stasis()) return false;
   const CStateManager* mgr = PortDebug::StateManager();
-  if (mgr == nullptr || !HudVisible(*mgr)) return;
+  if (mgr == nullptr || mgr != sOwner) return false;
+  const CPlayer* player = mgr->GetPlayer();
+  return player != nullptr && player->GetDeathTime() <= 0.f;
+}
 
-  const float width = static_cast< float >(CGraphics::GetViewportWidth());
-  const float height = static_cast< float >(CGraphics::GetViewportHeight());
-  const float barWidth = std::round(width * kBarWidth);
-  const float barHeight = std::max(4.f, std::round(height * kBarHeight));
-  const float left = std::round((width - barWidth) * 0.5f);
-  const float bottom = std::round(height * kBarBottom);
-  const float top = bottom + barHeight;
-  const float edge = std::max(1.f, std::round(barHeight * 0.25f));
-  const CColor& filled = gpTweakGuiColors->GetMissileBarFilled();
-  const CColor& shadow = gpTweakGuiColors->GetMissileBarShadow();
-  const CColor empty = CColor::Lerp(gpTweakGuiColors->GetMissileBarEmpty(), kRefusedColor,
-                                    sRefusedFlash / kRefusedFlashTime);
+float StasisMeterFraction() {
+  return std::clamp(sStasis.Meter() / PortStasis::kMeterMax, 0.f, 1.f);
+}
 
-  gpRender->SetViewportOrtho(false, -4096.f, 4096.f);
-  CGraphics::SetCullMode(kCM_None);
-  gpRender->SetDepthReadWrite(false, false);
+float StasisMeterStep() {
+  const float step = CurrentTuning().cost / PortStasis::kMeterMax;
+  return step > 0.f ? std::clamp(step, 0.1f, 1.f) : 1.f;
+}
 
-  if (BuildLabel()) {
-    gpRender->SetModelMatrix(
-        CTransform4f::Translate(std::round((width - static_cast< float >(sLabelWidth)) * 0.5f), 0.f,
-                                top + edge + kLabelGap + static_cast< float >(sLabelHeight)) *
-        CTransform4f::Scale(CVector3f(1.f, 1.f, -1.f)));
-    sLabel->Render(filled, 0.f);
-  }
+float StasisRefusedFlash() { return std::clamp(sRefusedFlash / kRefusedFlashTime, 0.f, 1.f); }
 
-  gpRender->SetModelMatrix(CTransform4f::Identity());
-  CGraphics::SetBlendMode(kBM_Blend, kBF_SrcAlpha, kBF_InvSrcAlpha, kLO_Clear);
-  Box(left - edge, bottom - edge, left + barWidth + edge, top + edge, shadow);
-  Box(left, bottom, left + barWidth, top, empty);
-  const float fill = sStasis.Meter() / PortStasis::kMeterMax;
-  if (fill > 0.f) {
-    Box(left, bottom, left + std::round(barWidth * fill), top, filled);
-  }
-  // A notch at each use's worth of meter.
-  const float cost = PortStasis::Tuning().cost;
-  if (cost > 0.f) {
-    for (float at = cost; at < PortStasis::kMeterMax; at += cost) {
-      const float x = std::round(left + barWidth * at / PortStasis::kMeterMax);
-      Box(x - std::max(1.f, edge * 0.5f), bottom, x + std::max(1.f, edge * 0.5f), top, shadow);
-    }
-  }
+const CColor& StasisMeterColor() { return kMeterColor; }
+
+const CColor& StasisRefusedColor() { return kRefusedColor; }
+
+void DrawStasisLabel(const CTransform4f& topLeft, float height, const CColor& color) {
+  if (!BuildLabel() || sLabelHeight <= 0) return;
+  const float scale = height / static_cast< float >(sLabelHeight);
+  // The rows run down, as CGuiTextSupport::Render flips them for a text pane.
+  CGraphics::SetModelMatrix(topLeft * CTransform4f::Scale(scale, 1.f, -scale));
+  sLabel->Render(color, 0.f);
 }
 
 } // namespace PortDeadSpace
