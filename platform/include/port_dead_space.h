@@ -24,6 +24,9 @@ void Tick(CStateManager& mgr, float dt);
 // the palm's position (null: from beside the view). With the arm busy, the
 // charge leaves at once. It homes in on its target and holds it on arrival.
 void ReleaseThrow(CStateManager& mgr, const CVector3f* hand);
+// Whether the throw has the player's own fire sound (port_dead_space_sound.h),
+// in which case the throwing arm's grapple sounds are left out.
+bool ThrowSoundReplacesArm();
 // Which way the throwing hand points from `from`: at what it throws at, else
 // along the view. A unit vector.
 CVector3f ThrowDirection(const CStateManager& mgr, const CVector3f& from);

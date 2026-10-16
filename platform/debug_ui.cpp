@@ -4,6 +4,7 @@
 
 #include "port_env.h"
 #include "port_collision_view.h"
+#include "port_dead_space_sound.h"
 #include "port_debug.h"
 #include "port_freecam.h"
 #include "port_hd_font.h"
@@ -6038,9 +6039,10 @@ void DrawControlsOptions() {
     SetStasis(stasis);
   }
   ItemHelp("From Dead Space: press Stasis (R on the keyboard; LB on a controller, or L3 when LB is "
-           "taken; rebind it under Controls > Remap) and the enemy you are locked on to, or the "
-           "one your shots would home in on, slows down and glows blue for a few seconds. Each "
-           "use spends half the meter at the bottom of the screen, which refills over time.");
+           "taken; rebind it under Controls > Remap) and Samus throws a charge with her left hand "
+           "at the enemy you are locked on to, or the one your shots would home in on. Where it "
+           "lands, the enemy slows down and glows blue for a few seconds. Each throw spends half "
+           "the meter under the energy bar, which refills over time.");
   ImGui::BeginDisabled(!sInput.stasis);
   float stasisPercent = sInput.stasisSlow * 100.f;
   if (ImGui::SliderFloat("Stasis speed", &stasisPercent, PortInput::kStasisSlowMin * 100.f,
@@ -6051,6 +6053,19 @@ void DrawControlsOptions() {
   if (ImGui::SliderFloat("Stasis duration", &stasisDuration, PortInput::kStasisDurationMin,
                          PortInput::kStasisDurationMax, "%.1f s")) {
     SetStasisDuration(stasisDuration);
+  }
+  {
+    using PortDeadSpaceSound::ECue;
+    const auto found = [](ECue cue) { return PortDeadSpaceSound::Available(cue) ? "found" : "none"; };
+    ImGui::TextDisabled("Sounds: %s %s, %s %s", PortDeadSpaceSound::FileName(ECue::StasisFire),
+                        found(ECue::StasisFire), PortDeadSpaceSound::FileName(ECue::StasisHit),
+                        found(ECue::StasisHit));
+    const std::string help =
+        "Your own WAV files for the throw and the hit, from your copy of Dead Space; none come "
+        "with the port, as Dead Space's sounds are EA's. Put them in " +
+        PortDeadSpaceSound::Folder() +
+        ". Without them, the grapple arm's sound plays for the throw and a HUD blip for the hit.";
+    ItemHelp(help.c_str());
   }
   ImGui::EndDisabled();
   EndOriginalLocked(locked);

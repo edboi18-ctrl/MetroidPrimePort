@@ -4,6 +4,7 @@
 // CGrappleArm's; the charge and its burst are drawn here, as additive light.
 #include "port_dead_space.h"
 
+#include "port_dead_space_sound.h"
 #include "port_debug.h"
 #include "port_stasis.h"
 
@@ -25,6 +26,8 @@
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
 #include "MetroidPrime/Cameras/CGameCamera.hpp"
 #include "MetroidPrime/Enemies/CPatterned.hpp"
+#include "MetroidPrime/Player/CGameOptions.hpp"
+#include "MetroidPrime/Player/CGameState.hpp"
 #include "MetroidPrime/Player/CGrappleArm.hpp"
 #include "MetroidPrime/Player/CPlayer.hpp"
 #include "MetroidPrime/Player/CPlayerGun.hpp"
@@ -195,11 +198,28 @@ void ClearThrows() {
   sArmGoalSet = false;
 }
 
+// The game's sound-effect volume (Options > Sound), 0..1, for the player's own
+// Dead Space sounds (port_dead_space_sound.h).
+float SfxGain() {
+  if (gpGameState == nullptr) return 1.f;
+  return std::clamp(static_cast< float >(gpGameState->GameOptions().GetSfxVolume()) / 127.f, 0.f,
+                    1.f);
+}
+
+// Quieter with distance from the camera: full within 10 m, down to a third by 35 m.
+float DistanceGain(const CStateManager& mgr, const float at[3]) {
+  const CVector3f eye = mgr.GetCameraManager()->GetCurrentCamera(mgr).GetTranslation();
+  const float distance = (ToVec(at) - eye).Magnitude();
+  return std::clamp(1.4f - distance / 25.f, 0.35f, 1.f);
+}
+
 void Launch(Throw& t, const CVector3f& from) {
   t.flying = true;
   t.age = 0.f;
   SetVec(t.pos, from);
   t.trailCount = 0;
+  // Without a file of the player's own, the throwing arm's grapple sounds are what's heard.
+  PortDeadSpaceSound::Play(PortDeadSpaceSound::ECue::StasisFire, SfxGain());
 }
 
 // A burst about the size of `enemy`.
@@ -276,7 +296,10 @@ void UpdateThrows(CStateManager& mgr, float dt, const PortStasis::Tuning& tuning
     if (PortStasis::StepToward(t.pos, t.goal, kThrowSpeed * dt)) {
       if (enemy != nullptr) {
         sStasis.Hold(t.target, tuning);
-        Blip(SFXui_x_freeon_00);
+        if (!PortDeadSpaceSound::Play(PortDeadSpaceSound::ECue::StasisHit,
+                                      SfxGain() * DistanceGain(mgr, t.goal))) {
+          Blip(SFXui_x_freeon_00);
+        }
         AddBurst(t.goal, BurstRadius(*enemy), true);
       } else {
         AddBurst(t.goal, 0.5f, false);
@@ -460,6 +483,10 @@ void ReleaseThrow(CStateManager& mgr, const CVector3f* hand) {
       return;
     }
   }
+}
+
+bool ThrowSoundReplacesArm() {
+  return PortDeadSpaceSound::Available(PortDeadSpaceSound::ECue::StasisFire);
 }
 
 CVector3f ThrowDirection(const CStateManager& mgr, const CVector3f& from) {

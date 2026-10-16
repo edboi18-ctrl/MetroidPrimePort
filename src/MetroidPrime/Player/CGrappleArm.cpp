@@ -485,10 +485,12 @@ void CGrappleArm::DoUserAnimEvents(CStateManager& mgr) {
   const CGameCamera& camera = mgr.GetCameraManager()->GetCurrentCamera(mgr);
   const CVector3f origin = x220_xf.GetTranslation();
   const CVector3f posToCam = camera.GetTranslation() - origin;
+  // Dead Space Prime: a Stasis throw with the player's own fire sound leaves the grapple's out.
+  const bool portQuiet = mPortThrow && PortDeadSpace::ThrowSoundReplacesArm();
   int soundCount = 0;
   const CSoundPOINode* soundNodes =
       x0_grappleArmModel->AnimationData()->GetSoundPOIList(soundCount);
-  if (soundCount > 0) {
+  if (soundCount > 0 && !portQuiet) {
     for (int i = 0; i < soundCount; ++i) {
       const CSoundPOINode& soundNode = soundNodes[i];
       const int charIdx = soundNode.GetCharacterIndex();
@@ -511,9 +513,9 @@ void CGrappleArm::DoUserAnimEvents(CStateManager& mgr) {
         DoUserAnimEvent(mgr, intNode, static_cast< EUserEventType >(intNode.GetValue()));
         break;
       case kPT_SoundInt32:
-        if (intNode.GetCharacterIndex() == -1 ||
-            intNode.GetCharacterIndex() ==
-                x0_grappleArmModel->AnimationData()->GetCharacterIndex()) {
+        if (!portQuiet && (intNode.GetCharacterIndex() == -1 ||
+                           intNode.GetCharacterIndex() ==
+                               x0_grappleArmModel->AnimationData()->GetCharacterIndex())) {
           NWeaponTypes::do_sound_event(x34c_animSfx, x3ac_pitchBend, false, intNode.GetValue(),
                                        intNode.GetWeight(), intNode.GetFlags(), 0.1f, 150.f, 0x14,
                                        CAudioSys::kMaxVolume, posToCam, origin, aid, mgr);

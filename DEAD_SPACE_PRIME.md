@@ -65,6 +65,32 @@ and with the scan visor, not in morph ball, menus or the map.
 - Up to 8 enemies can be held at once. Holding a held enemy again starts its
   time over.
 
+**Sounds from Dead Space:** the throw and the hit can play Dead Space's own
+Stasis sounds, from WAV files you take from your own copy of the game. None
+come with the port: they are EA's, so they can't be shared, and they stay on
+your PC.
+
+1. Next to `metroid_prime_port.exe` there is a `user` folder (it holds
+   `port_settings.ini`). Make a folder `dead_space` inside it.
+2. Put the two sounds there as `stasis_fire.wav` (the charge leaving the hand)
+   and `stasis_hit.wav` (the charge catching its enemy). Any WAV that SDL reads
+   works: PCM or ADPCM, any sample rate, mono or stereo.
+3. F1 > Game > Dead Space shows each as found or none. A file added while the
+   game runs is picked up within a couple of seconds.
+
+Dead Space keeps its audio in EA's own formats. [vgmstream](https://github.com/vgmstream/vgmstream)
+reads many of them ([its format list](https://github.com/vgmstream/vgmstream/blob/master/doc/FORMATS.md)
+has EA's SCHl, SNR/SNS, SPS, ABK and MPF/MUS containers) and converts to WAV
+from the command line, as in its [usage notes](https://github.com/vgmstream/vgmstream/blob/master/doc/USAGE.md):
+`vgmstream-cli -o stasis_fire.wav <file>`. Which of your copy's files holds the
+Stasis sounds depends on the version of Dead Space and isn't covered here; an
+editor such as Audacity can cut the right part out to its own WAV.
+
+They play at the game's sound effect volume (Options > Sound), and the hit is
+quieter the farther away it lands. Without a file, the throw keeps the grapple
+arm's own sound and the hit keeps the HUD blip; with a fire sound, the grapple
+arm's is left out.
+
 **Tuning:** F1 > Game > Dead Space has sliders for the speed (5-50% of normal)
 and the duration (1-15 s). They are saved in `port_settings.ini`:
 
@@ -120,6 +146,7 @@ press), because they are always loaded during play.
 |---|---|
 | `platform/include/port_stasis.h`, `platform/port_stasis.cpp` | The arithmetic: meter, throws and holds, ease-out, the charge's flight step. No game code, so `tests/port_stasis.cpp` tests it alone. |
 | `platform/include/port_dead_space.h`, `platform/port_dead_space.cpp` | Ties it to the game: picks the target, flies and draws the charge and its burst, scales the held enemy's time step, its glow, what the meter shows, and its label's text. |
+| `platform/include/port_dead_space_sound.h`, `platform/port_dead_space_sound.cpp` | Plays your own WAV files for the throw and the hit through an SDL audio stream of their own (covered by `tests/port_dead_space_sound.cpp`). |
 | `platform/include/port_input_engine.h` | The `stasis` action in the binding engine. |
 | `platform/input/port_input_devices.cpp` | Routes the action and adds the default bindings. |
 | `platform/include/port_input_settings.h`, `platform/port_input_settings.cpp` | The three settings and their `port_settings.ini` lines (covered by `tests/port_input_settings.cpp`). |
