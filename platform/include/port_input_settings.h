@@ -53,6 +53,10 @@ struct Settings {
   bool stasis = false;
   float stasisSlow = kStasisSlowDefault;
   float stasisDuration = kStasisDurationDefault;
+  // Dead Space Prime: manual aim (lock-on only for the scan visor and grapple
+  // points, no aim assist) and dashing on a double-tapped movement key; off.
+  bool manualAim = false;
+  bool doubleTapDash = false;
   bool springFlick = false;
   float springFlickRate = 6.f;
   float stickAimRate = 900.f;

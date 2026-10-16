@@ -514,6 +514,12 @@ public:
   bool SidewaysDashAllowed(float strafeInput, float forwardInput, const CFinalInput& input,
                           CStateManager& mgr) const;
   void ComputeDash(const CFinalInput& input, float dt, CStateManager& mgr);
+  // Dead Space Prime: the double-tap dash (PortDebug::DoubleTapDash), straight and without a
+  // lock-on. Start takes a PortDoubleTap direction; Update carries Samus while it lasts and says
+  // whether it did this tick.
+  void PortStartDash(int direction, CStateManager& mgr);
+  bool PortUpdateDash(float dt);
+  void PortEndDash();
 
   float GetAttachedActorStruggle() const;
   CPlayerEnergyDrain& GetPlayerEnergyDrain() { return x274_energyDrain; }
@@ -740,6 +746,10 @@ private:
   float xa28_attachedActorStruggle;
   int xa2c_damageLoopSfxDelayTicks;
   float xa30_samusExhaustedVoiceTimer;
+  CVector3f mPortDashDirection; // flat, in the world
+  float mPortDashTime;          // seconds left of the dash; 0 when not dashing
+  float mPortDashCooldown;
+  bool mPortAirDashUsed; // one dash a jump
 };
 NESTED_CHECK_SIZEOF(CPlayer, CPlayerStuckTracker, 0x2e0);
 CHECK_SIZEOF(CPlayer, (VERSION >= VERSION_GM8P_00 ? 0xa48 : 0xa38))

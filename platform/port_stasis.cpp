@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <utility>
 
 namespace PortStasis {
 namespace {
@@ -39,6 +41,10 @@ int State::Find(uint16_t target) const {
 
 EResult State::Throw(uint16_t target, const Tuning& tuning) {
   if (target == kNoTarget) return EResult::NoTarget;
+  return Spend(tuning);
+}
+
+EResult State::Spend(const Tuning& tuning) {
   const Tuning t = Sane(tuning);
   if (mMeter < t.cost) return EResult::NoEnergy;
   mMeter -= t.cost;
@@ -109,6 +115,32 @@ void State::Release(uint16_t target) {
 
 void State::SetMeter(float meter) {
   mMeter = std::isfinite(meter) ? Clamp(meter, 0.f, kMeterMax) : 0.f;
+}
+
+float RayBoxDistance(const float origin[3], const float dir[3], const float lo[3],
+                     const float hi[3], float pad) {
+  float nearT = 0.f;
+  float farT = std::numeric_limits< float >::infinity();
+  for (int i = 0; i < 3; ++i) {
+    const float a = lo[i] - pad;
+    const float b = hi[i] + pad;
+    if (!std::isfinite(a) || !std::isfinite(b) || !std::isfinite(origin[i]) ||
+        !std::isfinite(dir[i]) || a > b) {
+      return -1.f;
+    }
+    if (std::fabs(dir[i]) < 1e-6f) {
+      // Parallel to these faces: in between them or never.
+      if (origin[i] < a || origin[i] > b) return -1.f;
+      continue;
+    }
+    float t1 = (a - origin[i]) / dir[i];
+    float t2 = (b - origin[i]) / dir[i];
+    if (t1 > t2) std::swap(t1, t2);
+    nearT = std::max(nearT, t1);
+    farT = std::min(farT, t2);
+    if (nearT > farT) return -1.f;
+  }
+  return nearT;
 }
 
 bool StepToward(float pos[3], const float goal[3], float step) {

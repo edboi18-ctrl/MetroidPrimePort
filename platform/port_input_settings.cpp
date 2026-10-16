@@ -193,6 +193,10 @@ bool ApplySetting(std::string_view keyView, std::string_view valueView) {
     if (std::isfinite(f) && f >= kStasisDurationMin && f <= kStasisDurationMax) {
       s.stasisDuration = f;
     }
+  } else if (key == "manual_aim") {
+    s.manualAim = ParseBool(value);
+  } else if (key == "double_tap_dash") {
+    s.doubleTapDash = ParseBool(value);
   } else if (key == "spring_ball_flick") {
     s.springFlick = ParseBool(value);
   } else if (key == "spring_ball_flick_rate") {
@@ -244,6 +248,8 @@ void WriteGameplaySettings(std::ostream& out) {
   out << "stasis=" << (s.stasis ? 1 : 0) << '\n';
   out << "stasis_slow=" << s.stasisSlow << '\n';
   out << "stasis_duration=" << s.stasisDuration << '\n';
+  out << "manual_aim=" << (s.manualAim ? 1 : 0) << '\n';
+  out << "double_tap_dash=" << (s.doubleTapDash ? 1 : 0) << '\n';
   out << "rapid_charge=" << (s.rapidCharge ? 1 : 0) << '\n';
   out << "remastered_movement=" << (s.remasteredMovement ? 1 : 0) << '\n';
 }

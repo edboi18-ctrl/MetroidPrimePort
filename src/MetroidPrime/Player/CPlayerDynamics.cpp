@@ -260,6 +260,78 @@ void CPlayer::FinishSidewaysDash() {
   x384_dashTimer = 0.f;
 }
 
+// Dead Space Prime's double-tap dash. Retail's dash circles a lock-on; this one goes straight
+// whichever way was tapped: a burst from kPortDashStartSpeed easing to kPortDashEndSpeed (metres a
+// second) over kPortDashTime, slowed in water and the like as walking is. One a jump in the air,
+// and a short rest between dashes.
+static const float kPortDashTime = 0.28f;
+static const float kPortDashStartSpeed = 26.f;
+static const float kPortDashEndSpeed = 10.f;
+static const float kPortDashCooldown = 0.35f;
+
+void CPlayer::PortStartDash(int direction, CStateManager& mgr) {
+  if (!PortDebug::DoubleTapDash() || direction < 0 || direction > 3 || mPortDashTime > 0.f ||
+      mPortDashCooldown > 0.f || x304_orbitState != kOS_NoOrbit ||
+      x2f8_morphBallState != kMS_Unmorphed || x3b8_grappleState != kGS_None || GetFrozenState() ||
+      x760_controlsFrozen || !mgr.GetPlayerState()->IsAlive()) {
+    return;
+  }
+  const bool onGround = x258_movementState == NPlayer::kMS_OnGround;
+  if (!onGround && mPortAirDashUsed) {
+    return;
+  }
+  // PortDoubleTap's order: forward, back, left, right; x is right and y forward.
+  static const float kLocal[4][2] = {{0.f, 1.f}, {0.f, -1.f}, {-1.f, 0.f}, {1.f, 0.f}};
+  CVector3f dir = GetTransform().Rotate(CVector3f(kLocal[direction][0], kLocal[direction][1], 0.f));
+  dir.SetZ(0.f);
+  if (!dir.CanBeNormalized()) {
+    return;
+  }
+  mPortDashDirection = dir.AsNormalized();
+  mPortDashTime = kPortDashTime;
+  if (!onGround) {
+    mPortAirDashUsed = true;
+  }
+  // Retail's dash sound and rumble.
+  x778_dashSfx = CSfxManager::SfxStart(SFXsam_b_jump_03, 127, 64, true);
+  DoSfxEffects(x778_dashSfx);
+  mgr.GetRumbleManager()->Rumble(mgr, kRFX_PlayerBump, 0.24375f, kRP_One);
+}
+
+bool CPlayer::PortUpdateDash(float dt) {
+  mPortDashCooldown = CMath::Max(0.f, mPortDashCooldown - dt);
+  if (x258_movementState == NPlayer::kMS_OnGround) {
+    mPortAirDashUsed = false;
+  }
+  if (mPortDashTime <= 0.f) {
+    return false;
+  }
+  // A wall, a lock-on, a grapple, morphing or freezing ends it.
+  if (x9c5_29_hitWall || x304_orbitState != kOS_NoOrbit || x2f8_morphBallState != kMS_Unmorphed ||
+      x3b8_grappleState != kGS_None || GetFrozenState()) {
+    PortEndDash();
+    return false;
+  }
+  const float progress = 1.f - mPortDashTime / kPortDashTime;
+  const float normalMax = gpTweakPlayer->GetPlayerTranslationMaxSpeed(kSR_Normal);
+  const float surfaceMax = gpTweakPlayer->GetPlayerTranslationMaxSpeed(GetSurfaceRestraint());
+  const float surface = normalMax > 0.f ? CMath::Clamp(0.f, surfaceMax / normalMax, 1.f) : 1.f;
+  const float speed =
+      surface * (kPortDashStartSpeed + (kPortDashEndSpeed - kPortDashStartSpeed) * progress);
+  SetVelocityWR(CVector3f(mPortDashDirection.GetX() * speed, mPortDashDirection.GetY() * speed,
+                          GetVelocityWR().GetZ()));
+  mPortDashTime -= dt;
+  if (mPortDashTime <= 0.f) {
+    PortEndDash();
+  }
+  return true;
+}
+
+void CPlayer::PortEndDash() {
+  mPortDashTime = 0.f;
+  mPortDashCooldown = kPortDashCooldown;
+}
+
 void CPlayer::ComputeDash(const CFinalInput& input, float dt, CStateManager& mgr) {
   const float strafeInput = StrafeInput(input);
   const float forwardInput = ForwardInput(input, TurnInput(input));
@@ -539,7 +611,19 @@ void CPlayer::ComputeMovement(const CFinalInput& input, CStateManager& mgr, floa
   if (x304_orbitState != kOS_NoOrbit && gkFreeLookPreventsOrbitMovement && x3dd_lookButtonHeld) {
     forwardForce = 0.f;
   }
-  if (x304_orbitState == kOS_NoOrbit || x3dd_lookButtonHeld) {
+  // Dead Space Prime: a double-tapped movement key dashes, and the dash carries Samus itself
+  // while it lasts; jumping and turning still work.
+  const int portDash = PortDebug::ConsumeDashRequest();
+  if (portDash >= 0) {
+    PortStartDash(portDash, mgr);
+  }
+  if (PortUpdateDash(dt)) {
+    ApplyForceOR(CVector3f(0.f, 0.f, jumpInput), CAxisAngle::Identity());
+    if (turnInput != 0.f) {
+      ApplyForceOR(CVector3f::Zero(),
+                   CAxisAngle(CUnitVector3f(0.f, 0.f, 1.f, CUnitVector3f::kN_Yes), turnInput));
+    }
+  } else if (x304_orbitState == kOS_NoOrbit || x3dd_lookButtonHeld) {
     const CVector3f force(strafeForce, forwardForce, jumpInput);
     ApplyForceOR(force, CAxisAngle::Identity());
     if (turnInput != 0.f) {

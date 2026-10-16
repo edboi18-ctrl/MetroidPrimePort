@@ -223,6 +223,48 @@ int main() {
     CHECK(pos[0] == 3.f);
   }
 
+  // A throw at no one (manual aim) pays the same, and only with the meter for it.
+  {
+    State s;
+    CHECK(s.Spend(t) == EResult::Thrown);
+    CHECK(Near(s.Meter(), 50.f));
+    CHECK(s.HeldCount() == 0);
+    s.SetMeter(10.f);
+    CHECK(s.Spend(t) == EResult::NoEnergy);
+    CHECK(Near(s.Meter(), 10.f));
+  }
+
+  // Aiming by hand: a ray against an enemy's box, grown by the aim tolerance.
+  {
+    const float origin[3] = {0.f, 0.f, 0.f};
+    const float ahead[3] = {0.f, 1.f, 0.f};
+    const float lo[3] = {-0.5f, 10.f, -1.f};
+    const float hi[3] = {0.5f, 11.f, 1.f};
+    CHECK(Near(PortStasis::RayBoxDistance(origin, ahead, lo, hi, 0.f), 10.f));
+    CHECK(Near(PortStasis::RayBoxDistance(origin, ahead, lo, hi, 0.5f), 9.5f));
+    // 0.3 m beside the box: a miss for the box itself, a hit once grown by 0.5 m,
+    // and still a miss 0.8 m beside it.
+    const float beside[3] = {0.8f, 0.f, 0.f};
+    CHECK(PortStasis::RayBoxDistance(beside, ahead, lo, hi, 0.f) < 0.f);
+    CHECK(Near(PortStasis::RayBoxDistance(beside, ahead, lo, hi, 0.5f), 9.5f));
+    const float farBeside[3] = {1.3f, 0.f, 0.f};
+    CHECK(PortStasis::RayBoxDistance(farBeside, ahead, lo, hi, 0.5f) < 0.f);
+    // Behind the origin, and pointing away: misses.
+    const float back[3] = {0.f, -1.f, 0.f};
+    CHECK(PortStasis::RayBoxDistance(origin, back, lo, hi, 0.f) < 0.f);
+    // Inside the box: distance 0.
+    const float inside[3] = {0.f, 10.5f, 0.f};
+    CHECK(PortStasis::RayBoxDistance(inside, ahead, lo, hi, 0.f) == 0.f);
+    // A diagonal ray through the box's corner region.
+    const float diag[3] = {0.f, 0.70710678f, 0.70710678f};
+    const float loUp[3] = {-0.5f, 10.f, 9.f};
+    const float hiUp[3] = {0.5f, 11.f, 11.f};
+    CHECK(Near(PortStasis::RayBoxDistance(origin, diag, loUp, hiUp, 0.f), 14.142f, 0.01f));
+    // Bad numbers miss rather than hit.
+    const float nan3[3] = {std::nanf(""), 0.f, 0.f};
+    CHECK(PortStasis::RayBoxDistance(nan3, ahead, lo, hi, 0.f) < 0.f);
+  }
+
   std::puts("stasis: all checks passed");
   return 0;
 }

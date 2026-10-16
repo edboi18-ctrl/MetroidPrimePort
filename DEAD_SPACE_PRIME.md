@@ -140,6 +140,54 @@ there is no curve to follow.
 The sounds are the HUD's free-look blips (on for a hold, off for a refused
 press), because they are always loaded during play.
 
+## Manual aim
+
+For keyboard and mouse: aim by hand, as in Dead Space, instead of locking on.
+
+**Turn it on:** F1 > Game > Dead Space > **Manual aim**. It is meant for mouse
+aim (F1 > Controls), where the crosshair follows the mouse.
+
+- Lock-on reaches only what the Scan Visor scans and grapple points. In the
+  combat, thermal and X-ray visors enemies can't be locked onto, and an empty
+  lock-on press does nothing (it would otherwise hold a point to strafe
+  around). A scan lock on an enemy lets go when you leave the Scan Visor.
+- Shots go where the crosshair is: the game's aim assist, which turns shots
+  toward a nearby enemy even without a lock-on, is off. Missiles and the Wave
+  Beam don't home without a lock-on either.
+- Stasis is thrown along the crosshair at the nearest enemy it points at, before
+  any wall, allowing 0.5 m beside its body. Pointed at none, the charge flies to
+  where the crosshair is (the first wall, or 60 m out) and is spent, as in Dead
+  Space; an enemy it passes through on the way still catches it.
+
+Prime's enemies and bosses were designed around lock-on, so some fights will
+need playtesting and changes to be fair this way; Stasis may help with some.
+
+## Double-tap dash
+
+Retail's dash needs a lock-on: jump while strafing around the locked target.
+With manual aim there is no lock-on, so this dashes on a double-tapped movement
+key instead.
+
+**Turn it on:** F1 > Game > Dead Space > **Double-tap dash**.
+
+- Tap a movement key twice within 0.25 s (the keys bound to the stick
+  directions, W, A, S and D by default) and Samus dashes that way: forward,
+  back, left or right, relative to where she faces. Holding a key never
+  dashes, and a key of another direction pressed in between starts over.
+- Keyboard only: a stick flicked twice doesn't dash.
+- The dash is a straight burst, 26 m/s easing to 10 m/s over 0.28 s (about
+  5 m), slower in water and the like as walking is, with retail's dash sound
+  and rumble. A wall ends it. You can jump out of it, dash once in the air per
+  jump, and dash again 0.35 s after the last. Locked on, retail's dash works as
+  before.
+- These numbers are first guesses, to be tuned in play: `kPortDashTime`,
+  `kPortDashStartSpeed`, `kPortDashEndSpeed` and `kPortDashCooldown` in
+  `src/MetroidPrime/Player/CPlayerDynamics.cpp`, and `kWindowMs` in
+  `platform/include/port_double_tap.h`.
+
+Both are off by default and under **Original experience**, and saved in
+`port_settings.ini` as `manual_aim` and `double_tap_dash`.
+
 ## Where the code is
 
 | File | What it does |
@@ -147,13 +195,15 @@ press), because they are always loaded during play.
 | `platform/include/port_stasis.h`, `platform/port_stasis.cpp` | The arithmetic: meter, throws and holds, ease-out, the charge's flight step. No game code, so `tests/port_stasis.cpp` tests it alone. |
 | `platform/include/port_dead_space.h`, `platform/port_dead_space.cpp` | Ties it to the game: picks the target, flies and draws the charge and its burst, scales the held enemy's time step, its glow, what the meter shows, and its label's text. |
 | `platform/include/port_dead_space_sound.h`, `platform/port_dead_space_sound.cpp` | Plays your own WAV files for the throw and the hit through an SDL audio stream of their own (covered by `tests/port_dead_space_sound.cpp`). |
+| `platform/include/port_double_tap.h`, `platform/port_double_tap.cpp` | Spots a movement key double-tapped (covered by `tests/port_double_tap.cpp`). |
 | `platform/include/port_input_engine.h` | The `stasis` action in the binding engine. |
-| `platform/input/port_input_devices.cpp` | Routes the action and adds the default bindings. |
-| `platform/include/port_input_settings.h`, `platform/port_input_settings.cpp` | The three settings and their `port_settings.ini` lines (covered by `tests/port_input_settings.cpp`). |
+| `platform/input/port_input_devices.cpp` | Routes the Stasis action and adds its default bindings, and feeds the keyboard's movement keys to the double-tap check. |
+| `platform/include/port_input_settings.h`, `platform/port_input_settings.cpp` | The settings and their `port_settings.ini` lines (covered by `tests/port_input_settings.cpp`). |
 | `platform/include/port_debug.h`, `platform/debug_ui.cpp` | Getters, setters and the F1 > Game > Dead Space section. |
 | `src/MetroidPrime/CStateManager.cpp` | Runs Stasis each tick, scales a held enemy's `PreThink`, `Think` and collision move, and draws the charges after the rooms. |
 | `src/MetroidPrime/Player/CGrappleArm.cpp`, `include/MetroidPrime/Player/CGrappleArm.hpp` | The throw: the grapple animations in order, and the charge let go at the thrust's projectile event. |
-| `src/MetroidPrime/Player/CPlayerOrbit.cpp` | Points the throwing hand at the enemy. |
+| `src/MetroidPrime/Player/CPlayerOrbit.cpp` | Points the throwing hand at the enemy; manual aim's limits on lock-on and the aim assist. |
+| `src/MetroidPrime/Player/CPlayerDynamics.cpp`, `src/MetroidPrime/Player/CPlayer.cpp`, `include/MetroidPrime/Player/CPlayer.hpp` | The double-tap dash. |
 | `src/MetroidPrime/Player/CPlayerGun.cpp` | Draws the throwing hand, and keeps the suit's right arm drawn while it throws. |
 | `src/MetroidPrime/Enemies/CPatterned.cpp` | The glow, in `PreRender`. |
 | `src/GuiSys/CAuiEnergyBarT01.cpp`, `include/GuiSys/CAuiEnergyBarT01.hpp` | Draws the meter and its label along the energy bar, inside the bar's own draw. |

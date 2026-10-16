@@ -80,6 +80,15 @@ int main() {
   ApplySetting("stasis_duration", "nan");
   Check(Get().stasisDuration == 8.f, "stasis_duration not a number");
 
+  // Dead Space Prime's manual aim and double-tap dash: off by default, saved after Stasis.
+  Check(!Get().manualAim && !Get().doubleTapDash, "manual aim and dash defaults");
+  Check(defaults.find("stasis_duration=5\nmanual_aim=0\ndouble_tap_dash=0\n") !=
+            std::string::npos,
+        "manual aim and dash lines");
+  Check(ApplySetting("manual_aim", "1") && Get().manualAim, "manual_aim");
+  Check(ApplySetting("double_tap_dash", "1") && Get().doubleTapDash, "double_tap_dash");
+  Check(ApplySetting("manual_aim", "0") && !Get().manualAim, "manual_aim off");
+
   // Touch layout.
   Check(ApplySetting("touch_layout", "1:0.5,0.5,1") && TouchLayout() == "1:0.5,0.5,1", "touch_layout");
   Check(!SetTouchLayout(std::string(kTouchLayoutMaxLen + 1, 'x')), "touch layout length");

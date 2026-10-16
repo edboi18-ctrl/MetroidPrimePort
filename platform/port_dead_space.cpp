@@ -8,6 +8,9 @@
 #include "port_debug.h"
 #include "port_stasis.h"
 
+#include "Collision/CMaterialFilter.hpp"
+#include "Collision/CMaterialList.hpp"
+#include "Collision/CRayCastResult.hpp"
 #include "Kyoto/Audio/CSfxManager.hpp"
 #include "Kyoto/CResFactory.hpp"
 #include "Kyoto/CSimplePool.hpp"
@@ -71,6 +74,13 @@ const float kWindUpMax = 1.f;
 const float kFlightMax = 2.f;
 const int kMaxThrows = 4;
 const int kTrail = 6;
+// Manual aim: how far a throw reaches, and how far beside the crosshair's line an
+// enemy's body may be and still be what it's thrown at.
+const float kAimRange = 60.f;
+const float kAimTolerance = 0.5f;
+// A charge thrown at no one still catches an enemy whose body, grown by this, it
+// passes through.
+const float kCatchTolerance = 0.3f;
 
 // A paid press, from the throw until its charge lands.
 struct Throw {
@@ -185,6 +195,86 @@ void SetVec(float v[3], const CVector3f& c) {
   v[2] = c.GetZ();
 }
 
+bool Unmorphed(const CStateManager& mgr) {
+  const CPlayer* player = mgr.GetPlayer();
+  return player != nullptr && player->GetMorphballTransitionState() == CPlayer::kMS_Unmorphed;
+}
+
+const CMaterialFilter& SightFilter() {
+  static const CMaterialFilter kFilter = CMaterialFilter::MakeIncludeExclude(
+      CMaterialList(kMT_Solid),
+      CMaterialList(kMT_ProjectilePassthrough, kMT_ScanPassthrough, kMT_Player));
+  return kFilter;
+}
+
+// An enemy's body for aiming: its touch bounds, else a metre around where shots aim.
+void BodyOf(const CStateManager& mgr, const CActor& enemy, float lo[3], float hi[3]) {
+  const rstl::optional_object< CAABox > bounds = enemy.GetTouchBounds();
+  if (bounds) {
+    SetVec(lo, bounds->GetMinPoint());
+    SetVec(hi, bounds->GetMaxPoint());
+    return;
+  }
+  SetVec(lo, enemy.GetAimPosition(mgr, 0.f) - CVector3f(0.5f, 0.5f, 0.5f));
+  SetVec(hi, enemy.GetAimPosition(mgr, 0.f) + CVector3f(0.5f, 0.5f, 0.5f));
+}
+
+// The live enemies whose bounds come near the box from `a` to `b` grown by `pad`.
+void NearEnemies(CStateManager& mgr, const CVector3f& a, const CVector3f& b, float pad,
+                 TEntityList& out) {
+  const CVector3f lo(std::min(a.GetX(), b.GetX()) - pad, std::min(a.GetY(), b.GetY()) - pad,
+                     std::min(a.GetZ(), b.GetZ()) - pad);
+  const CVector3f hi(std::max(a.GetX(), b.GetX()) + pad, std::max(a.GetY(), b.GetY()) + pad,
+                     std::max(a.GetZ(), b.GetZ()) + pad);
+  mgr.BuildNearList(out, CAABox(lo, hi), CMaterialFilter::skPassEverything, mgr.GetPlayer());
+}
+
+// The first live enemy on the line from `from` along the unit `dir` within `length`, its body
+// grown by `pad`, and how far along it is; kInvalidUniqueId when there is none.
+TUniqueId FirstEnemyOnLine(CStateManager& mgr, const CVector3f& from, const CVector3f& dir,
+                           float length, float pad, float& along) {
+  TEntityList nearList;
+  // Grown further than `pad`: an enemy's bounds can reach past what the near list is built on.
+  NearEnemies(mgr, from, from + dir * length, pad + 3.f, nearList);
+  float origin[3];
+  float direction[3];
+  SetVec(origin, from);
+  SetVec(direction, dir);
+  TUniqueId best = kInvalidUniqueId;
+  along = length;
+  for (const TUniqueId id : nearList) {
+    const CPatterned* enemy = LiveEnemy(mgr, id);
+    if (enemy == nullptr) continue;
+    float lo[3];
+    float hi[3];
+    BodyOf(mgr, *enemy, lo, hi);
+    const float hit = PortStasis::RayBoxDistance(origin, direction, lo, hi, pad);
+    if (hit >= 0.f && hit <= along) {
+      along = hit;
+      best = id;
+    }
+  }
+  return best;
+}
+
+// Manual aim: the live enemy the crosshair is on, if any - the nearest the crosshair's line
+// meets, before a wall, within kAimTolerance of its body - and where a throw lands: on it,
+// else on the first wall along the line, or kAimRange out.
+TUniqueId CrosshairTarget(CStateManager& mgr, CVector3f& aimPoint) {
+  const CTransform4f& cam = mgr.GetCameraManager()->GetCurrentCamera(mgr).GetTransform();
+  const CVector3f eye = cam.GetTranslation();
+  const CVector3f dir = cam.GetForward().AsNormalized();
+  const CRayCastResult wall = mgr.RayStaticIntersection(eye, dir, kAimRange, SightFilter());
+  const float reach = wall.IsInvalid() ? kAimRange : wall.GetTime();
+  aimPoint = eye + dir * reach;
+  float along = reach;
+  const TUniqueId target = FirstEnemyOnLine(mgr, eye, dir, reach, kAimTolerance, along);
+  if (const CPatterned* enemy = LiveEnemy(mgr, target)) {
+    aimPoint = enemy->GetAimPosition(mgr, 0.f);
+  }
+  return target;
+}
+
 // Low and to the left of the view, where the throwing hand would be.
 CVector3f BesideView(const CStateManager& mgr) {
   const CTransform4f& cam = mgr.GetCameraManager()->GetCurrentCamera(mgr).GetTransform();
@@ -248,7 +338,8 @@ void AddBurst(const float pos[3], float radius, bool held) {
   slot->radius = radius;
 }
 
-void StartThrow(CStateManager& mgr, TUniqueId target) {
+// A throw at `target`, or with no target at `aimPoint` (manual aim, the crosshair on no one).
+void StartThrow(CStateManager& mgr, TUniqueId target, const CVector3f* aimPoint) {
   Throw* slot = &sThrows[0];
   for (Throw& t : sThrows) {
     if (!t.active) {
@@ -259,7 +350,9 @@ void StartThrow(CStateManager& mgr, TUniqueId target) {
   *slot = Throw();
   slot->active = true;
   slot->target = target.value;
-  if (const CPatterned* enemy = LiveEnemy(mgr, target)) {
+  if (aimPoint != nullptr) {
+    SetVec(slot->goal, *aimPoint);
+  } else if (const CPatterned* enemy = LiveEnemy(mgr, target)) {
     SetVec(slot->goal, enemy->GetAimPosition(mgr, 0.f));
   }
   CPlayer* player = mgr.Player();
@@ -293,7 +386,25 @@ void UpdateThrows(CStateManager& mgr, float dt, const PortStasis::Tuning& tuning
     for (int k = kept; k > 0; --k) std::copy(t.trail[k - 1], t.trail[k - 1] + 3, t.trail[k]);
     std::copy(t.pos, t.pos + 3, t.trail[0]);
     t.trailCount = kept + 1;
-    if (PortStasis::StepToward(t.pos, t.goal, kThrowSpeed * dt)) {
+    bool arrived = PortStasis::StepToward(t.pos, t.goal, kThrowSpeed * dt);
+    if (t.target == PortStasis::kNoTarget) {
+      // Thrown at no one: the first enemy it passes through this tick catches it.
+      const CVector3f from = ToVec(t.trail[0]);
+      const CVector3f step = ToVec(t.pos) - from;
+      if (step.CanBeNormalized()) {
+        float along = 0.f;
+        const TUniqueId struck = FirstEnemyOnLine(mgr, from, step.AsNormalized(), step.Magnitude(),
+                                                  kCatchTolerance, along);
+        if (struck != kInvalidUniqueId) {
+          t.target = struck.value;
+          enemy = LiveEnemy(mgr, struck);
+          SetVec(t.pos, from + step.AsNormalized() * along);
+          std::copy(t.pos, t.pos + 3, t.goal);
+          arrived = true;
+        }
+      }
+    }
+    if (arrived) {
       if (enemy != nullptr) {
         sStasis.Hold(t.target, tuning);
         if (!PortDeadSpaceSound::Play(PortDeadSpaceSound::ECue::StasisHit,
@@ -460,11 +571,18 @@ void Tick(CStateManager& mgr, float dt) {
   UpdateThrows(mgr, dt, tuning);
   if (!pressed) return;
 
-  const TUniqueId target = PressTarget(mgr);
+  TUniqueId target = PressTarget(mgr);
+  // Manual aim: thrown along the crosshair, at the enemy it is on or else at where it points.
+  CVector3f aimPoint(0.f, 0.f, 0.f);
+  bool atCrosshair = false;
+  if (target == kInvalidUniqueId && PortDebug::ManualAim() && Unmorphed(mgr)) {
+    target = CrosshairTarget(mgr, aimPoint);
+    atCrosshair = target == kInvalidUniqueId;
+  }
   const uint16_t raw = target == kInvalidUniqueId ? PortStasis::kNoTarget : target.value;
-  switch (sStasis.Throw(raw, tuning)) {
+  switch (atCrosshair ? sStasis.Spend(tuning) : sStasis.Throw(raw, tuning)) {
   case PortStasis::EResult::Thrown:
-    StartThrow(mgr, target);
+    StartThrow(mgr, target, atCrosshair ? &aimPoint : nullptr);
     break;
   case PortStasis::EResult::NoTarget:
   case PortStasis::EResult::NoEnergy:

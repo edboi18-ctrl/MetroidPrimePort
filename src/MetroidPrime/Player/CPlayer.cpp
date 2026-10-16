@@ -430,7 +430,11 @@ CPlayer::CPlayer(TUniqueId uid, const CTransform4f& xf, const CAABox& aabb, CAss
 , xa24_radarZRadiusOverride(1.f)
 , xa28_attachedActorStruggle(0.f)
 , xa2c_damageLoopSfxDelayTicks(2)
-, xa30_samusExhaustedVoiceTimer(4.f) {
+, xa30_samusExhaustedVoiceTimer(4.f)
+, mPortDashDirection(0.f, 0.f, 0.f)
+, mPortDashTime(0.f)
+, mPortDashCooldown(0.f)
+, mPortAirDashUsed(false) {
   PortDebug::ResetMouseAim();
   CModelData ballTransitionBeamModelData(
       CStaticRes(gpTweakPlayerRes->GetBallTransitionBeamResId(x7ec_beam), playerScale));

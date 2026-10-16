@@ -40,6 +40,9 @@ class State {
 public:
   // Pays for a charge thrown at `target`; nothing is spent unless it goes.
   EResult Throw(uint16_t target, const Tuning& t);
+  // Pays for a charge thrown at no one (manual aim, at whatever the crosshair
+  // is on): Thrown, or NoEnergy with nothing spent.
+  EResult Spend(const Tuning& t);
   // Holds `target` without paying: a thrown charge arriving. With every slot
   // taken, the hold closest to running out gives way.
   EResult Hold(uint16_t target, const Tuning& t);
@@ -78,5 +81,12 @@ private:
 // says whether it got there, in which case `pos` is `goal`. A step that isn't a
 // positive number leaves `pos` where it is.
 bool StepToward(float pos[3], const float goal[3], float step);
+
+// Aiming by hand: how far along the ray from `origin` in the unit direction
+// `dir` it first meets the box `lo`..`hi` grown by `pad` on every side, or a
+// negative number when it misses (or the box is behind). 0 when `origin` is
+// inside it.
+float RayBoxDistance(const float origin[3], const float dir[3], const float lo[3],
+                     const float hi[3], float pad);
 
 } // namespace PortStasis

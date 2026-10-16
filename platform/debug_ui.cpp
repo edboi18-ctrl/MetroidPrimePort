@@ -268,6 +268,8 @@ std::atomic<int> sBeamRequest{-1};
 std::atomic<uint64_t> sBeamRequestUntilNs{0};
 std::atomic<uint64_t> sSpringRequestUntilNs{0};
 std::atomic<uint64_t> sStasisRequestUntilNs{0};
+std::atomic<uint64_t> sDashRequestUntilNs{0};
+std::atomic<int> sDashRequestDirection{-1};
 constexpr uint64_t kWheelRequestNs = 120'000'000;
 std::mutex sMinimapMutex;
 bool sMinimapValid = false;
@@ -1731,6 +1733,28 @@ void SetStasisDuration(float seconds) {
   MarkDirty();
 }
 
+bool ManualAim() {
+  EnsureInitialized();
+  return sInput.manualAim && !sOriginalExperience;
+}
+
+void SetManualAim(bool enabled) {
+  EnsureInitialized();
+  sInput.manualAim = enabled;
+  MarkDirty();
+}
+
+bool DoubleTapDash() {
+  EnsureInitialized();
+  return sInput.doubleTapDash && !sOriginalExperience;
+}
+
+void SetDoubleTapDash(bool enabled) {
+  EnsureInitialized();
+  sInput.doubleTapDash = enabled;
+  MarkDirty();
+}
+
 bool SwapScanXray() {
   EnsureInitialized();
   return sInput.swapScanXray && !TouchActive() && !sOriginalExperience;
@@ -2550,6 +2574,19 @@ void RequestStasis() { sStasisRequestUntilNs.store(SDL_GetTicksNS() + kWheelRequ
 bool ConsumeStasisRequest() {
   const uint64_t until = sStasisRequestUntilNs.exchange(0);
   return until != 0 && SDL_GetTicksNS() < until;
+}
+
+// Kept and used once as a Stasis press is.
+void RequestDash(int direction) {
+  if (direction < 0 || direction > 3) return;
+  sDashRequestDirection.store(direction);
+  sDashRequestUntilNs.store(SDL_GetTicksNS() + kWheelRequestNs);
+}
+
+int ConsumeDashRequest() {
+  const uint64_t until = sDashRequestUntilNs.exchange(0);
+  const int direction = sDashRequestDirection.exchange(-1);
+  return until != 0 && SDL_GetTicksNS() < until ? direction : -1;
 }
 
 void RequestSaveStateHotkey(int which) {
@@ -6068,6 +6105,21 @@ void DrawControlsOptions() {
     ItemHelp(help.c_str());
   }
   ImGui::EndDisabled();
+  bool manualAim = sInput.manualAim;
+  if (ImGui::Checkbox("Manual aim", &manualAim)) {
+    SetManualAim(manualAim);
+  }
+  ItemHelp("Aim by hand: lock-on only reaches what the Scan Visor scans and grapple points, and "
+           "shots go where the crosshair is, with no aim assist. Stasis is thrown along the "
+           "crosshair at the enemy it points at; a throw that points at none flies to where you "
+           "aimed and is spent, as in Dead Space.");
+  bool doubleTapDash = sInput.doubleTapDash;
+  if (ImGui::Checkbox("Double-tap dash", &doubleTapDash)) {
+    SetDoubleTapDash(doubleTapDash);
+  }
+  ItemHelp("Tap a movement key twice quickly (keyboard) and Samus dashes that way: forward, back, "
+           "left or right, without a lock-on. Locked on, the jump-and-strafe dash works as "
+           "before.");
   EndOriginalLocked(locked);
 }
 
@@ -7781,7 +7833,8 @@ void DrawOriginalSection() {
   }
   ItemHelp("Plays the game as on the GameCube: 640x480 at 4:3, 60 Hz with no interpolation, no "
            "mods, the retail HUD, font, button icons, FOV and cutscenes, and none of the gameplay extras (spring ball, "
-           "fast morph, charge and lock-on options, turbo fire, unlocks, Dead Space's Stasis). "
+           "fast morph, charge and lock-on options, turbo fire, unlocks, Dead Space's Stasis, "
+           "manual aim and double-tap dash). "
            "The other settings keep "
            "their values and come back when it's turned off. Controls, cheats, save states, the "
            "randomizer, Archipelago and the timer still work.");

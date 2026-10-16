@@ -1,6 +1,7 @@
 #include "port_input_devices.h"
 
 #include "port_debug.h"
+#include "port_double_tap.h"
 #include "port_input_map.h"
 #include "port_input_remap_ui.h"
 #include "port_log.h"
@@ -387,6 +388,31 @@ uint16_t GameContexts() {
 }
 
 // The actions that aren't pad inputs go straight to the code that does them.
+// Whether a keyboard key bound on its own to `action` is down: the double-tap dash reads
+// the keys themselves, so a stick or pad never dashes.
+bool KeyHeld(const Profile& profile, const PortInput::RawState& raw, Action action) {
+  for (const Binding& b : profile.bindings) {
+    if (b.action != action || b.count != 1) continue;
+    const Input& in = b.inputs[0];
+    if (in.device == Device::Key && in.code < PortInput::kKeyCount && raw.keys.test(in.code)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Dead Space Prime: a movement key double-tapped dashes that way (PortDoubleTap).
+void RouteDoubleTapDash(const Profile& profile, const PortInput::RawState& raw, double clockMs) {
+  static PortDoubleTap::Detector sTaps;
+  const bool held[PortDoubleTap::kDirections] = {
+      KeyHeld(profile, raw, Action::MainUp), KeyHeld(profile, raw, Action::MainDown),
+      KeyHeld(profile, raw, Action::MainLeft), KeyHeld(profile, raw, Action::MainRight)};
+  const int direction = sTaps.Update(held, clockMs);
+  if (direction >= 0 && PortDebug::DoubleTapDash() && !PortDebug::Visible()) {
+    PortDebug::RequestDash(direction);
+  }
+}
+
 void RouteDirectActions(const PortInput::Output& out) {
   // EBeamId and EPlayerVisor order, as RequestBeam/RequestVisor take them.
   static constexpr Action kBeams[] = {Action::BeamPower, Action::BeamIce, Action::BeamWave, Action::BeamPlasma};
@@ -628,6 +654,7 @@ SPoll Poll(unsigned mouseHeld, bool focused) {
     return r;
   }
   RouteDirectActions(out);
+  RouteDoubleTapDash(sProfile, raw, sClockMs);
 
   r.status = Synthesize(out);
   r.beamShift = out.Held(Action::BeamShift);

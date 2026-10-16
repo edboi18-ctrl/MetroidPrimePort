@@ -326,6 +326,15 @@ float StasisSlow();
 void SetStasisSlow(float fraction);
 float StasisDuration();
 void SetStasisDuration(float seconds);
+// Dead Space Prime's manual aim: lock-on reaches only the scan visor's targets
+// and grapple points, and shots get no aim assist, so the crosshair is aimed by
+// hand; Stasis is thrown along it. Off by default and under Original experience.
+bool ManualAim();
+void SetManualAim(bool enabled);
+// Dead Space Prime's dash on a double-tapped movement key (keyboard), any
+// direction and without a lock-on. Off by default and under Original experience.
+bool DoubleTapDash();
+void SetDoubleTapDash(bool enabled);
 // The Scan and X-Ray visors trade D-pad directions (Remastered's Dual Sticks
 // layout), off by default.
 bool SwapScanXray();
@@ -546,6 +555,10 @@ bool SpringBallRequested();
 // One Stasis press, used by the game's next tick (PortDeadSpace::Tick).
 void RequestStasis();
 bool ConsumeStasisRequest();
+// One double-tap dash (0 forward, 1 back, 2 left, 3 right), used by the game's
+// next tick (CPlayer). Consume gives -1 when there is none.
+void RequestDash(int direction);
+int ConsumeDashRequest();
 void RequestSaveStateHotkey(int which);
 bool TouchMapTap();
 void SetTouchMapTap(bool on);

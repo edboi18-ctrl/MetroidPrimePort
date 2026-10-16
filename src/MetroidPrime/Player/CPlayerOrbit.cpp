@@ -144,6 +144,12 @@ CPlayer::EOrbitValidationResult CPlayer::ValidateOrbitTargetId(const TUniqueId i
   if (!act || !act->GetTargetable() || !act->GetActive()) {
     return kOVR_InvalidTarget;
   }
+  // Dead Space Prime: manual aim locks on only to what the Scan Visor scans, and to grapple
+  // points; everything else is aimed at by hand.
+  if (PortDebug::ManualAim() && mgr.GetPlayerState()->GetCurrentVisor() != CPlayerState::kPV_Scan &&
+      !TCastToConstPtr< CScriptGrapplePoint >(act)) {
+    return kOVR_NonTargetableTarget;
+  }
   if (GetStaticTimer()) {
     return kOVR_PlayerNotReadyToTarget;
   }
@@ -345,6 +351,13 @@ void CPlayer::ActivateOrbitSource(CStateManager& mgr) {
   }
 }
 
+// Dead Space Prime: under manual aim an empty lock-on press holds no point outside the Scan
+// Visor, where the view stays the mouse's.
+static bool PortManualAimOutsideScan(const CStateManager& mgr) {
+  return PortDebug::ManualAim() &&
+         mgr.GetPlayerState()->GetCurrentVisor() != CPlayerState::kPV_Scan;
+}
+
 void CPlayer::UpdateOrbitInput(const CFinalInput& input, CStateManager& mgr) {
   if (x2f8_morphBallState != kMS_Unmorphed) {
     return;
@@ -369,14 +382,14 @@ void CPlayer::UpdateOrbitInput(const CFinalInput& input, CStateManager& mgr) {
           }
           SetOrbitState(kOS_OrbitObject, mgr);
           UpdateOrbitPosition(gpTweakPlayer->GetOrbitNormalDistance(x308_orbitType), mgr);
-        } else if (PortDebug::DirectAim()) {
+        } else if (PortDebug::DirectAim() && !PortManualAimOutsideScan(mgr)) {
           // A GameCube L trigger's analog travel (Orbit Far) starts a frame before
           // its click, so an empty lock-on becomes a point orbit there. Mouse
           // buttons, keys and pad triggers mapped as buttons press both in the
           // same frame, which made L do nothing without a target.
           OrbitPoint(kOT_Far, mgr);
         }
-      } else {
+      } else if (!PortManualAimOutsideScan(mgr)) {
         if (ControlMapper::GetPressInput(ControlMapper::kC_OrbitFar, input)) {
           OrbitPoint(kOT_Far, mgr);
         }
@@ -405,6 +418,9 @@ void CPlayer::UpdateOrbitInput(const CFinalInput& input, CStateManager& mgr) {
           OrbitPoint(kOT_Far, mgr);
         } else if (result == kOVR_ExtremeHorizonAngle) {
           BreakOrbit(kOB_BadVerticalAngle, mgr);
+        } else if (result == kOVR_NonTargetableTarget && PortManualAimOutsideScan(mgr)) {
+          // Dead Space Prime: a scan lock on an enemy lets go on leaving the Scan Visor.
+          BreakOrbit(kOB_InvalidateTarget, mgr);
         } else {
           ActivateOrbitSource(mgr);
         }
@@ -1043,6 +1059,12 @@ void CPlayer::UpdateAimTarget(CStateManager& mgr) {
     SetAimTargetId(kInvalidUniqueId);
   }
   if (!GetCombatMode()) {
+    SetAimTargetId(kInvalidUniqueId);
+    x48c_aimTargetTimer = 0.f;
+    return;
+  }
+  // Dead Space Prime: manual aim leaves the shots where the crosshair puts them.
+  if (PortDebug::ManualAim()) {
     SetAimTargetId(kInvalidUniqueId);
     x48c_aimTargetTimer = 0.f;
     return;
