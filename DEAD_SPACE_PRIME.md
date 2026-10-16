@@ -45,7 +45,9 @@ and with the scan visor, not in morph ball, menus or the map.
   **STASIS** written past the bar's right end. Both are drawn with the energy
   bar, so they sway with the helmet, fade with the HUD, follow its scale and
   widescreen layout, and go away in morph ball, cutscenes and menus as the
-  bar does.
+  bar does. The **Energy Low** warning, which the game places just under the
+  bar, moves down by the strip's height while the meter shows, so it keeps
+  its usual spacing below it.
 - Up to 8 enemies can be held at once. Holding a held enemy again starts its
   time over.
 
@@ -69,12 +71,14 @@ extras.
 Played on a USA v1.00 disc: Stasis holds and slows enemies. That first build
 drew the meter flat on the screen, outside the helmet, where it covered the
 countdown during the escape from the frigate; it is now drawn in the helmet
-HUD as above. Still to be checked in play:
+HUD as above. In the combat visor the meter and label sit well, but the
+**Energy Low** warning covered the strip, so the warning now moves down while
+the meter shows. Still to be checked in play:
 
-- where the meter and its label land against the rest of the HUD in each
-  visor. They hang off the energy bar, whose place comes from your disc, so
-  the low-energy warning or the map may sit close. Four constants at the top
-  of the meter code in `src/GuiSys/CAuiEnergyBarT01.cpp` set the spacing:
+- that the warning clears the strip, and where the meter and its label land
+  in the scan, thermal and X-ray visors. They hang off the energy bar, whose
+  place comes from your disc. Four constants at the top of the meter code in
+  `src/GuiSys/CAuiEnergyBarT01.cpp` set the spacing:
   `kStasisGap` (bar to strip), `kStasisThickness` (strip),
   `kStasisLabelHeight` and `kStasisLabelGap` (label size, and its distance
   past the strip), all in bar thicknesses;
@@ -103,7 +107,8 @@ press), because they are always loaded during play.
 | `src/MetroidPrime/CStateManager.cpp` | Runs Stasis each tick and scales a held enemy's `PreThink`, `Think` and collision move. |
 | `src/MetroidPrime/Enemies/CPatterned.cpp` | The glow, in `PreRender`. |
 | `src/GuiSys/CAuiEnergyBarT01.cpp`, `include/GuiSys/CAuiEnergyBarT01.hpp` | Draws the meter and its label along the energy bar, inside the bar's own draw. |
-| `src/MetroidPrime/HUD/CHudEnergyInterface.cpp` | Turns the meter on for Samus's energy bar in every visor but morph ball. |
+| `src/MetroidPrime/HUD/CHudEnergyInterface.cpp` | Turns the meter on for Samus's energy bar in every visor but morph ball, and moves the low-energy warning below it. |
+| `src/GuiSys/CGuiTextPane.cpp`, `include/GuiSys/CGuiTextPane.hpp` | A draw-time offset for a text pane, which that move uses; the frame's own layout is left as loaded. |
 
 The new files under `platform/` and `tests/` are this fork's own work, the part
 the port's `LICENSE` covers. The edits under `src/` are small hooks in the

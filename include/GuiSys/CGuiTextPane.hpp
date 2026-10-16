@@ -43,6 +43,10 @@ public:
   void SetDimensions(const CVector2f& dim, bool initVBO) override;
   void ScaleDimensions(const CVector3f& scale) override;
   void Draw(const CGuiWidgetDrawParms& parms) const override;
+  // Port: moves the text by `offset`, in the pane's own space, when it is drawn, leaving the
+  // frame's layout as loaded. CHudEnergyInterface keeps the low-energy warning clear of Dead
+  // Space Prime's Stasis meter with it.
+  void PortSetDrawOffset(const CVector3f& offset) { mPortDrawOffset = offset; }
 
 private:
 #if VERSION >= VERSION_GM8P_00 && VERSION != VERSION_GM8E_02
@@ -52,6 +56,7 @@ private:
 #if VERSION >= VERSION_GM8P_00 && VERSION != VERSION_GM8E_02
   bool xd00_drawShadow;
 #endif
+  CVector3f mPortDrawOffset;
 };
 
 CHECK_SIZEOF(CGuiTextPane, (VERSION >= VERSION_GM8P_00 && VERSION != VERSION_GM8E_02 ? 0xd04 : 0x3e0))

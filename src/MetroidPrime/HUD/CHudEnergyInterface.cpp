@@ -189,6 +189,14 @@ void CHudEnergyInterface::Update(float dt, float energyLowPulse) {
     } else {
       x28_textpane_energywarning->SetIsVisible(false);
     }
+    // Dead Space Prime: the warning sits just under the energy bar, where the Stasis meter is
+    // drawn. While the meter shows, the warning moves down by as much room as it takes.
+    const CTransform4f& warningXf = x28_textpane_energywarning->GetWorldTransform();
+    const CVector3f clearance = x2c_energybart01_energybar->PortStasisClearance(
+        warningXf * x28_textpane_energywarning->GetPivot());
+    x28_textpane_energywarning->PortSetDrawOffset(clearance.MagSquared() > 0.f
+                                                      ? warningXf.GetInverse().Rotate(clearance)
+                                                      : CVector3f(0.f, 0.f, 0.f));
   }
 
   const float barEnergy = x2c_energybart01_energybar->GetLaggedEnergy();

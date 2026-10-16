@@ -308,6 +308,23 @@ rstl::pair< CVector3f, CVector3f > CAuiEnergyBarT01::PortStasisEdges(float t) co
                                             bottom - across * (kStasisGap + kStasisThickness));
 }
 
+CVector3f CAuiEnergyBarT01::PortStasisClearance(const CVector3f& worldPos) const {
+  if (!mPortStasisMeter || !mCoordFunc || !GetIsVisible() || PortBar() != nullptr ||
+      !PortDeadSpace::StasisMeterVisible()) {
+    return CVector3f(0.f, 0.f, 0.f);
+  }
+  // At the bar's middle: from the bar's edge on the strip's side to the strip's far edge.
+  const rstl::pair< CVector3f, CVector3f > bar = mCoordFunc(0.5f);
+  const rstl::pair< CVector3f, CVector3f > strip = PortStasisEdges(0.5f);
+  const CVector3f drop =
+      (strip.second - strip.first) * ((kStasisGap + kStasisThickness) / kStasisThickness);
+  const CVector3f local = GetWorldTransform().GetInverse() * worldPos;
+  if (CVector3f::Dot(local - (bar.first + bar.second) * 0.5f, drop) <= 0.f) {
+    return CVector3f(0.f, 0.f, 0.f);
+  }
+  return GetWorldTransform().Rotate(drop);
+}
+
 void CAuiEnergyBarT01::PortDrawStasisSpan(float from, float to, const CColor& color) const {
   if (to <= from) {
     return;

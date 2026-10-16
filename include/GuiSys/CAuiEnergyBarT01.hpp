@@ -56,6 +56,10 @@ public:
   // Port: Dead Space Prime's Stasis meter rides along this bar (port_dead_space.h). Set on
   // the player's energy bar in every visor but morph ball, by CHudEnergyInterface.
   void PortSetStasisMeter(bool on) { mPortStasisMeter = on; }
+  // Port: how far, in world space, a widget centred at `worldPos` moves to keep the spacing it
+  // had below this bar once the Stasis meter takes room there: the meter's depth while it shows
+  // and `worldPos` is on its side of the bar, else nothing.
+  CVector3f PortStasisClearance(const CVector3f& worldPos) const;
 
 private:
   void PortDrawBar(const PortHudBars::Bar& bar, float from, float to,

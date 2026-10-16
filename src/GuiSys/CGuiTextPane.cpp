@@ -68,14 +68,16 @@ CGuiTextPane::CGuiTextPane(const CGuiWidgetParms& parms, CSimplePool* sp, const 
                          const int padX, const int padY, CAssetId jpFontId, int jpExtentX, int jpExtentY)
 : CGuiPane(parms, dimX, dimY, vec)
 , xd4_textSupport(fontId, padX, padY, props, col1, col2, CColor::White(), sp)
-, xd00_drawShadow(false) {}
+, xd00_drawShadow(false)
+, mPortDrawOffset(0.f, 0.f, 0.f) {}
 #else
 CGuiTextPane::CGuiTextPane(const CGuiWidgetParms& parms, CSimplePool* sp, const float dimX,
                          const float dimY, const CVector3f& vec, const CAssetId fontId,
                          const CGuiTextProperties& props, const CColor& col1, const CColor& col2,
                          const int padX, const int padY)
 : CGuiPane(parms, dimX, dimY, vec)
-, xd4_textSupport(fontId, props, col1, col2, CColor::White(), padX, padY, sp) {}
+, xd4_textSupport(fontId, props, col1, col2, CColor::White(), padX, padY, sp)
+, mPortDrawOffset(0.f, 0.f, 0.f) {}
 #endif
 
 CGuiTextPane::~CGuiTextPane() {}
@@ -98,9 +100,10 @@ void CGuiTextPane::Draw(const CGuiWidgetDrawParms& parms) const {
   float height = GetTextSupport().GetTextBoundingHeight() == 0
                      ? 0.f
                      : dimensions.GetY() / GetTextSupport().GetTextBoundingHeight();
-  CTransform4f local =
-      CTransform4f::Translate(CVector3f(vtxBuf[0], vtxBuf[1], vtxBuf[2]) + GetPivot()) *
-      CTransform4f::Scale(width, 1.f, height);
+  // Port: plus mPortDrawOffset (PortSetDrawOffset), zero unless a HUD sets it.
+  CTransform4f local = CTransform4f::Translate(CVector3f(vtxBuf[0], vtxBuf[1], vtxBuf[2]) +
+                                               GetPivot() + mPortDrawOffset) *
+                       CTransform4f::Scale(width, 1.f, height);
   CTransform4f model = GetWorldTransform() * local;
 #if VERSION >= VERSION_GM8P_00 && VERSION != VERSION_GM8E_02
   CColor geomCol = GetModifiedColor().WithAlphaModulatedBy(parms.GetAlpha());
