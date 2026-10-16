@@ -37,12 +37,22 @@ int State::Find(uint16_t target) const {
   return -1;
 }
 
-EResult State::Apply(uint16_t target, const Tuning& tuning) {
+EResult State::Throw(uint16_t target, const Tuning& tuning) {
   if (target == kNoTarget) return EResult::NoTarget;
   const Tuning t = Sane(tuning);
   if (mMeter < t.cost) return EResult::NoEnergy;
   mMeter -= t.cost;
+  return EResult::Thrown;
+}
 
+EResult State::Apply(uint16_t target, const Tuning& tuning) {
+  const EResult paid = Throw(target, tuning);
+  return paid == EResult::Thrown ? Hold(target, tuning) : paid;
+}
+
+EResult State::Hold(uint16_t target, const Tuning& tuning) {
+  if (target == kNoTarget) return EResult::NoTarget;
+  const Tuning t = Sane(tuning);
   int i = Find(target);
   const bool refreshed = i >= 0;
   if (!refreshed) {
@@ -65,7 +75,7 @@ void State::Tick(float dt, const Tuning& tuning) {
   const Tuning t = Sane(tuning);
   int kept = 0;
   for (int i = 0; i < mCount; ++i) {
-    Hold hold = mHolds[i];
+    Slot hold = mHolds[i];
     hold.remaining -= dt;
     if (hold.remaining > 0.f) mHolds[kept++] = hold;
   }
@@ -99,6 +109,20 @@ void State::Release(uint16_t target) {
 
 void State::SetMeter(float meter) {
   mMeter = std::isfinite(meter) ? Clamp(meter, 0.f, kMeterMax) : 0.f;
+}
+
+bool StepToward(float pos[3], const float goal[3], float step) {
+  const float d[3] = {goal[0] - pos[0], goal[1] - pos[1], goal[2] - pos[2]};
+  const float dist = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+  if (!std::isfinite(dist)) return false;
+  if (!std::isfinite(step) || step <= 0.f) return dist == 0.f;
+  if (dist <= step) {
+    for (int i = 0; i < 3; ++i) pos[i] = goal[i];
+    return true;
+  }
+  const float k = step / dist;
+  for (int i = 0; i < 3; ++i) pos[i] += d[i] * k;
+  return false;
 }
 
 } // namespace PortStasis

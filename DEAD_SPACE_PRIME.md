@@ -31,6 +31,20 @@ and with the scan visor, not in morph ball, menus or the map.
 
 **What it does:**
 
+- Samus throws a Stasis charge with her left hand: the hand comes up, thrusts
+  toward the enemy and drops away again. These are the Grapple Beam arm's own
+  animations (raise, fire, lower), played 1.75 times as fast, so the grapple
+  gear shows on the hand once you have the Grapple Beam. The charge leaves the
+  palm at the moment the grapple beam would fire: a pulsing ball of blue light
+  with a short tail, flying at 30 m/s and homing in on the enemy. It is drawn
+  into the world, so walls hide it, but it doesn't collide with them on the
+  way. Where it lands, a ring of blue light swells out and fades.
+- The hold starts when the charge arrives, not when you press. The meter is
+  paid at the throw, so a charge whose enemy dies or disappears on the way
+  fizzles out and is spent, as in Dead Space. While the arm is busy (being
+  hit, a charge combo, an idle animation, free look, a second throw before the
+  first is done) the charge leaves at once from the bottom left of the view
+  instead.
 - The enemy runs at 15% speed for 5 seconds, then eases back to full speed over
   the last 0.75 seconds. Its animation, AI and timers slow down, and so do its
   movement and its fall: both its thinking and its physics step are scaled.
@@ -75,10 +89,16 @@ HUD as above. In the combat visor the meter and label sit well, but the
 **Energy Low** warning covered the strip, so the warning now moves down while
 the meter shows. Still to be checked in play:
 
-- that the warning clears the strip, and where the meter and its label land
-  in the scan, thermal and X-ray visors. They hang off the energy bar, whose
-  place comes from your disc. Four constants at the top of the meter code in
-  `src/GuiSys/CAuiEnergyBarT01.cpp` set the spacing:
+- the throw, which was built without seeing it: how the hand looks and how
+  quickly it moves (`kPortThrowSpeed` in
+  `src/MetroidPrime/Player/CGrappleArm.cpp`), that the charge leaves from the
+  palm, and the charge's size, colour, speed and burst (the constants after
+  `kThrowSpeed` in `platform/port_dead_space.cpp`);
+- where the meter and its label land in the scan, thermal and X-ray visors
+  (the combat visor's are checked, and the Energy Low warning clears them).
+  They hang off the energy bar, whose place comes from your disc. Four
+  constants at the top of the meter code in `src/GuiSys/CAuiEnergyBarT01.cpp`
+  set the spacing:
   `kStasisGap` (bar to strip), `kStasisThickness` (strip),
   `kStasisLabelHeight` and `kStasisLabelGap` (label size, and its distance
   past the strip), all in bar thicknesses;
@@ -98,13 +118,16 @@ press), because they are always loaded during play.
 
 | File | What it does |
 |---|---|
-| `platform/include/port_stasis.h`, `platform/port_stasis.cpp` | The arithmetic: meter, holds, ease-out. No game code, so `tests/port_stasis.cpp` tests it alone. |
-| `platform/include/port_dead_space.h`, `platform/port_dead_space.cpp` | Ties it to the game: picks the target, scales the held enemy's time step, its glow, what the meter shows, and its label's text. |
+| `platform/include/port_stasis.h`, `platform/port_stasis.cpp` | The arithmetic: meter, throws and holds, ease-out, the charge's flight step. No game code, so `tests/port_stasis.cpp` tests it alone. |
+| `platform/include/port_dead_space.h`, `platform/port_dead_space.cpp` | Ties it to the game: picks the target, flies and draws the charge and its burst, scales the held enemy's time step, its glow, what the meter shows, and its label's text. |
 | `platform/include/port_input_engine.h` | The `stasis` action in the binding engine. |
 | `platform/input/port_input_devices.cpp` | Routes the action and adds the default bindings. |
 | `platform/include/port_input_settings.h`, `platform/port_input_settings.cpp` | The three settings and their `port_settings.ini` lines (covered by `tests/port_input_settings.cpp`). |
 | `platform/include/port_debug.h`, `platform/debug_ui.cpp` | Getters, setters and the F1 > Game > Dead Space section. |
-| `src/MetroidPrime/CStateManager.cpp` | Runs Stasis each tick and scales a held enemy's `PreThink`, `Think` and collision move. |
+| `src/MetroidPrime/CStateManager.cpp` | Runs Stasis each tick, scales a held enemy's `PreThink`, `Think` and collision move, and draws the charges after the rooms. |
+| `src/MetroidPrime/Player/CGrappleArm.cpp`, `include/MetroidPrime/Player/CGrappleArm.hpp` | The throw: the grapple animations in order, and the charge let go at the thrust's projectile event. |
+| `src/MetroidPrime/Player/CPlayerOrbit.cpp` | Points the throwing hand at the enemy. |
+| `src/MetroidPrime/Player/CPlayerGun.cpp` | Draws the throwing hand, and keeps the suit's right arm drawn while it throws. |
 | `src/MetroidPrime/Enemies/CPatterned.cpp` | The glow, in `PreRender`. |
 | `src/GuiSys/CAuiEnergyBarT01.cpp`, `include/GuiSys/CAuiEnergyBarT01.hpp` | Draws the meter and its label along the energy bar, inside the bar's own draw. |
 | `src/MetroidPrime/HUD/CHudEnergyInterface.cpp` | Turns the meter on for Samus's energy bar in every visor but morph ball, and moves the low-energy warning below it. |

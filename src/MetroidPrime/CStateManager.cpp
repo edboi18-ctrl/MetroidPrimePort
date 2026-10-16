@@ -3523,6 +3523,9 @@ void CStateManager::DrawWorld() const {
 
   x87c_fluidPlaneManager->EndFrame();
   gpRender->SetWorldFog(kRFM_None, 0.f, 1.f, CColor::Black());
+  // Dead Space Prime: Stasis charges in flight and their bursts, behind walls as the rooms
+  // are and under the gun.
+  PortDeadSpace::DrawWorldEffects(*this);
 #ifdef TARGET_PC
   if (gkWorldOnlyReflection && !portZoomed) {
 #else

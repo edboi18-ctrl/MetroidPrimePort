@@ -105,7 +105,19 @@ public:
   void DoUserAnimEvents(CStateManager& mgr);
   void DoUserAnimEvent(CStateManager& mgr, const CInt32POINode& node, EUserEventType type);
 
+  // Dead Space Prime: the left hand throws a Stasis charge (port_dead_space.h) with the grapple
+  // animations: up, thrust, down. The charge leaves the palm at the thrust's projectile event.
+  // False, with nothing started, while the arm is busy.
+  bool PortThrow(CStateManager& mgr);
+  bool PortIsThrowing() const { return mPortThrow; }
+
 private:
+  void PortUpdateThrow(float dt, CStateManager& mgr);
+  // Lets the charge go from the palm, once per throw.
+  void PortReleaseThrow(CStateManager& mgr);
+  // Ends a throw something else took the arm from, letting its charge go if it hadn't.
+  void PortEndThrow(CStateManager& mgr);
+
   static float kPhaseDelta;
   static float kAmplitudeX;
   static float kAmplitudeZ;
@@ -155,6 +167,8 @@ private:
   bool x3b2_27_armMoving : 1;
   bool x3b2_28_isGrappling : 1;
   bool x3b2_29_suitLoading : 1;
+  bool mPortThrow;
+  bool mPortThrowReleased;
 };
 CHECK_SIZEOF(CGrappleArm, 0x3b4)
 

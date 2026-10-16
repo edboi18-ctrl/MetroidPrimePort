@@ -32,6 +32,7 @@
 #include "Kyoto/Graphics/CGraphics.hpp"
 #include "Kyoto/Math/CMath.hpp"
 #include "math.h"
+#include "port_dead_space.h"
 #include "port_debug.h"
 
 static const CMaterialList kLineOfSightIncludeList = CMaterialList(kMT_Solid);
@@ -1754,6 +1755,9 @@ void CPlayer::UpdateGrappleArmTransform(const CVector3f& offset, CStateManager& 
             }
           }
         }
+      } else if (x490_gun->GrappleArm().PortIsThrowing()) {
+        // Dead Space Prime: a Stasis throw points the hand at what it throws at.
+        armToTarget = PortDeadSpace::ThrowDirection(mgr, armPosition);
       }
       armXf = CTransform4f::LookAt(CVector3f::Zero(), armToTarget, CVector3f::Up());
       armXf.SetTranslation(armPosition);

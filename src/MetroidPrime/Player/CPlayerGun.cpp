@@ -564,8 +564,10 @@ inline void CPlayerGun::DrawArm(const CStateManager& mgr, const CVector3f& pos,
 
   const float dot = CVector3f::Dot(x740_grappleArm->GetTransform().GetForward(),
                                    mgr.GetPlayer()->GetTransform().GetForward());
+  // Dead Space Prime: a Stasis throw draws however steeply the hand points.
   if (mgr.GetPlayer()->GetGrappleState() != CPlayer::kGS_None ||
-      (mgr.GetPlayer()->GetGrappleState() == CPlayer::kGS_None && dot > 0.1f)) {
+      (mgr.GetPlayer()->GetGrappleState() == CPlayer::kGS_None && dot > 0.1f) ||
+      x740_grappleArm->PortIsThrowing()) {
     x740_grappleArm->Render(
         mgr, pos, x740_grappleArm->IsArmMoving() ? flags : CModelFlags::Normal(), &x0_lights);
   }
@@ -670,7 +672,9 @@ void CPlayerGun::Render(const CStateManager& mgr, const CVector3f& pos,
     x744_auxWeapon->RenderMuzzleFx();
   }
   x72c_currentBeam->PreRenderGunFx(mgr, offsetWorldXf);
-  const bool drawSuitArm = !x740_grappleArm->IsGrappling() &&
+  // Dead Space Prime: a Stasis throw plays the grapple animations with the gun still up, so the
+  // suit's arm behind it stays.
+  const bool drawSuitArm = (!x740_grappleArm->IsGrappling() || x740_grappleArm->PortIsThrowing()) &&
                            mgr.GetPlayer()->GetGunHolsterState() == CPlayer::kGH_Drawn;
   x73c_gunMotion->Draw(mgr, offsetWorldXf);
 

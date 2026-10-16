@@ -33,12 +33,17 @@ enum class EResult : uint8_t {
   Refreshed, // already held: its time starts over
   NoTarget,
   NoEnergy,
+  Thrown, // paid for: the charge is on its way, and Hold lands it
 };
 
 class State {
 public:
-  // Holds `target`, paying the cost; nothing is spent unless it holds. With
-  // every slot taken, the hold closest to running out gives way.
+  // Pays for a charge thrown at `target`; nothing is spent unless it goes.
+  EResult Throw(uint16_t target, const Tuning& t);
+  // Holds `target` without paying: a thrown charge arriving. With every slot
+  // taken, the hold closest to running out gives way.
+  EResult Hold(uint16_t target, const Tuning& t);
+  // Throw and Hold at once.
   EResult Apply(uint16_t target, const Tuning& t);
   // Advances real time: holds run down and end, the meter refills.
   void Tick(float dt, const Tuning& t);
@@ -58,15 +63,20 @@ public:
   void SetMeter(float meter);
 
 private:
-  struct Hold {
+  struct Slot {
     uint16_t target = kNoTarget;
     float remaining = 0.f;
   };
   int Find(uint16_t target) const;
 
-  Hold mHolds[kMaxHeld];
+  Slot mHolds[kMaxHeld];
   int mCount = 0;
   float mMeter = kMeterMax;
 };
+
+// A charge's flight: moves `pos` straight toward `goal` by up to `step`, and
+// says whether it got there, in which case `pos` is `goal`. A step that isn't a
+// positive number leaves `pos` where it is.
+bool StepToward(float pos[3], const float goal[3], float step);
 
 } // namespace PortStasis

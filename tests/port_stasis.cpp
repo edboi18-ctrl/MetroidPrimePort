@@ -167,6 +167,62 @@ int main() {
     CHECK(Near(s.Meter(), 100.f));
   }
 
+  // A throw pays and holds nothing yet; the hold it lands costs nothing, and
+  // landing on a held target starts its time over.
+  {
+    State s;
+    CHECK(s.Throw(5, t) == EResult::Thrown);
+    CHECK(Near(s.Meter(), 50.f));
+    CHECK(!s.Held(5));
+    CHECK(s.Hold(5, t) == EResult::Held);
+    CHECK(Near(s.Meter(), 50.f));
+    CHECK(Near(s.TimeScale(5, t), 0.15f));
+    Run(s, t, 1.f);
+    CHECK(s.Hold(5, t) == EResult::Refreshed);
+    CHECK(Near(s.Remaining(5), 5.f));
+    CHECK(s.HeldCount() == 1);
+  }
+
+  // A throw that can't go spends nothing; a hold needs a target.
+  {
+    State s;
+    CHECK(s.Throw(PortStasis::kNoTarget, t) == EResult::NoTarget);
+    CHECK(Near(s.Meter(), 100.f));
+    s.SetMeter(49.f);
+    CHECK(s.Throw(5, t) == EResult::NoEnergy);
+    CHECK(Near(s.Meter(), 49.f));
+    CHECK(s.Hold(PortStasis::kNoTarget, t) == EResult::NoTarget);
+    CHECK(s.HeldCount() == 0);
+  }
+
+  // Two throws in flight at once: both paid up front, then the meter is empty.
+  {
+    State s;
+    CHECK(s.Throw(1, t) == EResult::Thrown);
+    CHECK(s.Throw(2, t) == EResult::Thrown);
+    CHECK(s.Throw(3, t) == EResult::NoEnergy);
+    CHECK(Near(s.Meter(), 0.f));
+  }
+
+  // The flight: a step moves exactly that far along the line, the last one
+  // lands on the goal, and a step that isn't positive goes nowhere.
+  {
+    float pos[3] = {0.f, 0.f, 0.f};
+    const float goal[3] = {3.f, 4.f, 0.f}; // 5 away
+    CHECK(!PortStasis::StepToward(pos, goal, 2.f));
+    CHECK(Near(pos[0], 1.2f) && Near(pos[1], 1.6f) && Near(pos[2], 0.f));
+    CHECK(!PortStasis::StepToward(pos, goal, 0.f));
+    CHECK(!PortStasis::StepToward(pos, goal, -1.f));
+    CHECK(!PortStasis::StepToward(pos, goal, std::numeric_limits< float >::quiet_NaN()));
+    CHECK(Near(pos[0], 1.2f) && Near(pos[1], 1.6f));
+    CHECK(PortStasis::StepToward(pos, goal, 10.f));
+    CHECK(pos[0] == 3.f && pos[1] == 4.f && pos[2] == 0.f);
+    CHECK(PortStasis::StepToward(pos, goal, 0.f)); // already there
+    const float far[3] = {std::numeric_limits< float >::infinity(), 0.f, 0.f};
+    CHECK(!PortStasis::StepToward(pos, far, 1.f));
+    CHECK(pos[0] == 3.f);
+  }
+
   std::puts("stasis: all checks passed");
   return 0;
 }

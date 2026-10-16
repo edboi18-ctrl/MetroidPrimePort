@@ -2,20 +2,34 @@
 
 // Dead Space Prime: the Dead Space mechanics this fork adds to Metroid Prime.
 // So far Stasis: PortStasis keeps the arithmetic, and this ties it to the game -
-// the enemy under lock-on, its time step while held, its blue glow, and the
-// meter in the helmet HUD. Everything is off unless PortDebug::Stasis() is on.
+// the enemy under lock-on, the charge Samus throws at it, its time step while
+// held, its blue glow, and the meter in the helmet HUD. Everything is off unless
+// PortDebug::Stasis() is on.
 
 class CColor;
 class CStateManager;
 class CTransform4f;
+class CVector3f;
 struct TUniqueId;
 
 namespace PortDeadSpace {
 
 // Once per running tick from CStateManager::Update, before anything thinks or
-// moves: takes a pending Stasis press, runs the holds down, and lets go of
-// enemies that died, were unloaded or deactivated.
+// moves: takes a pending Stasis press, flies the charges, runs the holds down,
+// and lets go of enemies that died, were unloaded or deactivated.
 void Tick(CStateManager& mgr, float dt);
+
+// The throw. A press that can pay sends a charge from Samus's left hand:
+// CGrappleArm plays the throw and calls ReleaseThrow as the hand lets go, with
+// the palm's position (null: from beside the view). With the arm busy, the
+// charge leaves at once. It homes in on its target and holds it on arrival.
+void ReleaseThrow(CStateManager& mgr, const CVector3f* hand);
+// Which way the throwing hand points from `from`: at what it throws at, else
+// along the view. A unit vector.
+CVector3f ThrowDirection(const CStateManager& mgr, const CVector3f& from);
+// The charges in flight and the bursts where they land, drawn into the world
+// (CStateManager::DrawWorld, after the rooms and before the gun).
+void DrawWorldEffects(const CStateManager& mgr);
 // The time step multiplier for `id` this tick: 1 unless Stasis holds it.
 // CStateManager scales the entity's PreThink, Think and collision move by it.
 float TimeScale(TUniqueId id);

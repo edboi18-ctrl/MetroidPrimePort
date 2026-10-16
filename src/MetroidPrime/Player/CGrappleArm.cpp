@@ -32,6 +32,8 @@
 #include "MetroidPrime/Weapons/GunController/CGunController.hpp"
 #include "MetroidPrime/Weapons/WeaponCommon.hpp"
 
+#include "port_dead_space.h"
+
 static const char* const kGrappleGear = "GrappleGear";
 static const char* const kGrappleNoz1 = "GrapNoz1";
 static const char* const kGrappleNoz2 = "GrapNoz2";
@@ -53,6 +55,9 @@ float CGrappleArm::kPhaseDelta = 0.875f;
 float CGrappleArm::kAmplitudeX = 0.25f;
 float CGrappleArm::kAmplitudeZ = 0.125f;
 float CGrappleArm::kMetresPerSecond = 5.f;
+// Dead Space Prime: how fast a Stasis throw plays the grapple animations, so the hand comes up
+// and thrusts quickly enough for a combat move.
+static const float kPortThrowSpeed = 1.75f;
 
 CGrappleArm::CGrappleArm(const CVector3f& scale)
 : x0_grappleArmModel(
@@ -95,7 +100,9 @@ CGrappleArm::CGrappleArm(const CVector3f& scale)
 , x3b2_26_grappleHit(false)
 , x3b2_27_armMoving(false)
 , x3b2_28_isGrappling(false)
-, x3b2_29_suitLoading(false) {
+, x3b2_29_suitLoading(false)
+, mPortThrow(false)
+, mPortThrowReleased(false) {
   x0_grappleArmModel->SetSortThermal(true);
   xa0_grappleGearModel.SetSortThermal(true);
   xec_grapNoz1Model.SetSortThermal(true);
@@ -201,6 +208,10 @@ void CGrappleArm::UpdateSwingAction(float swingT, float dt, CStateManager& mgr) 
   if (x3b2_29_suitLoading) {
     return;
   }
+  if (mPortThrow) {
+    PortUpdateThrow(dt, mgr);
+    return;
+  }
   if (x334_animState == kAS_FireGrapple) {
     DoUserAnimEvents(mgr);
   }
@@ -274,6 +285,16 @@ void CGrappleArm::UpdateArmMovement(float dt, CStateManager& mgr) {
 }
 
 void CGrappleArm::Update(float swingT, float dt, CStateManager& mgr) {
+  // Dead Space Prime: a gun animation taking the arm, or the arm going away (a suit loading),
+  // ends a Stasis throw.
+  if (mPortThrow && (x3b2_27_armMoving || !CanRender())) {
+    PortEndThrow(mgr);
+    x3b2_28_isGrappling = false;
+    if (!CanRender()) {
+      x334_animState = kAS_Done;
+      x3b2_24_active = false;
+    }
+  }
   if (!CanRender()) {
     if (x3b2_29_suitLoading) {
       LoadSuitPoll();
@@ -293,6 +314,9 @@ void CGrappleArm::Update(float swingT, float dt, CStateManager& mgr) {
                     x334_animState != kAS_OutOfGrapple
                 ? 4.f
                 : 1.f;
+  }
+  if (mPortThrow) {
+    speed = kPortThrowSpeed;
   }
   x0_grappleArmModel->AdvanceAnimation(dt * speed, mgr, kInvalidAreaId, true);
   if (mgr.GetPlayerState()->HasPowerUp(CPlayerState::kIT_GrappleBeam)) {
@@ -506,6 +530,11 @@ void CGrappleArm::DoUserAnimEvent(CStateManager& mgr, const CInt32POINode& node,
                                   EUserEventType type) {
   switch (type) {
   case kUE_Projectile:
+    // Dead Space Prime: in a Stasis throw the hand lets the charge go here, not a grapple beam.
+    if (mPortThrow) {
+      PortReleaseThrow(mgr);
+      return;
+    }
     if (x3b2_27_armMoving) {
       return;
     }
@@ -726,4 +755,67 @@ void CGrappleArm::DisconnectGrappleBeam() {
   x394_grappleClawGen->SetParticleEmission(false);
   x3b2_25_beamActive = false;
   GrappleBeamDisconnected();
+}
+
+bool CGrappleArm::PortThrow(CStateManager& mgr) {
+  if (!x0_grappleArmModel || x3b2_29_suitLoading || x3b2_24_active || x3b2_27_armMoving ||
+      x3b2_28_isGrappling || mPortThrow ||
+      mgr.GetPlayer()->GetGrappleState() != CPlayer::kGS_None) {
+    return false;
+  }
+  mPortThrow = true;
+  mPortThrowReleased = false;
+  SetAnimState(kAS_IntoGrapple);
+  return true;
+}
+
+void CGrappleArm::PortUpdateThrow(float dt, CStateManager& mgr) {
+  // A grapple takes the arm over: its own states carry on from here.
+  if (mgr.GetPlayer()->GetGrappleState() != CPlayer::kGS_None) {
+    PortEndThrow(mgr);
+    return;
+  }
+  if (x334_animState == kAS_FireGrapple) {
+    DoUserAnimEvents(mgr);
+  }
+  const CAnimData& animData = *x0_grappleArmModel->GetAnimationData();
+  if (animData.IsAnimTimeRemaining(dt, rstl::string_l("Whole Body"))) {
+    return;
+  }
+  switch (x334_animState) {
+  case kAS_IntoGrapple:
+    SetAnimState(kAS_FireGrapple);
+    break;
+  case kAS_FireGrapple:
+    // A thrust without the event still lets go, at its end.
+    PortReleaseThrow(mgr);
+    SetAnimState(kAS_OutOfGrapple);
+    break;
+  default:
+    PortReleaseThrow(mgr);
+    SetAnimState(kAS_Done);
+    x3b2_24_active = false;
+    mPortThrow = false;
+    break;
+  }
+}
+
+void CGrappleArm::PortReleaseThrow(CStateManager& mgr) {
+  if (mPortThrowReleased) {
+    return;
+  }
+  mPortThrowReleased = true;
+  if (!x0_grappleArmModel) {
+    PortDeadSpace::ReleaseThrow(mgr, nullptr);
+    return;
+  }
+  const CVector3f palm =
+      (x220_xf * x0_grappleArmModel->GetScaledLocatorTransform(rstl::string_l(kBeamNozzle)))
+          .GetTranslation();
+  PortDeadSpace::ReleaseThrow(mgr, &palm);
+}
+
+void CGrappleArm::PortEndThrow(CStateManager& mgr) {
+  PortReleaseThrow(mgr);
+  mPortThrow = false;
 }
