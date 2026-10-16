@@ -335,6 +335,14 @@ void SetManualAim(bool enabled);
 // direction and without a lock-on. Off by default and under Original experience.
 bool DoubleTapDash();
 void SetDoubleTapDash(bool enabled);
+// Dead Space Prime's walk speed: Samus's top walking speed and acceleration as a
+// multiple of retail's (1 under Original experience), and the double-tap dash's
+// speed as a multiple of its own; the setters clamp to PortInput::kWalkSpeed* /
+// kDashSpeed*.
+float WalkSpeed();
+void SetWalkSpeed(float scale);
+float DashSpeed();
+void SetDashSpeed(float scale);
 // The Scan and X-Ray visors trade D-pad directions (Remastered's Dual Sticks
 // layout), off by default.
 bool SwapScanXray();

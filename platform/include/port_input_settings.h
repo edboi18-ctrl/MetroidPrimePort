@@ -38,6 +38,15 @@ constexpr float kStasisSlowDefault = 0.15f;
 constexpr float kStasisDurationMin = 1.f;
 constexpr float kStasisDurationMax = 15.f;
 constexpr float kStasisDurationDefault = 5.f;
+// Dead Space Prime's movement: Samus's top walking speed (and acceleration, so she
+// reaches it as quickly) as a multiple of retail's, and the double-tap dash's
+// speed, and so its length, as a multiple of its own.
+constexpr float kWalkSpeedMin = 1.f;
+constexpr float kWalkSpeedMax = 1.5f;
+constexpr float kWalkSpeedDefault = 1.15f;
+constexpr float kDashSpeedMin = 0.75f;
+constexpr float kDashSpeedMax = 1.5f;
+constexpr float kDashSpeedDefault = 1.f;
 
 struct Settings {
   bool mouseAim = false;
@@ -57,6 +66,9 @@ struct Settings {
   // points, no aim assist) and dashing on a double-tapped movement key; off.
   bool manualAim = false;
   bool doubleTapDash = false;
+  // Dead Space Prime: a faster walk, on by default, and the dash's speed.
+  float walkSpeed = kWalkSpeedDefault;
+  float dashSpeed = kDashSpeedDefault;
   bool springFlick = false;
   float springFlickRate = 6.f;
   float stickAimRate = 900.f;

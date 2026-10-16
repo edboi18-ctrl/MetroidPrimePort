@@ -2,8 +2,8 @@
 
 This branch (`dead-space-prime`) of the Metroid Prime native port adds Dead
 Space mechanics to Metroid Prime, keeping Prime's own controls and HUD. Each
-addition is off by default, so with nothing switched on the game plays as the
-port does.
+addition is off by default except a slightly faster walk (see
+[Walk speed](#walk-speed)), and **Original experience** turns that off too.
 
 Everything else about the port, including building, running and its other
 options, is in [README.md](README.md) and [docs/NATIVE_PORT.md](docs/NATIVE_PORT.md).
@@ -181,18 +181,43 @@ key instead.
   back, left or right, relative to where she faces. Holding a key never
   dashes, and a key of another direction pressed in between starts over.
 - Keyboard only: a stick flicked twice doesn't dash.
-- The dash is a straight burst, 26 m/s easing to 10 m/s over 0.28 s (about
-  5 m), slower in water and the like as walking is, with retail's dash sound
-  and rumble. A wall ends it. You can jump out of it, dash once in the air per
-  jump, and dash again 0.35 s after the last. Locked on, retail's dash works as
-  before.
-- These numbers are first guesses, to be tuned in play: `kPortDashTime`,
+- The dash is a straight burst, 30 m/s easing to 14 m/s over 0.3 s (about
+  6.7 m; it was 26 to 10 m/s over 0.28 s, about 5.2 m), slower in water and
+  the like as walking is, but never slower than Samus walks there. It has
+  retail's dash sound and rumble. A wall ends it. You can jump out of it, dash
+  once in the air per jump, and dash again 0.35 s after the last. Locked on,
+  retail's dash works as before.
+- **Dash speed** (F1 > Game > Dead Space, 75-150%) scales both speeds, and so
+  the distance, since the dash always lasts 0.3 s: 75% covers about 5.1 m and
+  150% about 10.1 m.
+- The rest are constants, to be tuned in play: `kPortDashTime`,
   `kPortDashStartSpeed`, `kPortDashEndSpeed` and `kPortDashCooldown` in
   `src/MetroidPrime/Player/CPlayerDynamics.cpp`, and `kWindowMs` in
   `platform/include/port_double_tap.h`.
 
 Both are off by default and under **Original experience**, and saved in
-`port_settings.ini` as `manual_aim` and `double_tap_dash`.
+`port_settings.ini` as `manual_aim`, `double_tap_dash` and `dash_speed`.
+
+The distances are per tick at 60 Hz, as `PortUpdateDash` moves Samus: 18
+ticks of 1/60 s, each at that tick's eased speed. At 120 or 144 Hz they come
+out within 0.1 m of that.
+
+## Walk speed
+
+Samus walks a little faster: **Walk speed** (F1 > Game > Dead Space) is 115%
+of the original game's by default, from 100% to 150%, saved as `walk_speed`.
+**Original experience** walks at 100%.
+
+- It scales the tweak's top walking speed and its acceleration together, for
+  every surface (water, lava and the like stay slower than dry ground) and in
+  the air, in every direction. Morph ball is unchanged.
+- Samus reaches the new speed in the same time as she reaches the original
+  one. Each tick the walking force is the acceleration times the gap between
+  the top speed and her speed, over the top speed, so scaling both by the same
+  factor leaves that rate as it was. Her steady speed works out to retail's
+  `CPlayer::GetActualFirstPersonMaxVelocity`, the top speed less a friction
+  term that doesn't change, so it goes up by 15% of the tweak's top speed: a
+  little more than 15% of her actual speed.
 
 ## Where the code is
 
@@ -209,7 +234,7 @@ Both are off by default and under **Original experience**, and saved in
 | `src/MetroidPrime/CStateManager.cpp` | Runs Stasis each tick, scales a held enemy's `PreThink`, `Think` and collision move, and draws the charges after the rooms. |
 | `src/MetroidPrime/Player/CGrappleArm.cpp`, `include/MetroidPrime/Player/CGrappleArm.hpp` | The throw: the grapple animations in order, and the charge let go at the thrust's projectile event. |
 | `src/MetroidPrime/Player/CPlayerOrbit.cpp` | Points the throwing hand at the enemy; manual aim's limits on lock-on and the aim assist. |
-| `src/MetroidPrime/Player/CPlayerDynamics.cpp`, `src/MetroidPrime/Player/CPlayer.cpp`, `include/MetroidPrime/Player/CPlayer.hpp` | The double-tap dash. |
+| `src/MetroidPrime/Player/CPlayerDynamics.cpp`, `src/MetroidPrime/Player/CPlayer.cpp`, `include/MetroidPrime/Player/CPlayer.hpp` | The double-tap dash, and the walk speed (`PortWalkMaxSpeed`, `PortWalkAcceleration`). |
 | `src/MetroidPrime/Player/CPlayerGun.cpp` | Draws the throwing hand, and keeps the suit's right arm drawn while it throws; under manual aim, has missiles, Super Missiles and the Wave Beam seek the target nearest the crosshair. |
 | `src/MetroidPrime/Enemies/CPatterned.cpp` | The glow, in `PreRender`. |
 | `src/GuiSys/CAuiEnergyBarT01.cpp`, `include/GuiSys/CAuiEnergyBarT01.hpp` | Draws the meter and its label along the energy bar, inside the bar's own draw. |

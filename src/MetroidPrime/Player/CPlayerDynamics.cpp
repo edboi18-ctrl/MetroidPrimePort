@@ -57,6 +57,18 @@ static bool sPlanarMovement = false;
 static bool sOrbitAirCarry = false;
 #endif
 
+// Dead Space Prime's walk speed (PortDebug::WalkSpeed). First-person movement reads its top
+// speed and acceleration through these. Scaling both by the same factor raises the top speed by
+// that factor of the tweak's, and leaves the force law's rate (acceleration over top speed) and so
+// the time to reach it as retail's.
+static float PortWalkMaxSpeed(CPlayer::ESurfaceRestraints surface) {
+  return gpTweakPlayer->GetPlayerTranslationMaxSpeed(surface) * PortDebug::WalkSpeed();
+}
+
+static float PortWalkAcceleration(CPlayer::ESurfaceRestraints surface) {
+  return gpTweakPlayer->GetMaxTranslationalAcceleration(surface) * PortDebug::WalkSpeed();
+}
+
 static const CMaterialList BallTransitionInclude = CMaterialList(kMT_Solid);
 static const CMaterialList BallTransitionExclude =
     CMaterialList(kMT_ProjectilePassthrough, kMT_Player, kMT_Character, kMT_CameraPassthrough);
@@ -110,8 +122,8 @@ CVector3f CPlayer::GetDampedClampedVelocityWR() const {
     }
     // Remastered clamps the planar speed; only forward is, as retail, so a scan
     // dash's sideways momentum still carries once the lock breaks (issue #30).
-    planarVelocity.SetY(CMath::Limit(
-        planarVelocity.GetY(), gpTweakPlayer->GetPlayerTranslationMaxSpeed(GetSurfaceRestraint())));
+    planarVelocity.SetY(
+        CMath::Limit(planarVelocity.GetY(), PortWalkMaxSpeed(GetSurfaceRestraint())));
     if (x258_movementState == NPlayer::kMS_OnGround) {
       planarVelocity.SetZ(0.f);
     }
@@ -141,7 +153,7 @@ CVector3f CPlayer::GetDampedClampedVelocityWR() const {
   // Only forward speed is capped, as retail, under mouse aim too: sideways
   // momentum past walking speed (a scan dash whose lock broke mid-air) must
   // carry (issue #30). Free strafing stays within the cap through its force law.
-  const float maxSpeed = gpTweakPlayer->GetPlayerTranslationMaxSpeed(GetSurfaceRestraint());
+  const float maxSpeed = PortWalkMaxSpeed(GetSurfaceRestraint());
   localVelocity.SetY(CMath::Limit(localVelocity.GetY(), maxSpeed));
   if (x258_movementState == NPlayer::kMS_OnGround) {
     localVelocity.SetZ(0.f);
@@ -262,11 +274,11 @@ void CPlayer::FinishSidewaysDash() {
 
 // Dead Space Prime's double-tap dash. Retail's dash circles a lock-on; this one goes straight
 // whichever way was tapped: a burst from kPortDashStartSpeed easing to kPortDashEndSpeed (metres a
-// second) over kPortDashTime, slowed in water and the like as walking is. One a jump in the air,
-// and a short rest between dashes.
-static const float kPortDashTime = 0.28f;
-static const float kPortDashStartSpeed = 26.f;
-static const float kPortDashEndSpeed = 10.f;
+// second, times PortDebug::DashSpeed) over kPortDashTime, slowed in water and the like as walking
+// is, and never slower than walking. One a jump in the air, and a short rest between dashes.
+static const float kPortDashTime = 0.3f;
+static const float kPortDashStartSpeed = 30.f;
+static const float kPortDashEndSpeed = 14.f;
 static const float kPortDashCooldown = 0.35f;
 
 void CPlayer::PortStartDash(int direction, CStateManager& mgr) {
@@ -316,8 +328,11 @@ bool CPlayer::PortUpdateDash(float dt) {
   const float normalMax = gpTweakPlayer->GetPlayerTranslationMaxSpeed(kSR_Normal);
   const float surfaceMax = gpTweakPlayer->GetPlayerTranslationMaxSpeed(GetSurfaceRestraint());
   const float surface = normalMax > 0.f ? CMath::Clamp(0.f, surfaceMax / normalMax, 1.f) : 1.f;
-  const float speed =
-      surface * (kPortDashStartSpeed + (kPortDashEndSpeed - kPortDashStartSpeed) * progress);
+  // Walking's top speed here at 60 Hz, which the force law holds at any rate.
+  const float walkSpeed = GetActualFirstPersonMaxVelocity(1.f / 60.f);
+  const float speed = CMath::Max(
+      walkSpeed, surface * PortDebug::DashSpeed() *
+                     (kPortDashStartSpeed + (kPortDashEndSpeed - kPortDashStartSpeed) * progress));
   SetVelocityWR(CVector3f(mPortDashDirection.GetX() * speed, mPortDashDirection.GetY() * speed,
                           GetVelocityWR().GetZ()));
   mPortDashTime -= dt;
@@ -522,11 +537,10 @@ void CPlayer::ComputeMovement(const CFinalInput& input, CStateManager& mgr, floa
 #endif
   float forwardForce;
   if (!close_enough(0.f, forwardInput)) {
-    const float maxSpeed = gpTweakPlayer->GetPlayerTranslationMaxSpeed(GetSurfaceRestraint());
+    const float maxSpeed = PortWalkMaxSpeed(GetSurfaceRestraint());
     const float friction = gpTweakPlayer->GetPlayerTranslationFriction(GetSurfaceRestraint());
     const float mass = GetMass();
-    const float acceleration =
-        gpTweakPlayer->GetMaxTranslationalAcceleration(GetSurfaceRestraint());
+    const float acceleration = PortWalkAcceleration(GetSurfaceRestraint());
     float frictionSpeed = friction * mass / (dt * acceleration);
     frictionSpeed *= maxSpeed;
 #ifdef TARGET_PC
@@ -546,8 +560,7 @@ void CPlayer::ComputeMovement(const CFinalInput& input, CStateManager& mgr, floa
     const float forwardFraction = CMath::Clamp(
         -1.f, (desiredSpeed - GetTransform().TransposeRotate(GetVelocityWR()).GetY()) / maxSpeed,
         1.f);
-    forwardForce =
-        forwardFraction * gpTweakPlayer->GetMaxTranslationalAcceleration(GetSurfaceRestraint());
+    forwardForce = forwardFraction * PortWalkAcceleration(GetSurfaceRestraint());
 #ifdef TARGET_PC
     forwardForce *= law.gain;
 #endif
@@ -556,8 +569,8 @@ void CPlayer::ComputeMovement(const CFinalInput& input, CStateManager& mgr, floa
   }
   float strafeForce = 0.f;
   if (mouseMovement) {
-    const float acceleration = gpTweakPlayer->GetMaxTranslationalAcceleration(GetSurfaceRestraint());
-    const float maxSpeed = gpTweakPlayer->GetPlayerTranslationMaxSpeed(GetSurfaceRestraint());
+    const float acceleration = PortWalkAcceleration(GetSurfaceRestraint());
+    const float maxSpeed = PortWalkMaxSpeed(GetSurfaceRestraint());
     const float sideVelocity = GetTransform().TransposeRotate(GetVelocityWR()).GetX();
     strafeForce = PortMouse::AxisForce(strafeInput, sideVelocity, maxSpeed,
                                       gpTweakPlayer->GetPlayerTranslationFriction(GetSurfaceRestraint()),
@@ -1109,8 +1122,8 @@ float CPlayer::GetBallMaxVelocity() const {
 float CPlayer::GetActualFirstPersonMaxVelocity(float dt) const {
   const float friction = gpTweakPlayer->GetPlayerTranslationFriction(GetSurfaceRestraint());
   const float frictionForce = friction * GetMass();
-  const float maxSpeed = gpTweakPlayer->GetPlayerTranslationMaxSpeed(GetSurfaceRestraint());
-  const float acceleration = gpTweakPlayer->GetMaxTranslationalAcceleration(GetSurfaceRestraint());
+  const float maxSpeed = PortWalkMaxSpeed(GetSurfaceRestraint());
+  const float acceleration = PortWalkAcceleration(GetSurfaceRestraint());
   return -(frictionForce * maxSpeed / (acceleration * dt) - maxSpeed - friction);
 }
 

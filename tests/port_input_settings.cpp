@@ -89,6 +89,20 @@ int main() {
   Check(ApplySetting("double_tap_dash", "1") && Get().doubleTapDash, "double_tap_dash");
   Check(ApplySetting("manual_aim", "0") && !Get().manualAim, "manual_aim off");
 
+  // Dead Space Prime's walk and dash speeds: a faster walk by default, both held to their ranges.
+  Check(Get().walkSpeed == kWalkSpeedDefault && Get().dashSpeed == kDashSpeedDefault,
+        "walk and dash speed defaults");
+  Check(defaults.find("double_tap_dash=0\nwalk_speed=1.15\ndash_speed=1\n") != std::string::npos,
+        "walk and dash speed lines");
+  Check(ApplySetting("walk_speed", "1.3") && Get().walkSpeed == 1.3f, "walk_speed");
+  ApplySetting("walk_speed", "0.5");
+  Check(Get().walkSpeed == 1.3f, "walk_speed below range");
+  ApplySetting("walk_speed", "inf");
+  Check(Get().walkSpeed == 1.3f, "walk_speed not finite");
+  Check(ApplySetting("dash_speed", "1.25") && Get().dashSpeed == 1.25f, "dash_speed");
+  ApplySetting("dash_speed", "2");
+  Check(Get().dashSpeed == 1.25f, "dash_speed above range");
+
   // Touch layout.
   Check(ApplySetting("touch_layout", "1:0.5,0.5,1") && TouchLayout() == "1:0.5,0.5,1", "touch_layout");
   Check(!SetTouchLayout(std::string(kTouchLayoutMaxLen + 1, 'x')), "touch layout length");

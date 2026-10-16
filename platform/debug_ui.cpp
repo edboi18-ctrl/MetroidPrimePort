@@ -1755,6 +1755,30 @@ void SetDoubleTapDash(bool enabled) {
   MarkDirty();
 }
 
+float WalkSpeed() {
+  EnsureInitialized();
+  return sOriginalExperience ? 1.f : sInput.walkSpeed;
+}
+
+void SetWalkSpeed(float scale) {
+  EnsureInitialized();
+  if (!std::isfinite(scale)) return;
+  sInput.walkSpeed = std::clamp(scale, PortInput::kWalkSpeedMin, PortInput::kWalkSpeedMax);
+  MarkDirty();
+}
+
+float DashSpeed() {
+  EnsureInitialized();
+  return sInput.dashSpeed;
+}
+
+void SetDashSpeed(float scale) {
+  EnsureInitialized();
+  if (!std::isfinite(scale)) return;
+  sInput.dashSpeed = std::clamp(scale, PortInput::kDashSpeedMin, PortInput::kDashSpeedMax);
+  MarkDirty();
+}
+
 bool SwapScanXray() {
   EnsureInitialized();
   return sInput.swapScanXray && !TouchActive() && !sOriginalExperience;
@@ -6121,6 +6145,23 @@ void DrawControlsOptions() {
   ItemHelp("Tap a movement key twice quickly (keyboard) and Samus dashes that way: forward, back, "
            "left or right, without a lock-on. Locked on, the jump-and-strafe dash works as "
            "before.");
+  ImGui::BeginDisabled(!sInput.doubleTapDash);
+  float dashPercent = sInput.dashSpeed * 100.f;
+  if (ImGui::SliderFloat("Dash speed", &dashPercent, PortInput::kDashSpeedMin * 100.f,
+                         PortInput::kDashSpeedMax * 100.f, "%.0f%%")) {
+    SetDashSpeed(dashPercent / 100.f);
+  }
+  ItemHelp("How fast the double-tap dash goes, and so how far: it always lasts 0.3 s, and at 100% "
+           "it covers about 6.7 m, starting at 30 m/s. It never goes slower than you walk.");
+  ImGui::EndDisabled();
+  float walkPercent = sInput.walkSpeed * 100.f;
+  if (ImGui::SliderFloat("Walk speed", &walkPercent, PortInput::kWalkSpeedMin * 100.f,
+                         PortInput::kWalkSpeedMax * 100.f, "%.0f%% of retail")) {
+    SetWalkSpeed(walkPercent / 100.f);
+  }
+  ItemHelp("Samus's top walking speed, on foot, in any direction and in the air, as a share of "
+           "the original game's. She reaches it as quickly as she reaches the original speed. "
+           "Morph ball is unchanged.");
   EndOriginalLocked(locked);
 }
 
@@ -7835,7 +7876,7 @@ void DrawOriginalSection() {
   ItemHelp("Plays the game as on the GameCube: 640x480 at 4:3, 60 Hz with no interpolation, no "
            "mods, the retail HUD, font, button icons, FOV and cutscenes, and none of the gameplay extras (spring ball, "
            "fast morph, charge and lock-on options, turbo fire, unlocks, Dead Space's Stasis, "
-           "manual aim and double-tap dash). "
+           "manual aim, double-tap dash and the faster walk). "
            "The other settings keep "
            "their values and come back when it's turned off. Controls, cheats, save states, the "
            "randomizer, Archipelago and the timer still work.");
