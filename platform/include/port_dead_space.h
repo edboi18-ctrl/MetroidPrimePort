@@ -30,6 +30,11 @@ bool ThrowSoundReplacesArm();
 // Which way the throwing hand points from `from`: at what it throws at, else
 // along the view. A unit vector.
 CVector3f ThrowDirection(const CStateManager& mgr, const CVector3f& from);
+// Manual aim (PortDebug::ManualAim): what a missile, Super Missile or Wave Beam
+// shot fired with no lock-on homes in on. The targetable thing nearest the
+// crosshair by angle, within 15 degrees and 60 m and in sight, or
+// kInvalidUniqueId.
+TUniqueId SeekTarget(CStateManager& mgr);
 // The charges in flight and the bursts where they land, drawn into the world
 // (CStateManager::DrawWorld, after the rooms and before the gun).
 void DrawWorldEffects(const CStateManager& mgr);

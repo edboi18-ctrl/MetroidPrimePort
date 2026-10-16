@@ -6110,9 +6110,10 @@ void DrawControlsOptions() {
     SetManualAim(manualAim);
   }
   ItemHelp("Aim by hand: lock-on only reaches what the Scan Visor scans and grapple points, and "
-           "shots go where the crosshair is, with no aim assist. Stasis is thrown along the "
-           "crosshair at the enemy it points at; a throw that points at none flies to where you "
-           "aimed and is spent, as in Dead Space.");
+           "shots go where the crosshair is, with no aim assist. Missiles, Super Missiles and the "
+           "Wave Beam still home in on the target nearest the crosshair. Stasis is thrown along "
+           "the crosshair at the enemy it points at; a throw that points at none flies to where "
+           "you aimed and is spent, as in Dead Space.");
   bool doubleTapDash = sInput.doubleTapDash;
   if (ImGui::Checkbox("Double-tap dash", &doubleTapDash)) {
     SetDoubleTapDash(doubleTapDash);

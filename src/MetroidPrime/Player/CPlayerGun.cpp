@@ -1,4 +1,5 @@
 #include "MetroidPrime/Player/CPlayerGun.hpp"
+#include "port_dead_space.h"
 #include "port_debug.h"
 #include "port_room_env.h"
 #include "port_synthetic_effect.h"
@@ -1322,10 +1323,16 @@ void CPlayerGun::UpdateNormalShotCycle(float dt, CStateManager& mgr) {
     PortStartFlash(3 + int(x310_currentBeam));
   }
 #endif
-  x72c_currentBeam->Fire(
-      x834_27_underwater, dt, CPlayerState::EChargeStage(x330_chargeState), xf, mgr,
-      static_cast< const TUniqueId& >(targetHoming ? GetTargetId(mgr) : kInvalidUniqueId),
-      x340_chargeBeamFactor, x340_chargeBeamFactor);
+  TUniqueId homingTarget = targetHoming ? GetTargetId(mgr) : kInvalidUniqueId;
+  // Dead Space Prime: under manual aim, with no lock-on to home in on, a Wave Beam shot seeks what
+  // the crosshair is nearest.
+  if (targetHoming && homingTarget == kInvalidUniqueId &&
+      x310_currentBeam == CPlayerState::kBI_Wave && PortDebug::ManualAim()) {
+    homingTarget = PortDeadSpace::SeekTarget(mgr);
+  }
+  x72c_currentBeam->Fire(x834_27_underwater, dt, CPlayerState::EChargeStage(x330_chargeState), xf,
+                         mgr, static_cast< const TUniqueId& >(homingTarget), x340_chargeBeamFactor,
+                         x340_chargeBeamFactor);
 
   mgr.InformListeners(GetGunMotionTransform().GetTranslation(), kLNT_PlayerFire);
 }
@@ -1368,6 +1375,13 @@ void CPlayerGun::FireSecondary(float dt, CStateManager& mgr) {
     if (x832_26_comboFiring && targetId == kInvalidUniqueId &&
         x310_currentBeam == CPlayerState::kBI_Wave) {
       targetId = mgr.GetPlayer()->GetAimTargetId();
+    }
+    // Dead Space Prime: likewise a missile, a Super Missile (the Power Beam's combo) or the
+    // Wavebuster.
+    if (targetId == kInvalidUniqueId && PortDebug::ManualAim() &&
+        (!x832_26_comboFiring || x310_currentBeam == CPlayerState::kBI_Power ||
+         x310_currentBeam == CPlayerState::kBI_Wave)) {
+      targetId = PortDeadSpace::SeekTarget(mgr);
     }
 
     CTransform4f xf(x833_29_pointBlankWorldSurface ? x448_elbowWorldXf
@@ -2826,6 +2840,10 @@ void CPlayerGun::UpdateAuxWeapons(float dt, const CTransform4f& targetXf, CState
       TUniqueId targetId = GetTargetId(mgr);
       if (targetId == kInvalidUniqueId) {
         targetId = mgr.GetPlayer()->GetAimTargetId();
+      }
+      // Dead Space Prime: and under manual aim, what the crosshair is nearest.
+      if (targetId == kInvalidUniqueId && PortDebug::ManualAim()) {
+        targetId = PortDeadSpace::SeekTarget(mgr);
       }
       x744_auxWeapon->SetNewTarget(targetId, mgr);
     }

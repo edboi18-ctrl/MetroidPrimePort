@@ -35,6 +35,7 @@
 #include "MetroidPrime/Player/CPlayer.hpp"
 #include "MetroidPrime/Player/CPlayerGun.hpp"
 #include "MetroidPrime/SFX/UI.h"
+#include "MetroidPrime/ScriptObjects/CScriptGrapplePoint.hpp"
 #include "MetroidPrime/TCastTo.hpp"
 #include "MetroidPrime/TGameTypes.hpp"
 #include "dolphin/gx/GXVert.h"
@@ -81,6 +82,10 @@ const float kAimTolerance = 0.5f;
 // A charge thrown at no one still catches an enemy whose body, grown by this, it
 // passes through.
 const float kCatchTolerance = 0.3f;
+// Manual aim: how far from the crosshair, in degrees, and how far away a missile or Wave Beam
+// shot still finds something to home in on.
+const float kSeekAngle = 15.f;
+const float kSeekRange = 60.f;
 
 // A paid press, from the throw until its charge lands.
 struct Throw {
@@ -605,6 +610,50 @@ void ReleaseThrow(CStateManager& mgr, const CVector3f* hand) {
 
 bool ThrowSoundReplacesArm() {
   return PortDeadSpaceSound::Available(PortDeadSpaceSound::ECue::StasisFire);
+}
+
+TUniqueId SeekTarget(CStateManager& mgr) {
+  const CTransform4f& cam = mgr.GetCameraManager()->GetCurrentCamera(mgr).GetTransform();
+  const CVector3f eye = cam.GetTranslation();
+  const CVector3f dir = cam.GetForward().AsNormalized();
+  const float radians = kSeekAngle * 0.017453293f;
+  const float minCosine = std::cos(radians);
+  // Everything targetable near the cone: the box around its axis, as wide as its far end.
+  TEntityList nearList;
+  const float halfWidth = kSeekRange * std::tan(radians);
+  const CVector3f far = eye + dir * kSeekRange;
+  const CVector3f lo(std::min(eye.GetX(), far.GetX()) - halfWidth,
+                     std::min(eye.GetY(), far.GetY()) - halfWidth,
+                     std::min(eye.GetZ(), far.GetZ()) - halfWidth);
+  const CVector3f hi(std::max(eye.GetX(), far.GetX()) + halfWidth,
+                     std::max(eye.GetY(), far.GetY()) + halfWidth,
+                     std::max(eye.GetZ(), far.GetZ()) + halfWidth);
+  mgr.BuildNearList(nearList, CAABox(lo, hi),
+                    CMaterialFilter::MakeInclude(CMaterialList(kMT_Target)), mgr.GetPlayer());
+  TUniqueId best = kInvalidUniqueId;
+  float bestCosine = minCosine;
+  for (const TUniqueId id : nearList) {
+    const CActor* act = TCastToConstPtr< CActor >(mgr.GetObjectById(id));
+    if (act == nullptr || !act->GetActive() || !act->GetTargetable() ||
+        !act->GetMaterialList().HasMaterial(kMT_Target) ||
+        TCastToConstPtr< CScriptGrapplePoint >(act)) {
+      continue;
+    }
+    if (const CPatterned* enemy = TCastToConstPtr< CPatterned >(act)) {
+      if (!enemy->IsAlive()) continue;
+    }
+    const CVector3f toTarget = act->GetAimPosition(mgr, 0.f) - eye;
+    const float distance = toTarget.Magnitude();
+    if (distance < 0.1f || distance > kSeekRange) continue;
+    const float cosine = CVector3f::Dot(toTarget, dir) / distance;
+    if (cosine < bestCosine) continue;
+    if (!mgr.RayStaticIntersection(eye, toTarget / distance, distance, SightFilter()).IsInvalid()) {
+      continue;
+    }
+    best = id;
+    bestCosine = cosine;
+  }
+  return best;
 }
 
 CVector3f ThrowDirection(const CStateManager& mgr, const CVector3f& from) {

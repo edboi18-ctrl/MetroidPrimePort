@@ -152,8 +152,14 @@ aim (F1 > Controls), where the crosshair follows the mouse.
   lock-on press does nothing (it would otherwise hold a point to strafe
   around). A scan lock on an enemy lets go when you leave the Scan Visor.
 - Shots go where the crosshair is: the game's aim assist, which turns shots
-  toward a nearby enemy even without a lock-on, is off. Missiles and the Wave
-  Beam don't home without a lock-on either.
+  toward a nearby enemy even without a lock-on, is off.
+- Missiles, Super Missiles and Wave Beam shots (the Wavebuster included) still
+  home in, on the targetable thing nearest the crosshair by angle: within 15
+  degrees of it and 60 m, in sight, picked as each is fired (and kept up to
+  date while the Wavebuster fires). Locked on in the Scan Visor, they home on
+  the lock as before. The Ice Spreader, the Flamethrower and the other beams
+  don't seek. `kSeekAngle` and `kSeekRange` in `platform/port_dead_space.cpp`
+  set the cone.
 - Stasis is thrown along the crosshair at the nearest enemy it points at, before
   any wall, allowing 0.5 m beside its body. Pointed at none, the charge flies to
   where the crosshair is (the first wall, or 60 m out) and is spent, as in Dead
@@ -204,7 +210,7 @@ Both are off by default and under **Original experience**, and saved in
 | `src/MetroidPrime/Player/CGrappleArm.cpp`, `include/MetroidPrime/Player/CGrappleArm.hpp` | The throw: the grapple animations in order, and the charge let go at the thrust's projectile event. |
 | `src/MetroidPrime/Player/CPlayerOrbit.cpp` | Points the throwing hand at the enemy; manual aim's limits on lock-on and the aim assist. |
 | `src/MetroidPrime/Player/CPlayerDynamics.cpp`, `src/MetroidPrime/Player/CPlayer.cpp`, `include/MetroidPrime/Player/CPlayer.hpp` | The double-tap dash. |
-| `src/MetroidPrime/Player/CPlayerGun.cpp` | Draws the throwing hand, and keeps the suit's right arm drawn while it throws. |
+| `src/MetroidPrime/Player/CPlayerGun.cpp` | Draws the throwing hand, and keeps the suit's right arm drawn while it throws; under manual aim, has missiles, Super Missiles and the Wave Beam seek the target nearest the crosshair. |
 | `src/MetroidPrime/Enemies/CPatterned.cpp` | The glow, in `PreRender`. |
 | `src/GuiSys/CAuiEnergyBarT01.cpp`, `include/GuiSys/CAuiEnergyBarT01.hpp` | Draws the meter and its label along the energy bar, inside the bar's own draw. |
 | `src/MetroidPrime/HUD/CHudEnergyInterface.cpp` | Turns the meter on for Samus's energy bar in every visor but morph ball, and moves the low-energy warning below it. |
