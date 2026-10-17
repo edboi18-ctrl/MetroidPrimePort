@@ -16,7 +16,7 @@ Windows build steps are also in the
 
 From Dead Space: slow an enemy down for a few seconds.
 
-**Turn it on:** F1 > Game > Dead Space > **Stasis**.
+**Turn it on:** F1 > Controls > Options > Dead Space > **Stasis**.
 
 **Use it:** lock on to an enemy (L, or the right mouse button under mouse aim)
 and press **Stasis**. Without a lock, Stasis takes the enemy your shots would
@@ -77,7 +77,7 @@ your PC.
 2. Put the two sounds there as `stasis_fire.wav` (the charge leaving the hand)
    and `stasis_hit.wav` (the charge catching its enemy). Any WAV that SDL reads
    works: PCM or ADPCM, any sample rate, mono or stereo.
-3. F1 > Game > Dead Space shows each as found or none. A file added while the
+3. F1 > Controls > Options > Dead Space shows each as found or none. A file added while the
    game runs is picked up within a couple of seconds.
 
 Dead Space keeps its audio in EA's own formats. [vgmstream](https://github.com/vgmstream/vgmstream)
@@ -93,7 +93,7 @@ quieter the farther away it lands. Without a file, the throw keeps the grapple
 arm's own sound and the hit keeps the HUD blip; with a fire sound, the grapple
 arm's is left out.
 
-**Tuning:** F1 > Game > Dead Space has sliders for the speed (5-50% of normal)
+**Tuning:** F1 > Controls > Options > Dead Space has sliders for the speed (5-50% of normal)
 and the duration (1-15 s). They are saved in `port_settings.ini`:
 
 ```ini
@@ -146,8 +146,8 @@ press), because they are always loaded during play.
 
 For keyboard and mouse: aim by hand, as in Dead Space, instead of locking on.
 
-**Turn it on:** F1 > Game > Dead Space > **Manual aim**. It is meant for mouse
-aim (F1 > Controls), where the crosshair follows the mouse.
+**Turn it on:** F1 > Controls > Options > Dead Space > **Manual aim**. It is meant for mouse
+aim (F1 > Controls > Mouse settings), where the crosshair follows the mouse.
 
 - Lock-on reaches only what the Scan Visor scans and grapple points. In the
   combat, thermal and X-ray visors enemies can't be locked onto, and an empty
@@ -176,7 +176,7 @@ Retail's dash needs a lock-on: jump while strafing around the locked target.
 With manual aim there is no lock-on, so this dashes on a double-tapped movement
 key instead.
 
-**Turn it on:** F1 > Game > Dead Space > **Double-tap dash**.
+**Turn it on:** F1 > Controls > Options > Dead Space > **Double-tap dash**.
 
 - Tap a movement key twice within 0.25 s (the keys bound to the stick
   directions, W, A, S and D by default) and Samus dashes that way: forward,
@@ -189,7 +189,7 @@ key instead.
   It has retail's dash sound and rumble. A wall ends it. You can jump out of
   it, dash once in the air per jump, and dash again 0.35 s after the last.
   Locked on, retail's dash works as before.
-- **Dash speed** (F1 > Game > Dead Space, 75-150%, 130% by default) scales
+- **Dash speed** (F1 > Controls > Options > Dead Space, 75-150%, 130% by default) scales
   both speeds, and so the distance, since the dash always lasts 0.3 s. At 100%
   it goes from 30 to 14 m/s, about 6.7 m; 75% covers about 5.1 m and 150%
   about 10.1 m. The first version was 26 to 10 m/s over 0.28 s, about 5.2 m;
@@ -208,7 +208,7 @@ out within 0.1 m of that.
 
 ## Walk speed
 
-Samus walks a little faster: **Walk speed** (F1 > Game > Dead Space) is 115%
+Samus walks a little faster: **Walk speed** (F1 > Controls > Options > Dead Space) is 115%
 of the original game's by default, from 100% to 150%, saved as `walk_speed`.
 **Original experience** walks at 100%.
 
@@ -227,7 +227,7 @@ of the original game's by default, from 100% to 150%, saved as `walk_speed`.
 
 As in Metroid Prime Hunters, the arm cannon leans the way you turn, and the
 crosshair leans with it: shots still go to the crosshair. **Gun sway** (F1 >
-Game > Dead Space) is the most it leans, 3 degrees by default, from 0 (off) to
+Controls > Options > Dead Space) is the most it leans, 3 degrees by default, from 0 (off) to
 10, saved as `gun_sway`. **Original experience** turns it off.
 
 - It leans left, right, up or down, toward the turn, in proportion to how fast
@@ -249,7 +249,7 @@ Game > Dead Space) is the most it leans, 3 degrees by default, from 0 (off) to
 ## Power Beam speed
 
 Power Beam shots, plain and charged, fly faster: **Power Beam speed** (F1 >
-Game > Dead Space) is 150% of the original game's by default, from 100% to
+Controls > Options > Dead Space) is 150% of the original game's by default, from 100% to
 300%, saved as `power_beam_speed`. **Original experience** fires at 100%.
 
 - The speed is the shot's own, from its effect file on the disc (the WPSC's
@@ -278,7 +278,7 @@ the cache (`pipeline_cache.db`) are rebuilt in the background after start
 (`load_pipeline_cache_entries`, at `Background` priority), and a water
 variant seen for the first time (ripples, the camera near the surface) is
 built when it's first drawn. Each is missing only until it's built, and once
-saved it's ready at the next start. F1 > Rendering > Frame statistics shows
+saved it's ready at the next start. F1 > Debug > Rendering > Frame statistics shows
 "pipelines made, waiting": waiting above 0 means some are still being built.
 (Aurora's own water renderer, used for mod surfaces, waits for its pipelines
 instead: `require_pipeline` at `Blocking` priority.)
@@ -291,7 +291,7 @@ decompiled `Buckets` in `src/MetaRender/CCubeRenderer.cpp`. A water surface
 goes into its bucket last, so a full bucket would drop the water first. On PC
 every bucket can now hold all the draws there can be (2048, four times
 retail's, plus the 8 water surfaces), so none overflows; the drawing order is
-unchanged, and it applies under **Original experience** too. F1 > Rendering >
+unchanged, and it applies under **Original experience** too. F1 > Debug > Rendering >
 Frame statistics counts transparent draws still left out (it should stay 0)
 and the times retail's buckets would have dropped a water surface.
 
@@ -320,7 +320,7 @@ and the times retail's buckets would have dropped a water surface.
 | `src/MetroidPrime/Player/CPlayerOrbit.cpp` | Points the throwing hand at the enemy; manual aim's limits on lock-on and the aim assist. |
 | `src/MetroidPrime/Player/CPlayerDynamics.cpp`, `src/MetroidPrime/Player/CPlayer.cpp`, `include/MetroidPrime/Player/CPlayer.hpp` | The double-tap dash, the walk speed (`PortWalkMaxSpeed`, `PortWalkAcceleration`), and the gun sway (`PortUpdateGunSway`, `PortGunLean`, applied in `UpdateGunTransform`). |
 | `src/MetroidPrime/CTargetReticles.cpp` | Leans the crosshair with the gun. |
-| `src/MetaRender/CCubeRenderer.cpp`, `include/MetaRender/CCubeRenderer.hpp` | Bigger sorted-draw buckets, and their counters for F1 > Rendering. |
+| `src/MetaRender/CCubeRenderer.cpp`, `include/MetaRender/CCubeRenderer.hpp` | Bigger sorted-draw buckets, and their counters for F1 > Debug > Rendering. |
 | `src/MetroidPrime/Player/CPlayerGun.cpp` | Draws the throwing hand, and keeps the suit's right arm drawn while it throws; under manual aim, has missiles, Super Missiles and the Wave Beam seek the target nearest the crosshair; gives lock-on the faster Power Beam's speed. |
 | `src/MetroidPrime/Enemies/CPatterned.cpp` | The glow, in `PreRender`. |
 | `src/GuiSys/CAuiEnergyBarT01.cpp`, `include/GuiSys/CAuiEnergyBarT01.hpp` | Draws the meter and its label along the energy bar, inside the bar's own draw. |

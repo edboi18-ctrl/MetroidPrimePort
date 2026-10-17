@@ -201,7 +201,8 @@ public:
   static CCubeRenderer* That() { return sRenderer; }
 #ifdef TARGET_PC
   // Port: transparent draws the sorted buckets had no room for (Buckets in CCubeRenderer.cpp), in
-  // all since start and the most in one area's sort. Shown in F1 > Rendering > Frame statistics.
+  // all since start and the most in one area's sort. Shown in F1 > Debug > Rendering >
+  // Frame statistics.
   static uint sPortSortedDropped;
   static uint sPortSortedDroppedMost;
   // Water surfaces (planes) retail's 128-draw buckets would have left out, which now draw.
