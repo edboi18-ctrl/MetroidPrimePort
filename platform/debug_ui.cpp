@@ -50,6 +50,7 @@
 #include "Kyoto/Graphics/CGX.hpp"
 #include "Kyoto/Graphics/CGraphics.hpp"
 #include "Kyoto/Graphics/CCubeModel.hpp"
+#include "MetaRender/CCubeRenderer.hpp"
 #include "Kyoto/Graphics/CModel.hpp"
 #include "Kyoto/Graphics/CTexture.hpp"
 #include "GuiSys/CGuiModel.hpp"
@@ -7135,6 +7136,14 @@ void DrawRendering() {
       }
       ImGui::Text("pipelines %u made, %u waiting", stats->createdPipelines, stats->queuedPipelines);
     }
+    ImGui::Text("transparent draws left out: %u since start, at most %u at once",
+                CCubeRenderer::sPortSortedDropped, CCubeRenderer::sPortSortedDroppedMost);
+    ImGui::SetItemTooltip("Should stay 0. The sorted buckets that draw water, glass and effects\n"
+                          "leave out what doesn't fit; it showed as water vanishing for a frame.");
+    ImGui::Text("water frames retail's buckets would have dropped: %u",
+                CCubeRenderer::sPortRetailPlaneDrops);
+    ImGui::SetItemTooltip("Times a water surface's bucket held retail's 128 draws, when the\n"
+                          "original renderer left the water out. The port's bigger buckets draw it.");
     AuroraTextureStats textures{};
     aurora_get_texture_stats(&textures);
     ImGui::Text("textures %u, %.0f MiB; render targets %u, %.0f MiB", textures.count[0],

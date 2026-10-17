@@ -58,15 +58,37 @@
 #endif
 
 CCubeRenderer* CCubeRenderer::sRenderer = nullptr;
+#ifdef TARGET_PC
+uint CCubeRenderer::sPortSortedDropped = 0;
+uint CCubeRenderer::sPortSortedDroppedMost = 0;
+uint CCubeRenderer::sPortRetailPlaneDrops = 0;
+#endif
 static CModelFlags skNormalFlag = CModelFlags::Normal();
 static CModelFlags skNormalFlagNoUpdate = CModelFlags::Normal().DepthCompareUpdate(true, false);
 
 namespace Buckets {
+#ifdef TARGET_PC
+// Retail holds 512 transparent draws a sort, 128 to a bucket and 8 planes (water surfaces), and
+// quietly leaves out whatever doesn't fit. A plane goes into its bucket last, after the draws
+// sorted there, so a full bucket dropped the water for a frame or two now and then (Watery
+// Hall), more often with the port's wider view. Here every bucket can hold all the draws and
+// planes there can be, so none overflows, and there's room for four times retail's draws.
+static const int kPortSortedDraws = 2048;
+typedef rstl::reserved_vector< CDrawable*, kPortSortedDraws + 8 > BucketHolderType;
+static uint sPortDropped = 0;
+#define PORT_SORTED_DROP() ++sPortDropped
+#else
 typedef rstl::reserved_vector< CDrawable*, 128 > BucketHolderType;
+#define PORT_SORTED_DROP()
+#endif
 
 static rstl::pair< float, float > skWorstMinMaxDistance(99999.f, -99999.f);
 static rstl::reserved_vector< ushort, 50 > sBucketIndex;
+#ifdef TARGET_PC
+static rstl::reserved_vector< CDrawable, kPortSortedDraws >* sData;
+#else
 static rstl::reserved_vector< CDrawable, 512 >* sData;
+#endif
 static rstl::reserved_vector< BucketHolderType, 50 >* sBuckets;
 static rstl::pair< float, float > sMinMaxDistance = skWorstMinMaxDistance;
 static rstl::reserved_vector< CDrawablePlaneObject, 8 >* sPlaneObjectData;
@@ -109,6 +131,7 @@ void Insert(const CVector3f& pos, const CAABox& aabb, EDrawableType dtype, const
             const CPlane& plane, const ushort extraSort) {
   AUTO_REF(tmpData, *sData);
   if (tmpData.size() == tmpData.capacity()) {
+    PORT_SORTED_DROP();
     return;
   }
   float dist = CVector3f::Dot(pos, plane.GetNormal()) - plane.GetConstant();
@@ -125,6 +148,7 @@ void InsertPlaneObject(float closeDist, float farDist, const CAABox& aabb, bool 
                        const CPlane& plane, bool zOnly, EDrawableType dtype, const void* data) {
   AUTO_REF(planeObjects, *sPlaneObjectData);
   if (planeObjects.size() == planeObjects.capacity()) {
+    PORT_SORTED_DROP();
     return;
   }
   planeObjects.push_back(
@@ -234,6 +258,8 @@ void Sort() {
     BucketHolderType& bucket = (*sBuckets)[slot];
     if (bucket.size() < bucket.capacity()) {
       bucket.push_back(it);
+    } else {
+      PORT_SORTED_DROP();
     }
   }
 
@@ -249,13 +275,29 @@ void Sort() {
 
     CDrawablePlaneObject& planeObj = planeObjectData[*it];
     BucketHolderType& bucket = (*sBuckets)[planeObj.GetBucketIndex()];
+#ifdef TARGET_PC
+    if (bucket.size() >= 128) {
+      ++CCubeRenderer::sPortRetailPlaneDrops;
+    }
+#endif
     if (bucket.size() < bucket.capacity()) {
       bucket.push_back(&planeObj);
+    } else {
+      PORT_SORTED_DROP();
     }
   }
 }
 
 void Clear() {
+#ifdef TARGET_PC
+  if (sPortDropped != 0) {
+    CCubeRenderer::sPortSortedDropped += sPortDropped;
+    if (sPortDropped > CCubeRenderer::sPortSortedDroppedMost) {
+      CCubeRenderer::sPortSortedDroppedMost = sPortDropped;
+    }
+    sPortDropped = 0;
+  }
+#endif
   sData->clear();
   sBucketIndex.clear();
   sPlaneObjectData->clear();
