@@ -19,6 +19,7 @@
 #include "port_viewmodel.h"
 #include "port_console.h"
 #include "port_dead_space.h"
+#include "port_passthrough.h"
 #ifdef MP_ENABLE_SMOKE_DRIVER
 #include "port_smoke.h"
 #endif
@@ -1680,6 +1681,11 @@ void CStateManager::Update(float dt) {
   if (x904_gameState != kGS_Paused) {
     PostUpdatePlayer(dt);
   }
+#ifdef TARGET_PC
+  // Dead Space Prime's passthrough bridge: Samus's state for a host game, once Samus and the
+  // camera have moved this tick.
+  PortPassthrough::Tick(*this, dt);
+#endif
 #ifdef MP_ENABLE_SMOKE_DRIVER
   PortSmokeMouseAfterUpdate(*this);
 #endif

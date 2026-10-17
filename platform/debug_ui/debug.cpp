@@ -6,6 +6,7 @@
 #include "port_debug.h"
 #include "port_log.h"
 #include "port_log_file.h"
+#include "port_passthrough.h"
 
 #include <aurora/imgui.h>
 #include <imgui_internal.h>
@@ -45,6 +46,34 @@ void DrawLogSection() {
 
 }
 
+// Dead Space Prime's passthrough bridge (port_passthrough.h): the switch and what it sees.
+static void DrawPassthrough() {
+  bool enabled = PortPassthrough::Enabled();
+  if (ImGui::Checkbox("Passthrough bridge", &enabled)) {
+    PortPassthrough::SetEnabled(enabled);
+  }
+  ImGui::SetItemTooltip("Dead Space Prime's passthrough bridge, in progress: shares Samus's state\n"
+                        "once a tick, through shared memory, with a plugin in Dead Space (2008).\n"
+                        "passthrough_probe, next to the game, stands in for the plugin.\n"
+                        "Not saved: off at each start.");
+  const PortPassthrough::Info info = PortPassthrough::GetInfo();
+  switch (info.status) {
+  case PortPassthrough::Status::Off:
+    break;
+  case PortPassthrough::Status::Error:
+    ImGui::TextDisabled("Not running: %s", info.message.c_str());
+    break;
+  case PortPassthrough::Status::Waiting:
+    ImGui::TextDisabled("Publishing (tick %u); no host connected", info.guestTick);
+    break;
+  case PortPassthrough::Status::Connected:
+    ImGui::TextDisabled("Host connected: frame %u; its player at %.2f %.2f %.2f", info.host.frame,
+                        info.host.playerPosition.x, info.host.playerPosition.y,
+                        info.host.playerPosition.z);
+    break;
+  }
+}
+
 void DrawDebugTab() {
   ImGui::SeparatorText("Cheats");
   bool cheats = sCheats;
@@ -61,6 +90,9 @@ void DrawDebugTab() {
 
   ImGui::SeparatorText("Rendering");
   DrawRendering();
+
+  ImGui::SeparatorText("Passthrough");
+  DrawPassthrough();
 
   ImGui::SeparatorText("Audio backends");
   DrawAudio();

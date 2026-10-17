@@ -309,6 +309,7 @@
 {"Debug", "", "Camera", "Speed", "free camera speed fly"},
 {"Debug", "", "Rendering", "Collision", "collision render debug shapes"},
 {"Debug", "", "Rendering", "Frame statistics", "frame statistics fps timing debug"},
+{"Debug", "", "Passthrough", "Passthrough bridge", "passthrough dead space bridge host shared memory probe"},
 {"Debug", "", "Audio backends", "Streamed audio (music/movies)", "audio stream music movies backend"},
 {"Debug", "", "Audio backends", "MusyX audio (effects/streams)", "musyx audio effects backend"},
 {"Debug", "", "Sounds playing", "Freeze list", "sounds playing list freeze"},

@@ -265,6 +265,32 @@ Controls > Options > Dead Space) is 150% of the original game's by default, from
 - Lock-on leads its target for the new speed (`CPlayerGun::GetBeamVelocity`).
 - The other beams, missiles and the Super Missile are unchanged.
 
+## Passthrough bridge (in progress)
+
+The start of a passthrough mod: Dead Space (2008, PC) running at the same time
+as this port, Dead Space supplying the world, its scripting and enemies, and
+the port supplying Samus. The plan, the division of work between the two games
+and the wire format are in
+[docs/PASSTHROUGH.md](https://github.com/edboi18-ctrl/Dead-Space-Prime-/blob/ccr-03a138c3-7l85hc/docs/PASSTHROUGH.md)
+in the Dead Space Prime repository. What the port has so far:
+
+- **F1 > Debug > Passthrough bridge** (off at each start) shares Samus's state
+  once a tick through a block of named shared memory: her position and
+  velocity, the camera's position, axes and field of view, energy, visor,
+  beam, morph state and a few flags. A host's state comes back the same way,
+  and the F1 line shows whether one is connected.
+- `passthrough_probe.exe`, next to the game in the Windows package, stands in
+  for the Dead Space plugin: run it in a console while the bridge is on and
+  it prints Samus's state twice a second, and F1 shows it as connected.
+- Nothing from the host acts on the game yet; that comes with the Dead Space
+  plugin.
+
+The wire format (`platform/include/passthrough_protocol.h`) uses only 4-byte
+fields, so a 32-bit plugin and the 64-bit port lay it out alike, and every
+read and write goes through a sequence lock so neither side sees half of the
+other's update (`tests/port_passthrough.cpp` races a writer against a reader
+to check it).
+
 ## Fixes
 
 **Water vanishing for a frame (Watery Hall).** Now and then the water would
@@ -321,6 +347,9 @@ and the times retail's buckets would have dropped a water surface.
 | `src/MetroidPrime/Player/CPlayerDynamics.cpp`, `src/MetroidPrime/Player/CPlayer.cpp`, `include/MetroidPrime/Player/CPlayer.hpp` | The double-tap dash, the walk speed (`PortWalkMaxSpeed`, `PortWalkAcceleration`), and the gun sway (`PortUpdateGunSway`, `PortGunLean`, applied in `UpdateGunTransform`). |
 | `src/MetroidPrime/CTargetReticles.cpp` | Leans the crosshair with the gun. |
 | `src/MetaRender/CCubeRenderer.cpp`, `include/MetaRender/CCubeRenderer.hpp` | Bigger sorted-draw buckets, and their counters for F1 > Debug > Rendering. |
+| `platform/include/passthrough_protocol.h`, `platform/include/passthrough_shm.h`, `platform/passthrough_shm.cpp` | The passthrough bridge's wire format, sequence lock and shared memory, plain C++ for the Dead Space plugin too (covered by `tests/port_passthrough.cpp`). |
+| `platform/include/port_passthrough.h`, `platform/port_passthrough.cpp`, `src/MetroidPrime/CStateManager.cpp`, `platform/debug_ui/debug.cpp` | Publishes Samus's state once a tick, reads the host's, and the F1 > Debug > Passthrough switch. |
+| `tools/passthrough_probe.cpp` | The stand-in host. |
 | `src/MetroidPrime/Player/CPlayerGun.cpp` | Draws the throwing hand, and keeps the suit's right arm drawn while it throws; under manual aim, has missiles, Super Missiles and the Wave Beam seek the target nearest the crosshair; gives lock-on the faster Power Beam's speed. |
 | `src/MetroidPrime/Enemies/CPatterned.cpp` | The glow, in `PreRender`. |
 | `src/GuiSys/CAuiEnergyBarT01.cpp`, `include/GuiSys/CAuiEnergyBarT01.hpp` | Draws the meter and its label along the energy bar, inside the bar's own draw. |

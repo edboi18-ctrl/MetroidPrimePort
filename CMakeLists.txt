@@ -270,6 +270,8 @@ set(MP_PORT_SOURCES
     platform/port_dead_space_sound.cpp
     platform/port_double_tap.cpp
     platform/port_gun_sway.cpp
+    platform/passthrough_shm.cpp
+    platform/port_passthrough.cpp
     platform/port_remastered_font.cpp
     platform/port_remastered_hud.cpp
     platform/port_remastered_map.cpp
@@ -387,6 +389,13 @@ if(NOT ANDROID)
     target_include_directories(remastered_effect_tool PRIVATE platform/include include)
     target_link_libraries(remastered_effect_tool PRIVATE astcenc ${CMAKE_THREAD_LIBS_INIT})
     set_target_properties(remastered_effect_tool PROPERTIES EXCLUDE_FROM_ALL ON)
+endif()
+if(NOT ANDROID)
+    # Dead Space Prime's passthrough probe: a stand-in host for the bridge (port_passthrough.h).
+    # Built by default, as the Windows package carries it.
+    add_executable(passthrough_probe tools/passthrough_probe.cpp platform/passthrough_shm.cpp)
+    target_include_directories(passthrough_probe PRIVATE platform/include)
+    target_link_libraries(passthrough_probe PRIVATE ${CMAKE_THREAD_LIBS_INIT})
 endif()
 if(NOT ANDROID)
     # Developer tool too: flattens real models' ANUV programs (tools/anuv_check.py).
@@ -988,6 +997,10 @@ if(MP_BUILD_TESTS)
         SOURCES tests/port_gun_sway.cpp platform/port_gun_sway.cpp
         INCLUDES platform/include)
     mp_port_test(port_shot_speed_tests SOURCES tests/port_shot_speed.cpp INCLUDES platform/include)
+    mp_port_test(port_passthrough_tests
+        SOURCES tests/port_passthrough.cpp platform/passthrough_shm.cpp
+        INCLUDES platform/include
+        LIBRARIES ${CMAKE_THREAD_LIBS_INIT})
     mp_port_test(port_dead_space_sound_tests
         SOURCES tests/port_dead_space_sound.cpp platform/port_dead_space_sound.cpp
         INCLUDES platform/include extern/aurora/include
