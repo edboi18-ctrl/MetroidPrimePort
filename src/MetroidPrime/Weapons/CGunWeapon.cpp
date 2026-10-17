@@ -1,4 +1,5 @@
 #include "MetroidPrime/Weapons/CGunWeapon.hpp"
+#include "port_debug.h"
 
 #include "MetroidPrime/CAnimData.hpp"
 #include "MetroidPrime/CAnimPlaybackParms.hpp"
@@ -426,6 +427,12 @@ void CGunWeapon::Fire(const bool underwater, const float dt,
       kInvalidAreaId, GetPlayerId(), homingTarget, projectileAttribs, underwater, scale,
       rstl::optional_object_null(), CSfxManager::kInternalInvalidSfxId, false);
   if (proj) {
+#ifdef TARGET_PC
+    // Dead Space Prime: faster Power Beam shots, plain and charged, with the same reach.
+    if (x1c0_weaponType == kWT_Power) {
+      proj->Projectile().PortScaleSpeed(PortDebug::PowerBeamSpeed());
+    }
+#endif
     mgr.AddObject(proj);
     proj->Think(dt, mgr);
   }

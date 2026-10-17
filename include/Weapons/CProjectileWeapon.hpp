@@ -57,6 +57,10 @@ public:
   float GetMaxTurnRate() const;
   void SetVelocity(const CVector3f& velocity);
   const CVector3f& GetVelocity() const;
+#ifdef TARGET_PC
+  // Dead Space Prime: `scale` times as fast with the same reach (PortShotSpeed::ScaledLifetime).
+  void PortScaleSpeed(float scale);
+#endif
   void SetGravity(const CVector3f& gravity);
   const CVector3f& GetGravity() const;
   static void SetGlobalSeed(const uint seed);

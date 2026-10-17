@@ -3,6 +3,7 @@
 #include "Kyoto/Math/CVector3f.hpp"
 #include "Weapons/IWeaponRenderer.hpp"
 #include "port_debug.h"
+#include "port_shot_speed.h"
 #include "rstl/optional_object.hpp"
 
 #include <Kyoto/Alloc/CMemory.hpp>
@@ -560,6 +561,16 @@ float CProjectileWeapon::GetAudibleFallOff() const {
 float CProjectileWeapon::GetMaxTurnRate() const { return xe0_maxTurnRate; }
 
 void CProjectileWeapon::SetVelocity(const CVector3f& velocity) { xb0_velocity = velocity; }
+
+#ifdef TARGET_PC
+void CProjectileWeapon::PortScaleSpeed(float scale) {
+  if (!(scale > 0.f) || scale == 1.f) {
+    return;
+  }
+  xb0_velocity = xb0_velocity * scale;
+  xe8_lifetime = PortShotSpeed::ScaledLifetime(xe8_lifetime, scale);
+}
+#endif
 
 const CVector3f& CProjectileWeapon::GetVelocity() const { return xb0_velocity; }
 

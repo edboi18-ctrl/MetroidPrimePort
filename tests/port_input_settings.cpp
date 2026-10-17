@@ -112,6 +112,17 @@ int main() {
   ApplySetting("gun_sway", "-1");
   Check(Get().gunSway == 5.5f, "gun_sway below range");
 
+  // Dead Space Prime's faster Power Beam: 150% by default, held to 100-300%.
+  Check(Get().powerBeamSpeed == kPowerBeamSpeedDefault, "power beam speed default");
+  Check(defaults.find("gun_sway=3\npower_beam_speed=1.5\n") != std::string::npos,
+        "power beam speed line");
+  Check(ApplySetting("power_beam_speed", "2.25") && Get().powerBeamSpeed == 2.25f,
+        "power_beam_speed");
+  ApplySetting("power_beam_speed", "0.5");
+  Check(Get().powerBeamSpeed == 2.25f, "power_beam_speed below range");
+  ApplySetting("power_beam_speed", "4");
+  Check(Get().powerBeamSpeed == 2.25f, "power_beam_speed above range");
+
   // Touch layout.
   Check(ApplySetting("touch_layout", "1:0.5,0.5,1") && TouchLayout() == "1:0.5,0.5,1", "touch_layout");
   Check(!SetTouchLayout(std::string(kTouchLayoutMaxLen + 1, 'x')), "touch layout length");

@@ -1992,8 +1992,16 @@ void CPlayerGun::InitMuzzleData() {
 void CPlayerGun::InitCTData() { x77c_comboXferGen = rstl::auto_ptr< CElementGen >(); }
 
 float CPlayerGun::GetBeamVelocity() const {
-  if (x72c_currentBeam->IsLoaded())
+  if (x72c_currentBeam->IsLoaded()) {
+#ifdef TARGET_PC
+    // The lock-on's aim leads targets for the faster Power Beam (CGunWeapon::Fire) too.
+    if (x72c_currentBeam->GetType() == kWT_Power) {
+      return x72c_currentBeam->GetVelocityInfo().GetVelocity(int(x330_chargeState)).GetY() *
+             PortDebug::PowerBeamSpeed();
+    }
+#endif
     return x72c_currentBeam->GetVelocityInfo().GetVelocity(int(x330_chargeState)).GetY();
+  }
   return 10.f;
 }
 

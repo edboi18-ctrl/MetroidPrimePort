@@ -348,6 +348,11 @@ void SetDashSpeed(float scale);
 // PortInput::kGunSway*.
 float GunSway();
 void SetGunSway(float degrees);
+// Dead Space Prime's faster Power Beam: its shots' speed, plain and charged, as a
+// multiple of retail's, with the same reach (port_shot_speed.h); 1 under
+// Original experience. The setter clamps to PortInput::kPowerBeamSpeed*.
+float PowerBeamSpeed();
+void SetPowerBeamSpeed(float scale);
 // The Scan and X-Ray visors trade D-pad directions (Remastered's Dual Sticks
 // layout), off by default.
 bool SwapScanXray();
