@@ -328,7 +328,7 @@ void DrawRendering() {
     ImGui::Text("transparent draws left out: %u since start, at most %u at once",
                 CCubeRenderer::sPortSortedDropped, CCubeRenderer::sPortSortedDroppedMost);
     ImGui::SetItemTooltip("Should stay 0. The sorted buckets that draw water, glass and effects\n"
-                          "leave out what doesn't fit; it showed as water vanishing for a frame.");
+                          "leave out what doesn't fit, which shows as it vanishing for a frame.");
     ImGui::Text("water frames retail's buckets would have dropped: %u",
                 CCubeRenderer::sPortRetailPlaneDrops);
     ImGui::SetItemTooltip("Times a water surface's bucket held retail's 128 draws, when the\n"

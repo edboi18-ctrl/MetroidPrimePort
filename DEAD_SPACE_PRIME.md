@@ -268,22 +268,32 @@ Game > Dead Space) is 150% of the original game's by default, from 100% to
 ## Fixes
 
 **Water vanishing for a frame (Watery Hall).** Now and then the water would
-disappear for a frame or two, leaving a dark hole. The renderer sorts
-transparent things (water, glass, effects) into 50 buckets of at most 128
-draws, at most 512 draws in all, and leaves out whatever doesn't fit; these
-are the original game's numbers, from the decompiled `Buckets` in
-`src/MetaRender/CCubeRenderer.cpp`. A water surface goes into its bucket last,
-after the draws sorted there, so whenever that bucket was full the water was
-the one left out. Which draws land in that bucket changes as you move, and
-the port's wider view takes in more of the room than the GameCube's 4:3
-picture, so it filled up more often.
+disappear for a frame or two, leaving a dark hole. In play after the change
+below, it happened for a few seconds after starting and then stopped, with
+both F1 counters at 0, so the cause is the graphics layer building shaders:
+aurora skips a draw whose pipeline isn't built yet rather than waiting
+(`extern/aurora/lib/gx/pipeline.cpp`, `render` returns when `bind_pipeline`
+fails), and builds missing ones on a worker thread. The pipelines saved in
+the cache (`pipeline_cache.db`) are rebuilt in the background after start
+(`load_pipeline_cache_entries`, at `Background` priority), and a water
+variant seen for the first time (ripples, the camera near the surface) is
+built when it's first drawn. Each is missing only until it's built, and once
+saved it's ready at the next start. F1 > Rendering > Frame statistics shows
+"pipelines made, waiting": waiting above 0 means some are still being built.
+(Aurora's own water renderer, used for mod surfaces, waits for its pipelines
+instead: `require_pipeline` at `Blocking` priority.)
 
-On PC every bucket can now hold all the draws there can be (2048, four times
+**Bigger sorted-draw buckets.** Looking into it turned up a real limit, which
+wasn't the cause here. The renderer sorts transparent things (water, glass,
+effects) into 50 buckets of at most 128 draws, 512 in all, and leaves out
+whatever doesn't fit; these are the original game's numbers, from the
+decompiled `Buckets` in `src/MetaRender/CCubeRenderer.cpp`. A water surface
+goes into its bucket last, so a full bucket would drop the water first. On PC
+every bucket can now hold all the draws there can be (2048, four times
 retail's, plus the 8 water surfaces), so none overflows; the drawing order is
-unchanged. It applies under **Original experience** too. F1 > Rendering >
-Frame statistics shows how many transparent draws were still left out (it
-should stay 0) and how many times retail's buckets would have dropped a water
-surface, which the port now draws.
+unchanged, and it applies under **Original experience** too. F1 > Rendering >
+Frame statistics counts transparent draws still left out (it should stay 0)
+and the times retail's buckets would have dropped a water surface.
 
 ## Where the code is
 
@@ -310,7 +320,7 @@ surface, which the port now draws.
 | `src/MetroidPrime/Player/CPlayerOrbit.cpp` | Points the throwing hand at the enemy; manual aim's limits on lock-on and the aim assist. |
 | `src/MetroidPrime/Player/CPlayerDynamics.cpp`, `src/MetroidPrime/Player/CPlayer.cpp`, `include/MetroidPrime/Player/CPlayer.hpp` | The double-tap dash, the walk speed (`PortWalkMaxSpeed`, `PortWalkAcceleration`), and the gun sway (`PortUpdateGunSway`, `PortGunLean`, applied in `UpdateGunTransform`). |
 | `src/MetroidPrime/CTargetReticles.cpp` | Leans the crosshair with the gun. |
-| `src/MetaRender/CCubeRenderer.cpp`, `include/MetaRender/CCubeRenderer.hpp` | Bigger sorted-draw buckets, so water isn't dropped, and the counters for F1 > Rendering. |
+| `src/MetaRender/CCubeRenderer.cpp`, `include/MetaRender/CCubeRenderer.hpp` | Bigger sorted-draw buckets, and their counters for F1 > Rendering. |
 | `src/MetroidPrime/Player/CPlayerGun.cpp` | Draws the throwing hand, and keeps the suit's right arm drawn while it throws; under manual aim, has missiles, Super Missiles and the Wave Beam seek the target nearest the crosshair; gives lock-on the faster Power Beam's speed. |
 | `src/MetroidPrime/Enemies/CPatterned.cpp` | The glow, in `PreRender`. |
 | `src/GuiSys/CAuiEnergyBarT01.cpp`, `include/GuiSys/CAuiEnergyBarT01.hpp` | Draws the meter and its label along the energy bar, inside the bar's own draw. |
