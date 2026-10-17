@@ -1,4 +1,7 @@
 #include "port_ap_protocol.h"
+#include "port_hash.h"
+#include "port_json_writer.h"
+#include "port_strings.h"
 
 #include "port_ap_metroidprime.h"
 #include "port_randomizer.h"
@@ -53,35 +56,6 @@ bool IntegerMember(const PortJson::Value& object, const char* name, int64_t& res
   return Integer(Member(object, name), result);
 }
 
-std::string EscapeJson(const std::string& text) {
-  static constexpr char kHex[] = "0123456789abcdef";
-  std::string escaped;
-  escaped.reserve(text.size() + 2);
-  for (unsigned char c : text) {
-    switch (c) {
-    case '"': escaped += "\\\""; break;
-    case '\\': escaped += "\\\\"; break;
-    case '\b': escaped += "\\b"; break;
-    case '\f': escaped += "\\f"; break;
-    case '\n': escaped += "\\n"; break;
-    case '\r': escaped += "\\r"; break;
-    case '\t': escaped += "\\t"; break;
-    default:
-      if (c < 0x20) {
-        escaped += "\\u00";
-        escaped.push_back(kHex[c >> 4]);
-        escaped.push_back(kHex[c & 0x0f]);
-      } else {
-        escaped.push_back(static_cast<char>(c));
-      }
-      break;
-    }
-  }
-  return escaped;
-}
-
-std::string Quote(const std::string& text) { return "\"" + EscapeJson(text) + "\""; }
-
 // Writes through a temporary file and a rename, so a crash mid-write leaves
 // the old file rather than half of the new one.
 bool WriteFileAtomically(const std::string& path, const std::string& contents) {
@@ -114,53 +88,6 @@ bool WriteFileAtomically(const std::string& path, const std::string& contents) {
 #else
   return false;
 #endif
-}
-
-// Serialises a parsed value back to compact JSON, for rewriting a file the
-// player may have extended by hand. Integral numbers (the AP ids) print
-// exactly; anything else round-trips through %.17g.
-void AppendJson(const PortJson::Value& value, std::string& out) {
-  switch (value.GetType()) {
-  case PortJson::Value::Type::Null: out += "null"; break;
-  case PortJson::Value::Type::Bool: out += value.AsBool() ? "true" : "false"; break;
-  case PortJson::Value::Type::Number: {
-    const double number = value.AsNumber();
-    char buffer[40];
-    if (std::isfinite(number) && std::trunc(number) == number && std::fabs(number) < 9.0e15)
-      std::snprintf(buffer, sizeof(buffer), "%lld", static_cast<long long>(number));
-    else
-      std::snprintf(buffer, sizeof(buffer), "%.17g", std::isfinite(number) ? number : 0.0);
-    out += buffer;
-    break;
-  }
-  case PortJson::Value::Type::String: out += Quote(value.AsString()); break;
-  case PortJson::Value::Type::Array: {
-    out += '[';
-    bool first = true;
-    for (const PortJson::Value& element : value.AsArray()) {
-      if (!first)
-        out += ',';
-      AppendJson(element, out);
-      first = false;
-    }
-    out += ']';
-    break;
-  }
-  case PortJson::Value::Type::Object: {
-    out += '{';
-    bool first = true;
-    for (const auto& member : value.AsObject()) {
-      if (!first)
-        out += ',';
-      out += Quote(member.first);
-      out += ':';
-      AppendJson(member.second, out);
-      first = false;
-    }
-    out += '}';
-    break;
-  }
-  }
 }
 
 bool ValidLocationKey(const std::string& key) {
@@ -311,8 +238,6 @@ std::string ProcessUuid() {
   return uuid;
 }
 
-void AppendInt(std::string& out, int64_t value) { out += std::to_string(value); }
-
 void AppendNotification(std::vector<std::string>& notifications, std::string text) {
   constexpr size_t kNotificationLimit = 32;
   if (notifications.size() >= kNotificationLimit)
@@ -376,28 +301,28 @@ void ParseLogicOptions(const PortJson::Value& data, PortApLogic::Options& logic)
   names("trick_deny_list", logic.trickDeny);
 }
 
-std::string LogicOptionsText(const PortApLogic::Options& logic) {
-  std::ostringstream text;
-  text << "{\"trick_difficulty\":" << logic.trickDifficulty
-       << ",\"combat_logic_difficulty\":" << logic.combatLogic
-       << ",\"remove_xray_requirements\":" << logic.removeXray
-       << ",\"remove_thermal_requirements\":" << logic.removeThermal
-       << ",\"flaahgra_power_bombs\":" << (logic.flaahgraPowerBombs ? 1 : 0)
-       << ",\"progressive_beam_upgrades\":" << (logic.progressiveBeams ? 1 : 0)
-       << ",\"missile_launcher\":" << (logic.mainMissile ? 1 : 0)
-       << ",\"main_power_bomb\":" << (logic.mainPowerBomb ? 1 : 0)
-       << ",\"non_varia_heat_damage\":" << (logic.variaOnlyHeat ? 1 : 0)
-       << ",\"pre_scan_elevators\":" << (logic.preScanElevators ? 1 : 0);
-  const auto names = [&text](const char* name, const std::vector< std::string >& list) {
-    text << ",\"" << name << "\":[";
-    for (size_t i = 0; i < list.size(); ++i)
-      text << (i != 0 ? "," : "") << Quote(list[i]);
-    text << ']';
+// The "logic" object of the state file, under the seed's slot_data names.
+void WriteLogicOptions(port::JsonWriter& json, const PortApLogic::Options& logic) {
+  const auto names = [&json](const char* name, const std::vector< std::string >& list) {
+    json.Key(name).BeginArray();
+    for (const std::string& entry : list)
+      json.String(entry);
+    json.EndArray();
   };
+  json.BeginObject();
+  json.Key("trick_difficulty").Number(logic.trickDifficulty);
+  json.Key("combat_logic_difficulty").Number(logic.combatLogic);
+  json.Key("remove_xray_requirements").Number(logic.removeXray);
+  json.Key("remove_thermal_requirements").Number(logic.removeThermal);
+  json.Key("flaahgra_power_bombs").Number(logic.flaahgraPowerBombs ? 1 : 0);
+  json.Key("progressive_beam_upgrades").Number(logic.progressiveBeams ? 1 : 0);
+  json.Key("missile_launcher").Number(logic.mainMissile ? 1 : 0);
+  json.Key("main_power_bomb").Number(logic.mainPowerBomb ? 1 : 0);
+  json.Key("non_varia_heat_damage").Number(logic.variaOnlyHeat ? 1 : 0);
+  json.Key("pre_scan_elevators").Number(logic.preScanElevators ? 1 : 0);
   names("trick_allow_list", logic.trickAllow);
   names("trick_deny_list", logic.trickDeny);
-  text << '}';
-  return text.str();
+  json.EndObject();
 }
 
 // Reads a Metroid Prime slot_data object. What it names as unsupported is
@@ -662,6 +587,9 @@ State LoadStateFile(const std::string& path) {
     const PortJson::Value* seed = Member(root, "seed");
     if (seed != nullptr && seed->IsString())
       state.seed = seed->AsString();
+    const PortJson::Value* room = Member(root, "room");
+    if (room != nullptr && room->IsString())
+      state.room = room->AsString();
     int64_t number = 0;
     if (IntegerMember(root, "next_item_index", number) && number >= 0)
       state.nextItemIndex = number;
@@ -700,30 +628,29 @@ State LoadStateFile(const std::string& path) {
 
 bool SaveStateFile(const std::string& path, const State& state) {
   try {
-    std::ostringstream text;
-    text << "{\"slot\":" << Quote(state.slot) << ",\"seed\":" << Quote(state.seed)
-         << ",\"next_item_index\":";
-    text << state.nextItemIndex << ",\"checked_locations\":[";
-    for (size_t i = 0; i < state.checkedLocations.size(); ++i) {
-      if (i != 0)
-        text << ',';
-      text << state.checkedLocations[i];
+    port::JsonWriter json;
+    json.BeginObject();
+    json.Key("slot").String(state.slot);
+    json.Key("seed").String(state.seed);
+    if (!state.room.empty())
+      json.Key("room").String(state.room);
+    json.Key("next_item_index").Number(state.nextItemIndex);
+    json.Key("checked_locations").BeginArray();
+    for (const int64_t location : state.checkedLocations)
+      json.Number(location);
+    json.EndArray();
+    json.Key("progressive").BeginObject();
+    for (const auto& [item, count] : state.progressive)
+      json.Key(std::to_string(item)).Number(count);
+    json.EndObject();
+    if (state.hasLogic) {
+      json.Key("logic");
+      WriteLogicOptions(json, state.logic);
     }
-    text << "],\"progressive\":{";
-    bool firstCount = true;
-    for (const auto& count : state.progressive) {
-      if (!firstCount)
-        text << ',';
-      text << '"' << count.first << "\":" << count.second;
-      firstCount = false;
-    }
-    text << '}';
-    if (state.hasLogic)
-      text << ",\"logic\":" << LogicOptionsText(state.logic);
     if (state.hasWorld)
-      text << ",\"world\":" << PortApWorld::Text(state.world);
-    text << '}';
-    return WriteFileAtomically(path, text.str());
+      json.Key("world").Raw(PortApWorld::Text(state.world));
+    json.EndObject();
+    return WriteFileAtomically(path, json.Take());
   } catch (...) {
     return false;
   }
@@ -749,6 +676,7 @@ Connection LoadConnectionFile(const std::string& path) {
     const PortJson::Value* enabled = Member(root, "enabled");
     connection.enabled = enabled == nullptr || !enabled->IsBool() || enabled->AsBool();
     connection.seed = root.StringOr("seed");
+    connection.room = root.StringOr("room");
     const PortJson::Value* lastPlayed = Member(root, "last_played");
     if (lastPlayed != nullptr)
       connection.lastPlayed = lastPlayed->AsInt(0);
@@ -799,11 +727,12 @@ bool SaveConnectionFile(const std::string& path, const Connection& connection,
         !connection.password.empty());
     set("enabled", PortJson::Value::MakeBool(false), !connection.enabled);
     set("seed", PortJson::Value::MakeString(connection.seed), !connection.seed.empty());
+    set("room", PortJson::Value::MakeString(connection.room), !connection.room.empty());
     set("last_played", PortJson::Value::MakeNumber(static_cast<double>(connection.lastPlayed)),
         connection.lastPlayed != 0);
-    std::string text;
-    AppendJson(PortJson::Value::MakeObject(std::move(members)), text);
-    text += '\n';
+    port::JsonWriter json;
+    json.Value(PortJson::Value::MakeObject(std::move(members)));
+    const std::string text = json.Take() + '\n';
     if (!WriteFileAtomically(path, text)) {
       error = "could not write " + path;
       return false;
@@ -841,11 +770,7 @@ std::string GameDirectoryName(const std::string& slot, const std::string& seed) 
   };
   std::string name = clean(slot) + "-" + clean(seed);
   if (changed) {
-    uint32_t hash = 2166136261u; // FNV-1a over both, as they were
-    for (const char c : slot + std::string(1, '\0') + seed) {
-      hash ^= static_cast<uint8_t>(c);
-      hash *= 16777619u;
-    }
+    const uint32_t hash = port::Fnv1a32(slot + std::string(1, '\0') + seed); // over both, as they were
     char suffix[16];
     std::snprintf(suffix, sizeof(suffix), "-%08x", hash);
     name += suffix;
@@ -940,6 +865,7 @@ void Session::HandlePacket(const PortJson::Value& packet, std::vector<std::strin
         mState.nextItemIndex = 0;
         mState.checkedLocations.clear();
         mState.progressive.clear();
+        mState.room.clear();
         mGrantFrom = 0;
         mResetReason = "recorded for seed \"" + mState.seed + "\", server has \"" + mSeedName + "\"";
       }
@@ -1012,14 +938,12 @@ void Session::HandlePacket(const PortJson::Value& packet, std::vector<std::strin
           games.push_back(game->AsString());
       }
       if (!games.empty()) {
-        std::string request = "{\"cmd\":\"GetDataPackage\",\"games\":[";
-        for (size_t i = 0; i < games.size(); ++i) {
-          if (i != 0)
-            request.push_back(',');
-          request += Quote(games[i]);
-        }
-        request += "]}";
-        outgoing.push_back(std::move(request));
+        port::JsonWriter request;
+        request.BeginObject().Key("cmd").String("GetDataPackage").Key("games").BeginArray();
+        for (const std::string& name : games)
+          request.String(name);
+        request.EndArray().EndObject();
+        outgoing.push_back(request.Take());
       }
     }
     const PortJson::Value* checked = Member(packet, "checked_locations");
@@ -1053,16 +977,32 @@ void Session::HandlePacket(const PortJson::Value& packet, std::vector<std::strin
                                   (Integer(deathLink, deathLinkValue) && deathLinkValue != 0));
       if (seedDeathLink && !mConfig.deathLinkSet && !mConfig.deathLink) {
         mConfig.deathLink = true;
-        std::string update = "{\"cmd\":\"ConnectUpdate\",\"tags\":[";
+        port::JsonWriter update;
+        update.BeginObject().Key("cmd").String("ConnectUpdate").Key("tags").BeginArray();
         for (const std::string& tag : mConfig.tags) {
-          if (tag == "DeathLink")
-            continue;
-          update += Quote(tag);
-          update.push_back(',');
+          if (tag != "DeathLink")
+            update.String(tag);
         }
-        update += "\"DeathLink\"]}";
-        outgoing.push_back(std::move(update));
+        update.String("DeathLink").EndArray().EndObject();
+        outgoing.push_back(update.Take());
       }
+    }
+    {
+      std::string line = "connected as " + mSlotDescription + "; the server has " +
+                         std::to_string(mState.checkedLocations.size()) + " location(s) checked";
+      if (mConfig.builtin) {
+        line += mSlotData.received ? "; seed options: missile_launcher=" +
+                                         std::to_string(mSlotData.requireMissileLauncher ? 1 : 0) +
+                                         " main_power_bomb=" +
+                                         std::to_string(mSlotData.requireMainPowerBomb ? 1 : 0) +
+                                         " required_artifacts=" + std::to_string(mSlotData.requiredArtifacts) +
+                                         " spring_ball=" + std::to_string(mSlotData.springBall) +
+                                         " death_link=" + std::to_string(mConfig.deathLink ? 1 : 0)
+                                   : "; no slot_data, so the seed's options are the defaults";
+      }
+      Log(std::move(line));
+      for (const std::string& warning : mSlotData.warnings)
+        Log("seed option " + warning);
     }
     // The built-in tables take the retail item out of each pickup, so what the
     // pickup holds instead is asked for up front and named when collected.
@@ -1089,10 +1029,12 @@ void Session::HandlePacket(const PortJson::Value& packet, std::vector<std::strin
           }
         }
       }
-      const std::string hintsKey =
-          Quote("_read_hints_" + std::to_string(mTeam) + "_" + std::to_string(mOwnSlot));
-      outgoing.push_back("{\"cmd\":\"Get\",\"keys\":[" + hintsKey + "]}");
-      outgoing.push_back("{\"cmd\":\"SetNotify\",\"keys\":[" + hintsKey + "]}");
+      const std::string hintsKey = "_read_hints_" + std::to_string(mTeam) + "_" + std::to_string(mOwnSlot);
+      for (const char* command : {"Get", "SetNotify"}) {
+        port::JsonWriter request;
+        request.BeginObject().Key("cmd").String(command).Key("keys").BeginArray().String(hintsKey).EndArray();
+        outgoing.push_back(request.EndObject().Take());
+      }
     }
   } else if (command == "Retrieved" || command == "SetReply") {
     const std::string hintsKey = "_read_hints_" + std::to_string(mTeam) + "_" + std::to_string(mOwnSlot);
@@ -1142,6 +1084,9 @@ void Session::HandlePacket(const PortJson::Value& packet, std::vector<std::strin
     const PortJson::Value::Elements empty;
     const auto& itemList = items != nullptr && items->IsArray() ? items->AsArray() : empty;
     const int64_t expectedIndex = mState.nextItemIndex;
+    Log("received " + std::to_string(itemList.size()) + " item(s) from #" + std::to_string(index) +
+        " (next expected #" + std::to_string(expectedIndex) + ", the loaded game holds the first " +
+        std::to_string(mGrantFrom) + ")");
     // Nothing processed yet: the server is starting a fresh inventory, so the
     // progressive counts start over and the replay rebuilds them.
     if (index == 0 && expectedIndex == 0)
@@ -1151,6 +1096,9 @@ void Session::HandlePacket(const PortJson::Value& packet, std::vector<std::strin
     if (index == 0)
       mDesynced = false;
     if (index > 0 && index != expectedIndex) {
+      Log("item #" + std::to_string(index) + " is not the next one (#" + std::to_string(expectedIndex) +
+          "): asking the server to resend everything" +
+          (index > expectedIndex ? "; these wait for its reply" : "; the ones already processed are skipped"));
       mDesynced = true;
       outgoing.push_back(BuildSync());
       // Items past a gap are left for the Sync reply. Taking them now would
@@ -1175,7 +1123,7 @@ void Session::HandlePacket(const PortJson::Value& packet, std::vector<std::strin
         continue;
       const int64_t receivedIndex = index + static_cast<int64_t>(position);
       if (receivedIndex < mState.nextItemIndex)
-        continue;
+        continue; // processed already (a resend's overlap)
       // Below mGrantFrom the loaded save already holds the item: the replay
       // only rebuilds the progressive counts and the tracker.
       const bool alreadyHeld = receivedIndex < mGrantFrom;
@@ -1212,6 +1160,18 @@ void Session::HandlePacket(const PortJson::Value& packet, std::vector<std::strin
         grant.index = receivedIndex;
         seenBefore = count;
         notification = grant.display;
+        {
+          std::string line = "item #" + std::to_string(receivedIndex) + " " + std::to_string(itemId) + " " +
+                             grant.display;
+          if (grant.itemType < 0)
+            line += ": counted, nothing to grant";
+          else
+            line += ": game item " + std::to_string(grant.itemType) + ", capacity +" +
+                    std::to_string(grant.capacity) + ", amount +" + std::to_string(grant.amount);
+          if (alreadyHeld)
+            line += " (the loaded game holds it already: counted, not granted)";
+          Log(std::move(line));
+        }
         if (!alreadyHeld)
           granted.push_back(std::move(grant));
       } else {
@@ -1222,6 +1182,8 @@ void Session::HandlePacket(const PortJson::Value& packet, std::vector<std::strin
         if (!alreadyHeld)
           granted.push_back(grant);
         mLastError = "unknown item id " + std::to_string(itemId);
+        Log("item #" + std::to_string(receivedIndex) + " " + std::to_string(itemId) +
+            ": not an item of this game's table, nothing granted");
         notification = "unknown item " + std::to_string(itemId);
       }
 
@@ -1390,6 +1352,26 @@ void Session::HandlePacket(const PortJson::Value& packet, std::vector<std::strin
     // Malformed packets and allocation failures must not escape into the client.
   }
 
+void Session::Log(std::string line) {
+  // Far more than one packet writes; a session that nobody drains stays bounded.
+  constexpr size_t kLogLimit = 512;
+  if (mLog.size() >= kLogLimit)
+    mLog.erase(mLog.begin());
+  mLog.push_back(std::move(line));
+}
+
+bool Session::TakeLogLine(std::string& line) {
+  try {
+    if (mLog.empty())
+      return false;
+    line = std::move(mLog.front());
+    mLog.erase(mLog.begin());
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
 bool Session::TakeChatLine(ChatLine& line) {
   try {
     if (mChat.empty())
@@ -1416,14 +1398,6 @@ bool Session::TakeNotification(std::string& text) {
   }
 }
 
-void Session::CopyRecentTracked(std::vector< TrackedItem >& out, size_t cap) const {
-  out.clear();
-  if (cap == 0)
-    return;
-  const size_t count = std::min(cap, mTracked.size());
-  out.assign(mTracked.end() - static_cast< ptrdiff_t >(count), mTracked.end());
-}
-
 std::string Session::PlayerName(int64_t slot) const {
   try {
     const auto player = mPlayers.find(slot);
@@ -1436,60 +1410,68 @@ std::string Session::PlayerName(int64_t slot) const {
 }
 
 std::string Session::BuildConnect() const {
-  std::string result = "{\"cmd\":\"Connect\",\"password\":" + Quote(mConfig.password) +
-                       ",\"game\":" + Quote(mConfig.game) + ",\"name\":" + Quote(mConfig.slot) +
-                       ",\"uuid\":" + Quote(ProcessUuid()) + ",\"version\":{\"class\":\"Version\",\"major\":" +
-                       std::to_string(mConfig.versionMajor) + ",\"minor\":" +
-                       std::to_string(mConfig.versionMinor) + ",\"build\":" +
-                       std::to_string(mConfig.versionBuild) + "},\"items_handling\":" +
-                       std::to_string(mConfig.itemsHandling) + ",\"tags\":[";
-  for (size_t i = 0; i < mConfig.tags.size(); ++i) {
-    if (i != 0)
-      result.push_back(',');
-    result += Quote(mConfig.tags[i]);
-  }
+  port::JsonWriter json;
+  json.BeginObject();
+  json.Key("cmd").String("Connect");
+  json.Key("password").String(mConfig.password);
+  json.Key("game").String(mConfig.game);
+  json.Key("name").String(mConfig.slot);
+  json.Key("uuid").String(ProcessUuid());
+  json.Key("version").BeginObject();
+  json.Key("class").String("Version");
+  json.Key("major").Number(mConfig.versionMajor);
+  json.Key("minor").Number(mConfig.versionMinor);
+  json.Key("build").Number(mConfig.versionBuild);
+  json.EndObject();
+  json.Key("items_handling").Number(mConfig.itemsHandling);
+  json.Key("tags").BeginArray();
+  for (const std::string& tag : mConfig.tags)
+    json.String(tag);
   // The server routes DeathLink bounces by tag, so a client without it would
   // neither receive other players' deaths nor be expected to send its own.
   if (mConfig.deathLink &&
-      std::find(mConfig.tags.begin(), mConfig.tags.end(), "DeathLink") == mConfig.tags.end()) {
-    if (!mConfig.tags.empty())
-      result.push_back(',');
-    result += "\"DeathLink\"";
-  }
+      std::find(mConfig.tags.begin(), mConfig.tags.end(), "DeathLink") == mConfig.tags.end())
+    json.String("DeathLink");
+  json.EndArray();
   // The built-in tables read the seed's options; a hand-written config has no
   // use for them.
-  result += mConfig.builtin ? "],\"slot_data\":true}" : "],\"slot_data\":false}";
-  return result;
+  json.Key("slot_data").Bool(mConfig.builtin);
+  json.EndObject();
+  return json.Take();
 }
 
+namespace {
+
+// {"cmd":<command>,"locations":[ids...]}, still open for more members.
+void BeginLocationsPacket(port::JsonWriter& json, const char* command, const std::vector< int64_t >& ids) {
+  json.BeginObject().Key("cmd").String(command).Key("locations").BeginArray();
+  for (const int64_t id : ids)
+    json.Number(id);
+  json.EndArray();
+}
+
+} // namespace
+
 std::string Session::BuildLocationChecks(const std::vector<int64_t>& ids) {
-  std::string result = "{\"cmd\":\"LocationChecks\",\"locations\":[";
-  for (size_t i = 0; i < ids.size(); ++i) {
-    if (i != 0)
-      result.push_back(',');
-    AppendInt(result, ids[i]);
-  }
-  result += "]}";
-  return result;
+  port::JsonWriter json;
+  BeginLocationsPacket(json, "LocationChecks", ids);
+  return json.EndObject().Take();
 }
 
 std::string Session::BuildSync() { return "{\"cmd\":\"Sync\"}"; }
 
 std::string Session::BuildSay(const std::string& text) {
-  return "{\"cmd\":\"Say\",\"text\":" + Quote(text) + "}";
+  port::JsonWriter json;
+  json.BeginObject().Key("cmd").String("Say").Key("text").String(text).EndObject();
+  return json.Take();
 }
 
 std::string Session::BuildGoal() { return "{\"cmd\":\"StatusUpdate\",\"status\":30}"; }
 
 std::string Session::BuildLocationScouts(const std::vector< int64_t >& ids) {
-  std::string result = "{\"cmd\":\"LocationScouts\",\"locations\":[";
-  for (size_t i = 0; i < ids.size(); ++i) {
-    if (i != 0)
-      result.push_back(',');
-    AppendInt(result, ids[i]);
-  }
-  result += "],\"create_as_hint\":0}";
-  return result;
+  port::JsonWriter json;
+  BeginLocationsPacket(json, "LocationScouts", ids);
+  return json.Key("create_as_hint").Number(0).EndObject().Take();
 }
 
 std::string Session::ItemName(int64_t itemId, int64_t slot) const {
@@ -1667,10 +1649,6 @@ int64_t Session::ReceivedCount(int64_t itemId) const {
   return found != mState.progressive.end() ? found->second : 0;
 }
 
-bool Session::DeathLinkEnabled(const Config& config) {
-  return config.deathLink;
-}
-
 std::string Session::BuildBounce(const std::string& cause) const {
   // A client that dies in DeathLink announces it with a Bounce aimed at the
   // "DeathLink" tag; the server relays it as Bounced to every client carrying
@@ -1688,15 +1666,19 @@ std::string Session::BuildBounce(const std::string& cause) const {
   char time[32];
   std::snprintf(time, sizeof(time), "%lld.%03lld", static_cast< long long >(millis / 1000),
                 static_cast< long long >(millis % 1000));
-  std::string packet = "{\"cmd\":\"Bounce\",\"tags\":[\"DeathLink\"],\"data\":{\"time\":";
-  packet += time;
-  packet += ",\"source\":" + Quote(mConfig.slot);
-  packet += ",\"cause\":" + Quote(cause.empty() ? mConfig.slot + " died" : cause);
-  packet += "}}";
-  return packet;
+  port::JsonWriter json;
+  json.BeginObject().Key("cmd").String("Bounce").Key("tags").BeginArray().String("DeathLink").EndArray();
+  json.Key("data").BeginObject();
+  json.Key("time").Raw(time);
+  json.Key("source").String(mConfig.slot);
+  json.Key("cause").String(cause.empty() ? mConfig.slot + " died" : cause);
+  json.EndObject().EndObject();
+  return json.Take();
 }
 
 void Session::RewindTo(int64_t heldCount) {
+  Log("rewinding: the loaded game holds the first " + std::to_string(std::max<int64_t>(0, heldCount)) +
+      " item(s); the server's next resend grants the rest");
   mState.nextItemIndex = 0;
   mState.progressive.clear();
   mTracked.clear();
@@ -1716,6 +1698,19 @@ bool Session::MarkLocationChecked(const std::string& locationKey, int64_t& id) {
 
 bool Session::KnowsLocation(const std::string& locationKey) const {
   return mConfig.locations.find(locationKey) != mConfig.locations.end();
+}
+
+bool Session::LocationIdFor(const std::string& locationKey, int64_t& id) const {
+  const auto found = mConfig.locations.find(locationKey);
+  if (found == mConfig.locations.end())
+    return false;
+  id = found->second;
+  return true;
+}
+
+bool Session::LocationChecked(int64_t id) const {
+  return std::find(mState.checkedLocations.begin(), mState.checkedLocations.end(), id) !=
+         mState.checkedLocations.end();
 }
 
 std::vector<int64_t> Session::AllLocationIds() const {

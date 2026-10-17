@@ -5,7 +5,7 @@
 
 // Read an embedded resource from a mapped DOL section on the already-mounted
 // disc. The native executable contains no generated game asset arrays.
-// Addresses are GM8E01 revision 0's (config/GM8E01_00/symbols.txt).
+// Addresses are GM8E01 revision 0's (decomp/config/GM8E01_00/symbols.txt).
 std::vector<uint8_t> PortReadDolResource(uint32_t address, uint32_t length);
 
 // The same resource on any supported disc: read at its 1.00 address when it
@@ -31,8 +31,7 @@ Version Identify(const char* id6, unsigned diskNumber, unsigned revision);
 Version Current();
 // "USA 1.00", "PAL", ...
 const char* Name(Version version);
-// Whether the port accepts this disc: USA 1.00 and PAL. 1.01 and 1.02 are
-// accepted with MP_DISC_ANY_VERSION=1 until their data is known to load.
+// Whether the port accepts this disc: USA 1.00, 1.01, 1.02 and PAL.
 bool IsAccepted(Version version);
 
 } // namespace PortDisc

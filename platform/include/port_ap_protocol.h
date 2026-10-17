@@ -13,8 +13,9 @@
 // Protocol core of the Archipelago client: the configuration and its item and
 // location maps, the packet state machine, and the queues of outgoing packets
 // and incoming items. It deliberately knows nothing about sockets or game
-// state, so the tests drive it directly. port_apclient.cpp owns the socket
-// thread and the step that turns ItemGrants into player-state changes.
+// state, so the tests drive it directly. port_apclient_worker.cpp owns the socket
+// thread, and port_apclient.cpp the step that turns ItemGrants into player-state
+// changes.
 namespace PortAp {
 namespace Protocol {
 
@@ -104,6 +105,10 @@ struct Connection {
   // The seed the server had when this slot last connected ("seed"), so the
   // game's own save card is known before the server answers. Empty if unknown.
   std::string seed;
+  // The room this slot last played that seed in ("room"; see State::room), so
+  // two rooms generated from one seed keep their own save cards. Empty if
+  // unknown.
+  std::string room;
   // Unix time this game was last connected ("last_played"), in the per-game
   // copies of the file; 0 when absent.
   int64_t lastPlayed = 0;
@@ -129,6 +134,11 @@ struct State {
   // different seed means a different session, so the progress is discarded
   // rather than replayed into it. Empty in files written before this existed.
   std::string seed;
+  // The room this progress belongs to. Rooms generated from one seed share its
+  // seed name, so the client names each room in the server's data storage the
+  // first time it connects to it (port_apclient_worker.cpp, EnterRoom). Empty until
+  // then, and in files written before this existed.
+  std::string room;
   int64_t nextItemIndex = 0;
   std::vector< int64_t > checkedLocations;
   // Item id -> copies processed so far: progressive ids, or every id with the
@@ -199,6 +209,11 @@ public:
   // Every PrintJSON message in full, repeats included, for the chat log. Drained
   // like the notifications; the queue is capped.
   bool TakeChatLine(ChatLine& line);
+  // What the session did with each packet that a bug report needs: the handshake
+  // and the seed's options, every item received (its index, what it grants, or
+  // why it grants nothing), gaps and resends, and rewinds. Plain sentences, no
+  // prefix, oldest first; drained by the client into the log. The queue is capped.
+  bool TakeLogLine(std::string& line);
   // Seed name from RoomInfo, or "" before it arrives.
   const std::string& SeedName() const { return mSeedName; }
   // Alias of a player slot from Connected, or "player <slot>" when unknown.
@@ -271,9 +286,6 @@ public:
   // the configuration does not enable DeathLink. `cause` is the text other
   // players see; empty means "<slot> died".
   std::string BuildBounce(const std::string& cause = std::string()) const;
-  // Whether the configuration asked for DeathLink at all, which the world's
-  // RoomInfo is what actually agrees to; both must say yes.
-  static bool DeathLinkEnabled(const Config& config);
 
   // Records a collected location. False when the key has no id, or was already
   // checked; otherwise `id` is the AP location id to send.
@@ -284,6 +296,9 @@ public:
   // key with no id is dropped on the floor, so the session plays normally and
   // the server simply never records the check.
   bool KnowsLocation(const std::string& locationKey) const;
+  // The location id the table gives the key, for naming a check in the log.
+  bool LocationIdFor(const std::string& locationKey, int64_t& id) const;
+  bool LocationChecked(int64_t id) const;
   // Every configured location id, for the MP_AP_SEND_ALL debug path.
   std::vector< int64_t > AllLocationIds() const;
 
@@ -301,6 +316,8 @@ public:
     mGrantFrom = 0;
     mWorldRevision = NextWorldRevision();
   }
+  // Claims the current progress for the server room named `room`.
+  void SetRoom(const std::string& room) { mState.room = room; }
   // Changes whenever State::world may have (slot_data parsed, a state swapped
   // in), so the client can tell the layout is unchanged without comparing or
   // copying it. Unique across sessions; never 0.
@@ -317,10 +334,6 @@ public:
   // Why the loaded progress was thrown away on the last RoomInfo, empty when
   // nothing was. The state itself is already reset when this is set.
   const std::string& ResetReason() const { return mResetReason; }
-  // Copies the tail of the tracked receipts, newest last, into `out`, replacing
-  // its contents. The HUD only cares about the last few; the F1 tracker calls
-  // Tracked() directly for the whole session.
-  void CopyRecentTracked(std::vector< TrackedItem >& out, size_t cap) const;
 
 private:
   Config mConfig;
@@ -366,6 +379,8 @@ private:
   bool AnnouncedLocally(int64_t locationId, int64_t finder) const;
   std::vector< std::string > mNotifications;
   std::vector< ChatLine > mChat;
+  std::vector< std::string > mLog;
+  void Log(std::string line);
   std::vector< TrackedItem > mTracked;
   SlotData mSlotData;
   // DeathLink bookkeeping: bounces owed to the game, and who to blame.

@@ -85,7 +85,7 @@ void init_texobj_common(GXTexObj_& obj, const void* data, u16 width, u16 height,
 
 void emit_loaded_texobj_metadata(const GXTexObj_& obj, GXTexMapID id) {
 #if defined(__linux__) && !defined(__ANDROID__)
-  if (std::getenv("MP_LOG_TEX_INVALID") != nullptr &&
+  if (aurora::env_flag("MP_LOG_TEX_INVALID") &&
       reinterpret_cast<uintptr_t>(obj.data) < 0x100000) {
     std::fprintf(stderr, "[tex-bt] load id=%u data=%p fmt=%u %ux%u\n", obj.texObjId, obj.data,
                  obj.format(), obj.width(), obj.height());
@@ -252,6 +252,8 @@ void GXLoadTexObj(GXTexObj* obj_, GXTexMapID id) {
   }
 
   __gx->tImage0[id] = obj->image0;
+  __gx->tSizeM1[id][0] = static_cast<u16>(obj->width() - 1);
+  __gx->tSizeM1[id][1] = static_cast<u16>(obj->height() - 1);
   __gx->tMode0[id] = obj->mode0;
   __gx->dirtyState |= 1;
   __gx->bpSent = 1;

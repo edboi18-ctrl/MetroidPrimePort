@@ -1,4 +1,5 @@
 #include "port_input_bindings.h"
+#include "port_strings.h"
 
 #include <algorithm>
 #include <cctype>
@@ -59,15 +60,10 @@ bool EqualsNoCase(std::string_view a, std::string_view b) {
   return true;
 }
 
-bool StartsWith(std::string_view s, std::string_view prefix) { return s.substr(0, prefix.size()) == prefix; }
+using port::StartsWith;
 
-std::string_view Trim(std::string_view s) {
-  while (!s.empty() && (s.front() == ' ' || s.front() == '\t' || s.front() == '\r'))
-    s.remove_prefix(1);
-  while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r'))
-    s.remove_suffix(1);
-  return s;
-}
+// A line of the bindings file without the spaces, tabs and carriage return around it.
+std::string_view Trim(std::string_view s) { return port::TrimView(s, " \t\r"); }
 
 // A whole decimal number (no sign) into out.
 bool ParseUInt(std::string_view s, long& out) {
@@ -522,12 +518,14 @@ bool ContextFromText(std::string_view text, uint16_t& out) {
   return true;
 }
 
-bool ParseUserBindings(std::string_view text, UserBindings& out, std::string* error) {
+bool ParseUserBindings(std::string_view text, UserBindings& out, std::string* error, int* dropped) {
   UserBindings result;
   enum class Table { None, Profile, Bind } table = Table::None;
   // Per bind: whether inputs was given (required).
   bool bindHasInputs = false;
   bool bindHasAction = false;
+  bool bindLegacy = false; // beam_shift: dropped when the bind closes
+  int legacyDropped = 0;
   int bindLine = 0;
   int lineNo = 0;
   std::string err;
@@ -539,6 +537,12 @@ bool ParseUserBindings(std::string_view text, UserBindings& out, std::string* er
   auto closeBind = [&]() {
     if (table != Table::Bind)
       return true;
+    if (bindLegacy) {
+      result.profiles.back().bindings.pop_back();
+      bindLegacy = false;
+      ++legacyDropped;
+      return true;
+    }
     if (!bindHasAction)
       return fail(bindLine, "bind without an action");
     if (!bindHasInputs)
@@ -573,7 +577,7 @@ bool ParseUserBindings(std::string_view text, UserBindings& out, std::string* er
             return fail(lineNo, "[[profile.bind]] before any [[profile]]");
           result.profiles.back().bindings.emplace_back();
           table = Table::Bind;
-          bindHasInputs = bindHasAction = false;
+          bindHasInputs = bindHasAction = bindLegacy = false;
           bindLine = lineNo;
         } else {
           return fail(lineNo, "unknown table " + std::string(header));
@@ -633,6 +637,10 @@ bool ParseUserBindings(std::string_view text, UserBindings& out, std::string* er
           p.unbind.clear();
           for (const std::string& item : v.array) {
             Unbind u;
+            if (item.rfind("beam_shift@", 0) == 0) {
+              ++legacyDropped;
+              continue;
+            }
             if (!UnbindFromText(item, u))
               return fail(lineNo, "bad unbind " + item);
             p.unbind.push_back(u);
@@ -648,8 +656,11 @@ bool ParseUserBindings(std::string_view text, UserBindings& out, std::string* er
         if (!wantKind(Value::String))
           return false;
         Action a = ActionFromKey(v.str);
-        if (a == Action::None)
+        if (a == Action::None && v.str == "beam_shift") {
+          bindLegacy = true;
+        } else if (a == Action::None) {
           return fail(lineNo, "unknown action " + v.str);
+        }
         b.action = a;
         bindHasAction = true;
       } else if (key == "inputs") {
@@ -727,6 +738,8 @@ bool ParseUserBindings(std::string_view text, UserBindings& out, std::string* er
     return false;
   }
   out = std::move(result);
+  if (dropped)
+    *dropped = legacyDropped;
   return true;
 }
 
@@ -824,6 +837,70 @@ void Overlay(Profile& profile, const UserProfile& user) {
     return b.count > 0 && drop[slot(b.action, FamilyOf(b.inputs[b.count - 1].device))];
   });
   profile.bindings.insert(profile.bindings.end(), user.bindings.begin(), user.bindings.end());
+}
+
+Family BindingFamily(const Binding& b) {
+  return b.count > 0 ? FamilyOf(b.inputs[b.count - 1].device) : Family::Keyboard;
+}
+
+bool Overridden(const UserProfile& user, Action action, Family family) {
+  for (const Unbind& u : user.unbind)
+    if (u.action == action && u.family == family)
+      return true;
+  for (const Binding& b : user.bindings)
+    if (b.count > 0 && b.action == action && BindingFamily(b) == family)
+      return true;
+  return false;
+}
+
+std::vector<Binding> InFamily(const std::vector<Binding>& bindings, Action action, Family family) {
+  std::vector<Binding> out;
+  for (const Binding& b : bindings)
+    if (b.count > 0 && b.action == action && BindingFamily(b) == family)
+      out.push_back(b);
+  return out;
+}
+
+void Materialize(UserProfile& user, Action action, Family family, const Profile& inherited) {
+  if (Overridden(user, action, family))
+    return;
+  for (const Binding& b : InFamily(inherited.bindings, action, family))
+    user.bindings.push_back(b);
+}
+
+void AddUserBinding(UserProfile& user, const Binding& b) {
+  if (b.count > 0) {
+    const Family family = BindingFamily(b);
+    std::erase_if(user.unbind, [&](const Unbind& u) { return u.action == b.action && u.family == family; });
+  }
+  if (std::find(user.bindings.begin(), user.bindings.end(), b) == user.bindings.end())
+    user.bindings.push_back(b);
+}
+
+void RemoveUserBinding(UserProfile& user, size_t index) {
+  if (index >= user.bindings.size())
+    return;
+  const Binding removed = user.bindings[index];
+  user.bindings.erase(user.bindings.begin() + std::ptrdiff_t(index));
+  if (removed.count == 0)
+    return;
+  const Family family = BindingFamily(removed);
+  if (InFamily(user.bindings, removed.action, family).empty()) {
+    const Unbind u{removed.action, family};
+    if (std::find(user.unbind.begin(), user.unbind.end(), u) == user.unbind.end())
+      user.unbind.push_back(u);
+  }
+}
+
+void Revert(UserProfile& user, Action action, Family family) {
+  std::erase_if(user.unbind, [&](const Unbind& u) { return u.action == action && u.family == family; });
+  std::erase_if(user.bindings,
+                [&](const Binding& b) { return b.count > 0 && b.action == action && BindingFamily(b) == family; });
+}
+
+void ClearFamily(UserProfile& user, Family family) {
+  std::erase_if(user.unbind, [&](const Unbind& u) { return u.family == family; });
+  std::erase_if(user.bindings, [&](const Binding& b) { return b.count > 0 && BindingFamily(b) == family; });
 }
 
 } // namespace PortInput

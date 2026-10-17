@@ -1,4 +1,5 @@
 #include "MetroidPrime/ScriptObjects/CScriptDoor.hpp"
+#include "port_env.h"
 
 #include "Collision/CMaterialList.hpp"
 #include "Kyoto/Math/CFrustumPlanes.hpp"
@@ -49,7 +50,7 @@ void PortPrintDoorWait(TUniqueId door, const char* what, const SPortDoorWait& wa
 }
 
 bool PortLogDoors() {
-  static const bool enabled = std::getenv("MP_LOG_DOORS") != nullptr;
+  static const bool enabled = port::EnvFlag("MP_LOG_DOORS");
   return enabled;
 }
 
@@ -205,6 +206,47 @@ CScriptDoor::EDoorOpenCondition CScriptDoor::GetDoorOpenCondition(CStateManager&
 
   CGameArea* area = mgr.World()->Area(connectedArea);
   if (!area->IsLoaded()) {
+#ifdef TARGET_PC
+    // Issue #88: a room stays loaded behind a door that closed because another
+    // door opened. Streaming a third room on top can fill the 1024-entry object
+    // list (PCA + Phazon Processing Center + Elite Quarters in backwards Lower
+    // Mines), and AllocateUniqueId then hangs in the error handler. Release
+    // those rooms first, as the doorway trigger's SetToZero would; TravelToArea
+    // deallocates them before it streams the new one. Only in PCA, the one room
+    // where this can happen, so every other door keeps the original behaviour.
+    const CAssetId kProcessingCenterAccess = 0xED6DE73B;
+    if (mgr.GetNextAreaId() == dock->GetAreaId() &&
+        mgr.GetWorld()->GetAreaAlways(dock->GetAreaId()).IGetAreaAssetId() ==
+            kProcessingCenterAccess) {
+      bool otherOpen = false;
+      CObjectList& doors = mgr.ObjectListById(kOL_PlatformAndDoor);
+      for (int i = doors.GetFirstObjectIndex(); i != -1; i = doors.GetNextObjectIndex(i)) {
+        const CScriptDoor* const door = TCastToConstPtr< CScriptDoor >(doors[i]);
+        if (!door || door == this || door->GetCurrentAreaId() != dock->GetAreaId()) {
+          continue;
+        }
+        CScriptDock* const other = TCastToPtr< CScriptDock >(mgr.ObjectById(door->mDockId));
+        if (!other || other == dock || other->GetAreaId() != dock->GetAreaId()) {
+          continue;
+        }
+        const IGameArea::Dock& otherDock =
+            mgr.GetWorld()->GetAreaAlways(other->GetAreaId()).GetDock(other->GetDockId());
+        const int ref = other->GetDockReference(mgr);
+        if (!otherDock.GetShouldLoadOther(ref) || otherDock.GetConnectedAreaId(ref) == connectedArea) {
+          continue;
+        }
+        if (door->mIsOpen || door->mWasOpen) {
+          otherOpen = true;
+        } else {
+          PortLogDoorEvent(GetUniqueId(), "released the room behind a closed door");
+          mgr.DeliverScriptMsg(other, GetUniqueId(), kSM_SetToZero);
+        }
+      }
+      if (otherOpen) {
+        return DOOR_WAIT("otherDoorFirst");
+      }
+    }
+#endif
     mgr.DeliverScriptMsg(dock, GetUniqueId(), kSM_SetToMax);
     return DOOR_WAIT("areaLoad");
   }
@@ -295,6 +337,24 @@ void CScriptDoor::OpenDoor(TUniqueId uid, CStateManager& mgr) {
     }
   }
 }
+
+#ifdef TARGET_PC
+void CScriptDoor::PortRestoreDoorState(const PortDoorFlags& state) {
+  mIsOpen = state.open;
+  // A close that was in flight is put back the way a live one leaves it: the door
+  // reads closed and Think still owes the message its own branch sends - the
+  // animation-end branch for a normal close, the mClosing branch for a refused
+  // opening. A refused close does not set mWasOpen (it never opened, and the
+  // animation-end branch would then send a second, fuller Closed). mAnimTime is
+  // left alone: Think advances it only while the door is not open and the branch
+  // that finishes the close resets it, so the animation replays from its start.
+  mWasOpen = state.open || state.normalClosePending;
+  mClosing = state.refusedClosePending;
+  mDoClose = state.doClose;
+  mConditionsMet = false;
+  SetDoorAnimation(state.open ? kDAT_Open : kDAT_Close);
+}
+#endif
 
 void CScriptDoor::SetDoorAnimation(EDoorAnimType state) {
   mDoorState = state;

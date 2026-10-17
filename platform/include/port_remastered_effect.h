@@ -29,13 +29,12 @@
 #include <string>
 #include <vector>
 
+#include "port_bytes.h"
+
 namespace PortRemastered {
 
 // FourCCs here are packed big-endian, as written: 'CNST' = 0x434E5354.
-constexpr uint32_t EffectFourCC(const char (&text)[5]) {
-  return uint32_t(uint8_t(text[0])) << 24 | uint32_t(uint8_t(text[1])) << 16 | uint32_t(uint8_t(text[2])) << 8 |
-         uint32_t(uint8_t(text[3]));
-}
+constexpr uint32_t EffectFourCC(const char (&text)[5]) { return port::FourCC(text); }
 
 using EffectGuid = std::array<uint8_t, 16>;
 
@@ -81,6 +80,23 @@ struct EffectNode {
 bool ParseEffect(const uint8_t* data, size_t size, EffectNode& out, std::string& error,
                  size_t* failOffset = nullptr);
 
+// Walks a WPSM or CRSM resource's top-level DESC properties using only the
+// form-specific factory allowlist (global property names are not sufficient).
+// `data` may also include FOOT/metadata bytes appended by Pak::ReadAsset; only
+// the length-checked RFRM/DESC form is parsed. The root walk is iterative and
+// capped at 1024 properties; typed expressions are capped at depth 64 and 4096
+// value nodes. Nested child/property payloads are not exposed as role fields.
+bool ParseRemasteredRoleAsset(const uint8_t* data, size_t size, uint32_t expectedForm, EffectNode& out,
+                             std::string& error);
+
+// Walks a retail WPSC/WPSM or CRSC/CRSM tagged-field stream using the field
+// value schemas consumed by the corresponding game factories. Returns the
+// unique top-level asset id for `field`; malformed, truncated, unknown, or
+// ambiguous streams fail closed. As in the factories, bytes after _END are
+// outside the tagged-field stream and are not inspected.
+bool ReadRetailRoleAssetId(const uint8_t* data, size_t size, uint32_t expectedClass, uint32_t field,
+                           uint32_t& out, std::string* error = nullptr);
+
 // A KSSM spawn table: the child systems to start on given frames. Retail has
 // one table; Remastered may hold several, each behind a selector element.
 struct EffectSpawnTable {
@@ -121,9 +137,6 @@ struct EffectMaterialTrack {
 // Breaks down a PMTR or SMTR property of an effect parsed from `data`.
 bool ParseMaterialTrack(const uint8_t* data, size_t size, const EffectProperty& property, EffectMaterialTrack& out);
 
-// The shader a MATI draws with: its MTRL guid's first four bytes as stored,
-// read big-endian (the id8 `re.sh shader` takes), or 0 for a short file.
-uint32_t EffectMaterialShader(const uint8_t* mati, size_t size);
 
 // Indented text dump of a parsed effect, one property per line, for diffing
 // against retail PART dumps.

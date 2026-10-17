@@ -13,7 +13,10 @@
 #include "MetroidPrime/CGroundMovement.hpp"
 #include "MetroidPrime/CPhysicsActor.hpp"
 #include "MetroidPrime/CWorld.hpp"
+#include "MetroidPrime/Enemies/CBloodFlower.hpp"
 #include "MetroidPrime/Player/CPlayer.hpp"
+#include "MetroidPrime/ScriptObjects/CScriptDock.hpp"
+#include "MetroidPrime/ScriptObjects/CScriptDoor.hpp"
 #include "MetroidPrime/ScriptObjects/CScriptPlatform.hpp"
 #include "MetroidPrime/TCastTo.hpp"
 #include "MetroidPrime/UserNames.hpp"
@@ -26,6 +29,12 @@
 #include <Collision/CCollisionPrimitive.hpp>
 #include <Collision/CRayCastResult.hpp>
 #include <WorldFormat/CCollidableOBBTreeGroup.hpp>
+#include <WorldFormat/COBBTree.hpp>
+
+#ifdef TARGET_PC
+#include "port_debug.h"
+#include "port_remastered_ground_policy.h"
+#endif
 
 static int gDebugPrintCount;
 
@@ -627,7 +636,8 @@ bool CGameCollision::RayStaticIntersectionArea(const CGameArea& area, const CVec
 
 CRayCastResult CGameCollision::RayStaticIntersection(const CStateManager& mgr, const CVector3f& pos,
                                                      const CVector3f& dir, float mag,
-                                                     const CMaterialFilter& filter) {
+                                                     const CMaterialFilter& filter,
+                                                     bool frontOnly) {
   const CWorld* world = mgr.GetWorld();
   const CUnitVector3f unitDir = CUnitVector3f(dir.GetX(), dir.GetY(), dir.GetZ());
   CLine line(pos, unitDir);
@@ -639,7 +649,7 @@ CRayCastResult CGameCollision::RayStaticIntersection(const CStateManager& mgr, c
     const CAreaOctTree& collision = (*it).GetOctTree();
     CAreaOctTree::Node node(collision.GetTreeMemory(), collision.GetBoundingBox(), collision,
                             collision.GetTreeType());
-    node.LineTestEx(line, filter, rayRes, mag);
+    node.LineTestEx(line, filter, rayRes, mag, frontOnly);
 
     if (!rayRes.x10_surface || (mag != 0.f && mag < rayRes.x3c_t)) {
       continue;
@@ -796,27 +806,110 @@ void CGameCollision::Move(CStateManager& mgr, CPhysicsActor& actor, float dt,
   }
 }
 
+// ---------------------------------------------------------------------------
+// MovePlayer's tick mover gate (PortRemasteredGround::MoverGate), sampled once at
+// the top of the function and used by every Remastered dispatch in it.
+//
+// The retained Remastered object state is only writable by the movers this gate
+// selects (CPhysicsSteppedMoverColliderMP1 0xf943b4 and the grounded mover
+// 0xf923d8). A tick outside the gate — classic movement (rm0), direct aim /
+// mouse controls off, or a morph ball — runs a retail mover and cannot produce
+// a source value at all, so it INVALIDATES the retained value at entry instead
+// of leaving the previous tick's value to be consumed by a later ground tick
+// (the next ground tick's entry state is read from it, and a refused snap
+// resends kSM_OnFloor from it). The ball is covered by the unmorphed term: it
+// is never kMS_Unmorphed, so no ball-specific invalidation is needed. Inside
+// the gate the value is passed through untouched; the movers write it later in
+// the tick. On rm0 nothing reads the value, so there the invalidation only
+// keeps the tracked value honest.
+// ---------------------------------------------------------------------------
+
 void CGameCollision::MovePlayer(CStateManager& mgr, CPhysicsActor& actor, float dt,
                                 const TEntityList* colliderList) {
   actor.SetApplyRotationWhenInCollision(true);
   actor.AddMotionState(actor.PredictAngularMotion(dt));
 
+#ifdef TARGET_PC
+  CPlayer* const player = TCastToPtr< CPlayer >(&actor);
+  const PortRemasteredGround::MoverGate moverGate{
+      player != nullptr && player->GetMorphballTransitionState() == CPlayer::kMS_Unmorphed,
+      player != nullptr && player->MouseControlsAllowed(mgr), PortDebug::RemasteredMovement()};
+  const bool remasteredMoverTick = PortRemasteredGround::UsesRemasteredMover(moverGate);
+  if (player != nullptr) {
+    player->PortSetRetainedObjectState(PortRemasteredGround::RetainedEntryForTick(
+        moverGate, player->PortRetainedObjectState()));
+  }
+
+  // Remastered movement: Remastered's stepped mover (0xf943b4) caps a standing
+  // player's rise before the move, scaling the whole velocity, where retail
+  // caps it only after the move. Without the early cap the jump's first tick
+  // moves at the uncapped speed (issue #117).
+  if (remasteredMoverTick && player->GetPlayerMovementState() != NPlayer::kMS_OnGround) {
+    const float maxUp = player->GetMaximumPlayerPositiveVerticalVelocity(mgr);
+    const CVector3f velocity = player->GetVelocityWR();
+    if (velocity.GetZ() > maxUp) {
+      player->SetVelocityWR(velocity * (maxUp / velocity.GetZ()));
+    }
+  }
+#endif
+
   if (actor.IsStandardCollider()) {
+    // The morph ball is the standard collider (CPlayer.cpp SetStandardCollider(state ==
+    // kMS_Morphed)) and its source mover is CPhysicsSweptMoverCollider::MoveObject 0xc255fc,
+    // which the port does NOT implement: the retail MoveAndCollide below has no floor-contact
+    // predicate equivalent to 0xc261a8 and no 0xc26234 fallback, so it cannot produce the
+    // retained object state. The ball is outside the entry gate (it is never kMS_Unmorphed),
+    // which invalidates the value for this tick: the ground mover then stands aside (see the
+    // kMT_GroundCollider branch) until a verified airborne tick writes 0 and restores
+    // validity. Retail movement (rm0) never reads the value.
     CBallFilter filter(actor);
     MoveAndCollide(mgr, actor, dt, filter, colliderList);
   } else if (actor.GetMaterialList().HasMaterial(kMT_GroundCollider)) {
+#ifdef TARGET_PC
+    // Remastered's grounded player mover (0xf923d8) replaces the retail ground
+    // collider mover for the ticks the entry gate selected (an unmorphed
+    // Remastered-movement player). The standard-collider ball path above and the
+    // airborne path below are disjoint from it, and classic movement
+    // (remastered_movement off) never reaches here.
+    if (remasteredMoverTick) {
+      // The mover's entry state is the RETAINED value, not the kMT_GroundCollider material
+      // (ENTRY-STATE.md §D: the material is identically true on this path). If it is invalid
+      // (a retail mover ran: morph ball, the ground dynamic fallback, a gate-off tick, or a
+      // save-state load), the Remastered mover is NOT entered with a guessed entry state: the
+      // retail ground mover below runs instead and the value stays invalid across further
+      // retail ground ticks until a verified airborne tick restores it. Conservative by
+      // design: ground replacement is off for a value the movers cannot vouch for.
+      if (PortRemasteredGround::RetainedAllowsGroundMover(player->PortRetainedObjectState())) {
+        MoveGroundedRemastered(mgr, *player, dt, colliderList);
+        actor.SetApplyRotationWhenInCollision(false);
+        return;
+      }
+    }
+#endif
     if (gkUseNewPlayerMovement) {
       CGroundMovement::MoveGroundCollider_New(mgr, actor, dt, colliderList);
     } else {
       CGroundMovement::MoveGroundCollider(mgr, actor, dt, colliderList);
     }
   } else {
+#ifdef TARGET_PC
+    if (remasteredMoverTick) {
+      MoveAirborneStepped(mgr, *player, dt, colliderList);
+      actor.SetApplyRotationWhenInCollision(false);
+      return;
+    }
+#endif
     CBallFilter filter(actor);
     MoveAndCollide(mgr, actor, dt, filter, colliderList);
   }
 
   actor.SetApplyRotationWhenInCollision(false);
 }
+
+#ifdef TARGET_PC
+// The Remastered airborne and grounded player movers (MoveAirborneStepped,
+// MoveGroundedRemastered) live in platform/port_remastered_movers.cpp.
+#endif
 
 void CGameCollision::MoveAndCollide(CStateManager& mgr, CPhysicsActor& actor, float dt,
                                     const ICollisionFilter& filter,
@@ -957,7 +1050,7 @@ void CGameCollision::MoveAndCollide(CStateManager& mgr, CPhysicsActor& actor, fl
   IsUser(0);
 }
 
-void CGameCollision::CollisionFailsafe(const CStateManager& mgr, CAreaCollisionCache& cache,
+bool CGameCollision::CollisionFailsafe(const CStateManager& mgr, CAreaCollisionCache& cache,
                                        CPhysicsActor& actor, const CCollisionPrimitive& prim,
                                        const TEntityList& nearList, float dtFrac,
                                        uint failsafeTicks) {
@@ -972,7 +1065,7 @@ void CGameCollision::CollisionFailsafe(const CStateManager& mgr, CAreaCollisionC
     actor.SetNumTicksPartialUpdate(0);
     actor.SetNumTicksStuck(actor.GetNumTicksStuck() + 1);
     if (actor.GetNumTicksStuck() < failsafeTicks) {
-      return;
+      return false;
     }
 
     const CMotionState& oldState = actor.GetMotionState();
@@ -986,6 +1079,7 @@ void CGameCollision::CollisionFailsafe(const CStateManager& mgr, CAreaCollisionC
                        0.5f * lastState.GetVelocity(), lastState.GetAngularMomentum() * 0.5f));
       gDebugPrintCount++;
       actor.SetNumTicksStuck(0);
+      return true; // repositioned to the last non-colliding state (0xc1fa68 returns 1)
     } else {
       actor.SetMotionState(CMotionState(oldState));
       rstl::optional_object< CVector3f > vec =
@@ -996,6 +1090,7 @@ void CGameCollision::CollisionFailsafe(const CStateManager& mgr, CAreaCollisionC
                                           oldState.GetAngularMomentum()));
         actor.SetLastNonCollidingState(actor.GetMotionState());
         gDebugPrintCount++;
+        return true; // pushed out along a non-intersecting vector
       } else {
         gDebugPrintCount++;
         actor.SetLastNonCollidingState(
@@ -1007,6 +1102,7 @@ void CGameCollision::CollisionFailsafe(const CStateManager& mgr, CAreaCollisionC
     actor.SetLastNonCollidingState(actor.GetMotionState());
     actor.SetNumTicksStuck(0);
   }
+  return false;
 }
 
 rstl::optional_object< CVector3f >

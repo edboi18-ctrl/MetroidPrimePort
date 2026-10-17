@@ -1,10 +1,15 @@
 #include "GuiSys/CGuiModel.hpp"
+#include "port_env.h"
 
 #include "GuiSys/CGuiFrame.hpp"
 #include "GuiSys/CGuiSys.hpp"
 #include "GuiSys/CGuiWidgetDrawParms.hpp"
 #include "Kyoto/Graphics/CGraphics.hpp"
 #include "Kyoto/Graphics/CModel.hpp"
+
+#ifdef TARGET_PC
+#include "port_pointer.h"
+#endif
 
 #include <cstdio>
 #include <cstdlib>
@@ -48,6 +53,11 @@ void CGuiModel::Draw(const CGuiWidgetDrawParms& parms) const {
     return;
   }
   if (GetIsVisible()) {
+#ifdef TARGET_PC
+    // Port: where the model lands on screen, for mouse and touch menus.
+    PortGuiHit::Record(this, CGraphics::GetModelMatrix(), model->GetBoundingBox().GetMinPoint(),
+                       model->GetBoundingBox().GetMaxPoint());
+#endif
     CColor col = GetModifiedColor().WithAlphaModulatedBy(parms.GetAlpha());
     GetParentFrame()->EnableLights(xcc_lightMask);
 
@@ -123,7 +133,7 @@ bool CGuiModel::GetIsFinishedLoadingWidgetSpecific() const {
   if (const CModel* model = xb8_model->GetObject()) {
     model->Touch(0);
     const bool loaded = model->IsLoaded(0);
-    if (!loaded && std::getenv("MP_LOG_HUD") != nullptr) {
+    if (!loaded && port::EnvFlag("MP_LOG_HUD")) {
       static int sLogCount = 0;
       if (sLogCount < 80) {
         ++sLogCount;
@@ -133,7 +143,7 @@ bool CGuiModel::GetIsFinishedLoadingWidgetSpecific() const {
     return loaded;
   }
 
-  if (std::getenv("MP_LOG_HUD") != nullptr) {
+  if (port::EnvFlag("MP_LOG_HUD")) {
     static int sLogCount = 0;
     if (sLogCount < 80) {
       ++sLogCount;

@@ -3,8 +3,10 @@
 // result with Aurora's DVD overlays.
 
 #include "port_mods.h"
+#include "port_env.h"
 #include "port_strings.h"
 #include "port_paths.h"
+#include "port_remastered_storage.h"
 
 #include "port_debug.h"
 #include "port_hd_font.h"
@@ -29,7 +31,10 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <array>
+#include <cstdio>
 #include <map>
+#include <mutex>
 #include <set>
 #include <unordered_map>
 #include <utility>
@@ -60,6 +65,11 @@ std::unordered_map<uint32_t, std::string> sRoomLiquids;
 std::unordered_map<uint32_t, std::string> sHudBars;
 // thermal.lut: the thermal visor's heat gradient (port_thermal.h).
 std::string sThermalLut;
+// effectids.map: the retail effect ids a mod gives a second user its own effect for. Loaded on first use.
+std::string sEffectIdMapPath;
+std::mutex sEffectIdsMutex;
+bool sEffectIdsLoaded = false;
+std::map<std::array<uint32_t, 3>, uint32_t> sEffectIds;
 struct BoundTexture {
   aurora::texture::ReplacementRegistration registration;
   uint32_t id = 0;
@@ -221,9 +231,37 @@ struct Replacement {
 
 } // namespace
 
+namespace {
+
+// The mod folders a scan loads: the mods folder's own folders, plus the built-in Remastered import
+// when it is installed outside it (port_remastered_storage.h). The import takes part in the same
+// name order as the others - a later name still wins - and a shared mod of the same name never
+// shadows it; a legacy shared import keeps standing in until a private one is installed.
+std::vector<PortRemasteredStorage::ModFolder> ScanModFolders(const std::string& sharedFolder) {
+  return PortRemasteredStorage::ScanFolders(sharedFolder, PortRemastered::InstalledModFolder());
+}
+
+bool HasRoomGeometryNow(const std::vector<PortRemasteredStorage::ModFolder>& mods) {
+  for (const PortRemasteredStorage::ModFolder& mod : mods) {
+    std::error_code ec;
+    for (fs::recursive_directory_iterator it(PathFromString(mod.path), fs::directory_options::skip_permission_denied,
+                                             ec),
+         end;
+         !ec && it != end; it.increment(ec)) {
+      uint32_t id = 0;
+      if (PortRoomGeo::ParseFileName(PathString(it->path().filename()), id)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+} // namespace
+
 std::string Folder() {
   std::string dir;
-  if (const char* env = std::getenv("MP_MODS"); env != nullptr && env[0] != '\0') {
+  if (const char* env = port::EnvString("MP_MODS"); env != nullptr && env[0] != '\0') {
     dir = env;
   } else {
     dir = PortPaths::UserFolder();
@@ -238,19 +276,9 @@ std::string Folder() {
 }
 
 bool HasRoomGeometry() {
-  const std::string dir = Folder();
-  if (dir.empty()) {
-    return false;
-  }
-  std::error_code ec;
-  for (fs::recursive_directory_iterator it(PathFromString(dir), fs::directory_options::skip_permission_denied, ec), end;
-       !ec && it != end; it.increment(ec)) {
-    uint32_t id = 0;
-    if (PortRoomGeo::ParseFileName(PathString(it->path().filename()), id)) {
-      return true;
-    }
-  }
-  return false;
+  // The same folders the scan loads, the built-in import included: the frame buffers and the arena
+  // are sized from this before there is a renderer (main.cpp).
+  return HasRoomGeometryNow(ScanModFolders(Folder()));
 }
 
 const Status& CurrentStatus() { return sStatus; }
@@ -355,6 +383,23 @@ std::string HudBarsPath(uint32_t frame) {
 
 std::string ThermalLutPath() { return sThermalLut; }
 
+uint32_t RemapEffectId(uint32_t owner, uint32_t field, uint32_t id) {
+  std::lock_guard<std::mutex> lock(sEffectIdsMutex);
+  if (!sEffectIdsLoaded) {
+    sEffectIdsLoaded = true;
+    std::ifstream in(PathFromString(sEffectIdMapPath));
+    std::string line;
+    while (std::getline(in, line)) {
+      unsigned a = 0, b = 0, c = 0, d = 0;
+      if (std::sscanf(line.c_str(), "%x %x %x %x", &a, &b, &c, &d) == 4) {
+        sEffectIds[{a, b, c}] = d;
+      }
+    }
+  }
+  const auto found = sEffectIds.find({owner, field, id});
+  return found != sEffectIds.end() ? found->second : id;
+}
+
 std::string RoomGeoPath(uint32_t mrea) {
   const auto found = sRoomGeos.find(mrea);
   return found != sRoomGeos.end() ? found->second : std::string();
@@ -407,22 +452,28 @@ void Initialize() {
   sRoomLiquids.clear();
   sHudBars.clear();
   sThermalLut.clear();
+  {
+    std::lock_guard<std::mutex> lock(sEffectIdsMutex);
+    sEffectIdMapPath.clear();
+    sEffectIds.clear();
+    sEffectIdsLoaded = false;
+  }
   sStatus.folder = Folder();
   sStatus.active = PortDebug::ModsEnabled() && !sSuspended;
-  if (sStatus.folder.empty()) {
+  // The built-in Remastered import can live outside the mods folder (Android,
+  // port_remastered_storage.h): it loads as a mod either way.
+  const std::vector<PortRemasteredStorage::ModFolder> scan = ScanModFolders(sStatus.folder);
+  if (sStatus.folder.empty() && scan.empty()) {
     return;
   }
   const std::vector<std::string> disabled = SplitDisabled(PortDebug::ModsDisabled());
 
   std::error_code ec;
   std::vector<fs::path> modDirs;
-  for (fs::directory_iterator it(PathFromString(sStatus.folder), ec), end; !ec && it != end; it.increment(ec)) {
-    const std::string name = PathString(it->path().filename());
-    if (!name.empty() && name[0] != '.' && it->is_directory(ec)) {
-      modDirs.push_back(it->path());
-    }
+  modDirs.reserve(scan.size());
+  for (const PortRemasteredStorage::ModFolder& mod : scan) {
+    modDirs.push_back(PathFromString(mod.path));
   }
-  std::sort(modDirs.begin(), modDirs.end());
 
   // Keyed by disc entry and by (type, id); a later mod overwrites an earlier.
   std::map<int32_t, Replacement> replaced;
@@ -439,7 +490,7 @@ void Initialize() {
       const bool stamped = stamp.is_open();
       info.import = stamped || info.name == PortRemastered::kImportModName;
       if (info.import) {
-        const std::string text((std::istreambuf_iterator<char>(stamp)), std::istreambuf_iterator<char>());
+        const std::string text = port::ReadAllText(stamp);
         info.importStale = ImportStampStale(text, PortRemastered::kImportVersion);
       }
       if (info.importStale && sStatus.staleImport.empty()) {
@@ -509,6 +560,10 @@ void Initialize() {
       }
       if (ParseMaterialCubeName(name, id)) {
         sMaterialCubes[id] = PathString(file);
+        continue;
+      }
+      if (name == "effectids.map") {
+        sEffectIdMapPath = PathString(file);
         continue;
       }
       if (name == "thermal.lut") {
@@ -607,13 +662,16 @@ void Initialize() {
       }
       pending.push_back(std::move(pak));
     }
+    // Resources are found by id alone, so an added id must not repeat under
+    // another type: a model would get the texture's bytes.
     std::vector<const LooseResource*> added;
+    std::set<uint32_t> addedIds;
     for (const auto& [key, resource] : loose) {
       if (used.count(key) != 0) {
         continue;
       }
       const std::string name = PathString(PathFromString(resource.hostPath).filename());
-      if (knownIds.count(key.second) != 0) {
+      if (knownIds.count(key.second) != 0 || !addedIds.insert(key.second).second) {
         Message(resource.mod + ": " + name + " reuses an id another type holds; ignored");
       } else if (homeEntry < 0) {
         Message(resource.mod + ": " + name + " is in no PAK and NoARAM.pak is missing; ignored");

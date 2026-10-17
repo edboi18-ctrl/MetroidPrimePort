@@ -1,125 +1,10 @@
 // Room environments at run time: which areas have one, their cubes on the GPU, and the
 // cube and ambient for a model. See port_room_env.h.
-#include "port_debug.h"
-#include "port_env.h"
-#include "port_room_env.h"
-#include "port_strings.h"
-
-#include "port_gci.h"
-#include "port_log.h"
-#include "port_mods.h"
-#include "port_remastered_txtr.h"
-#include "port_room_env_lod.h"
-#include "port_room_geo.h"
-
-#include <Kyoto/CRandom16.hpp>
-#include <dolphin/gx/GXExtra.h>
-
-#include <algorithm>
-#include <atomic>
-#include <chrono>
-#include <cmath>
-#include <condition_variable>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <fstream>
-#include <iterator>
-#include <mutex>
-#include <thread>
-#include <unordered_map>
-#include <unordered_set>
+#include "port_room_env_internal.h"
 
 namespace PortRoomEnv {
-namespace {
+namespace EnvDetail {
 
-struct GpuCube {
-  uint32_t id = 0;      // 0: not made yet (the worker is decoding it), or it failed
-  bool failed = false;
-  float average = 0.f;  // luminance over every direction, as stored
-  float peak = 0.f;     // the largest channel of the colour over every direction
-  uint32_t mipCount = 0;
-};
-
-struct GpuVolume {
-  uint32_t id = 0; // 0: not made yet (the worker is filling it in)
-};
-
-struct Area {
-  File file;
-  bool hasFile = false; // the file was read
-  uint32_t serial = 0;  // of this load, which the worker's jobs for it carry
-  std::vector<GpuCube> cubes;
-  std::vector<GpuVolume> volumes; // one a grid
-  uint32_t lightmap = 0; // GXCreatePBRLightmap's id; 0 until the worker has made it, or none
-  float exposure = 0.f; // what takes the room's radiance to the display's range; 0: unknown
-  float tone[3][4] = {}; // its tone curve
-  bool hasGeo = false;   // the mod replaces its geometry
-  uint64_t layers = ~uint64_t(0); // its active script layers (SetAreaLayers)
-  // Its grades' requests (Remastered's CAreaPrioritizedGameHintManager): on or off, and
-  // when they were last turned on, which decides between equal priorities.
-  struct GradeRequest {
-    bool on = false;
-    uint64_t order = 0;
-  };
-  std::vector<GradeRequest> grades;
-  std::vector<GradeRequest> backlights; // likewise
-  std::vector<GradeRequest> fogs;       // likewise
-  std::vector<GradeRequest> regions;    // the fog regions' activation (only `on` matters)
-  std::vector<FogRegion> live;          // the fog regions as their transitions leave them
-  // A fog region transition's playback (CVolumetricFogRegionTransitionGOC), and the region's
-  // state when it last started.
-  struct Transition {
-    bool active = false;
-    bool playing = false;
-    bool dead = false;
-    double time = 0.;
-    bool hasColor = false;
-    bool hasCap = false;
-    bool hasRegion = false;
-    float distance = 0.f;
-    float transmittance = 0.f;
-    float color[4] = {};
-    float cap = 0.f;
-  };
-  std::vector<Transition> transitions;
-  // A point or spot light's state (CLightDynamicGOC): active, and its timeline.
-  struct Light {
-    bool active = false;
-    bool playing = false;
-    bool forward = true;
-    double time = 0.;
-    int group = -1; // what its script group last said (PortRoomGeo::GroupShown)
-  };
-  std::vector<Light> lights;
-};
-
-// The frame's exposure and tone curve, as CPostFXManager::UpdateTonemapping moves them.
-struct FrameState {
-  bool started = false;
-  uint32_t area = 0; // the camera's room last frame
-  std::vector<uint32_t> loaded; // the areas in memory last frame
-  Convergence ev;
-  float sigma = -1.f;
-  float targetEv = 0.f;
-  bool measuring = false; // this frame is measured (MeasureExposure)
-  bool measured = false;  // targetEv is a measurement
-  float measuredEv = 0.f;
-  uint32_t serial = 0;      // of the last measurement seen
-  uint32_t ignoreUntil = 0; // measurements up to here are of before a jump
-  // The tonemap's EV, mid, contrast, toe and shoulder, and the static EV (see GlowScale),
-  // moving linearly from `from` to `to`.
-  float from[6] = {};
-  float to[6] = {};
-  float shown[6] = {};
-  std::chrono::steady_clock::time_point start;
-  std::chrono::steady_clock::time_point last;
-  float carry = 0.f; // seconds not stepped yet
-  float exposure = 0.f; // 2^(3 - EV); 0: none yet
-  bool hasTone = false;
-  float tone[3][4] = {};
-};
 FrameState sFrame;
 std::vector<uint32_t> sLoadedSpare; // FrameState::loaded of the frame before last
 int sAuto = -1;
@@ -139,59 +24,30 @@ uint32_t sNextSerial = 1;
 // File, which stays as it is until the job is done: Free cancels the area's jobs, and
 // waits for the one running to stop, before the file goes, and Keep is the area's last.
 // Defined after sAreas so that it is destroyed, and its thread joined, first.
-enum class JobKind { Cube, Volume, Lightmap, Keep };
-
-struct Job {
-  JobKind kind = JobKind::Cube;
-  uint32_t area = 0;
-  uint32_t serial = 0; // Area::serial
-  size_t index = 0;    // of the cube or grid in the file
-  const File* file = nullptr;
-  bool raw = false; // Lightmap: the device takes its BC6H blocks as they are
-};
-
-struct Result {
-  JobKind kind = JobKind::Cube;
-  uint32_t area = 0;
-  uint32_t serial = 0;
-  size_t index = 0;
-  std::vector<uint16_t> cube;  // RGBA16F, as GXCreatePBRCube takes it
-  std::vector<uint8_t> volume; // as GXCreatePBRVolume takes it, or Keep's bytes
-  std::vector<size_t> offsets; // Keep: where each grid's points, then each grade's LUT, are
-  // Lightmap: its size, and whether `volume` holds its BC6H blocks or `cube` its RGBA16F.
-  uint32_t width = 0;
-  uint32_t height = 0;
-  bool raw = false;
-};
-
-struct Worker {
-  // Decoded cubes waiting for the GPU; the thread waits while this many are.
-  static constexpr size_t kMaxResults = 2;
-
-  ~Worker();
-  void Submit(const Job& job);
-  // Drops the jobs and results of a load, and waits for its job that is running to stop.
-  void Cancel(uint32_t serial);
-  // The oldest result, if there is one; a cube or volume only when `gpu`.
-  bool Take(Result& out, bool gpu);
-
-  void Run();
-  // False when cancelled.
-  bool Do(const Job& job, Result& out);
-
-  std::mutex mutex;
-  std::condition_variable wake; // the thread: a job, room for its result, or stop
-  std::condition_variable done; // Cancel: the running job ended
-  std::deque<Job> jobs;
-  std::deque<Result> results;
-  bool running = false;
-  uint32_t runningSerial = 0;
-  std::atomic<bool> cancel{false};
-  bool stop = false;
-  bool noThread = false; // the thread could not start: jobs run in Submit
-  std::thread thread;
-};
 Worker sWorker;
+
+// Remastered keeps one world-wide virtual texture of baked lighting, its tiles keyed by world
+// position. Every area registers its own copy of each tile it has when it loads
+// (CBakedLightingProbeTexture, from InitializeRenderNodes 0x3fc2f4 through
+// OnRegisterContextNode 0x1ca01c): the first copy stays mapped and later ones wait on standby,
+// and when the mapped copy's area unloads (0x1ca650) the most recently registered standby copy
+// takes over, or the tile is unmapped. sTiles is that table, sTileSets the tiles of each
+// registered area, and sTileSeq the order areas have been asked to load in. The one world
+// grid is composed from every mapped key (SubmitWorld, ResolveVolume), and composed again when
+// a key changes owner or an area comes or goes.
+PortRoomEnvTiles::TileTable sTiles;
+std::unordered_map<uint32_t, std::shared_ptr<const PortRoomEnvTiles::TileSet>> sTileSets;
+uint64_t sTileSeq = 0;
+
+World sWorld;
+File sNoFile; // the file of the world's job, which reads none
+
+// The grids an area samples: the composed one of a version 21 file, else the file's own.
+// Version 21 areas share the world grid (World), so it is not one of theirs.
+const std::vector<Grid>& Grids(const Area& area) {
+  static const std::vector<Grid> none;
+  return area.file.tiles != nullptr ? none : area.file.grids;
+}
 
 uint32_t sNextCube = 1;
 uint32_t sNextVolume = 1;
@@ -205,76 +61,19 @@ bool sHint = false;
 bool sBrdfSent = false; // the mods' brdf.lut, or the lack of one, is with Aurora
 uint32_t sHintArea = 0;
 float sHintCentre[3];
-float sHintLightmap[3] = {}; // SetLightmapHint; scale 0: none
+float sHintLightmap[3] = {}; // SetLightmapHint; PortRoomGeo::HasLightmapLookup
 int sEnabled = -1;
 int sExposure = -1;
 int sBloom = -1;
 uint32_t sViewArea = 0;
 int sGrade = -1;
-// The colour grade on screen: fading from one LUT to another (0 is the identity).
-struct GradeFade {
-  bool started = false;
-  uint32_t from = 0;
-  uint32_t to = 0;
-  float seconds = 0.f; // how long the fade to `to` takes
-  float fadeOut = 0.f; // of `to`, for when the next room has no grade
-  std::chrono::steady_clock::time_point start;
-};
 GradeFade sGradeFade;
 // The grade on screen: its area and index, to tell a grade turned off from one outranked.
 uint32_t sGradeArea = 0;
 int sGradeIndex = -1;
 uint64_t sGradeOrder = 0;
-// The character backlight's strengths (NRenderDebugDefaults::skBacklightTop and Back when no
-// hint is picked), moving linearly from `from` to `to` over `seconds`.
-constexpr float kBacklightTop = 2.f;
-constexpr float kBacklightBack = 4.f;
-struct BacklightFade {
-  bool started = false;
-  bool hinted = false; // a hint is picked
-  uint32_t area = 0;   // of the hint, and its index
-  int index = -1;
-  float fadeOut = 0.f; // of the hint
-  float from[2] = {kBacklightTop, kBacklightBack};
-  float to[2] = {kBacklightTop, kBacklightBack};
-  float seconds = 0.f;
-  std::chrono::steady_clock::time_point start;
-};
 BacklightFade sBacklight;
 uint64_t sBacklightOrder = 0;
-// The volumetric fog (Remastered's CVolumetricFogManager::UpdateSceneNode). The node shows
-// `out`; a hint change starts an interpolation from it to the target, whose phase is the
-// fade's spline at the seconds since the change (SVolumetricFogDynamicData::
-// interpolate_by_phase). The defaults are SVolumetricFogDynamicData's constructor's.
-struct FogCore {
-  float range = 0.f, scatter = 0.f, absorb = 0.f, m1z = 0.f, decay = 0.f;
-  float attenSlope = 0.f, attenBias = 1.f;
-  float noiseFreq = 0.f, noiseStrength = 0.f, lightCap = 65535.f;
-  float wind[3] = {};
-  float colorB[4] = {1.f, 1.f, 1.f, 1.f}, colorA[3] = {1.f, 1.f, 1.f};
-  bool noProbe = false;
-  float lut[64] = {};
-};
-struct FogFade {
-  bool hinted = false; // a hint is picked
-  uint32_t area = 0;   // of the hint, and its index
-  int index = -1;
-  // The picked hint's fade-out, kept for when it goes away.
-  bool hasFadeOut = false;
-  bool linearFadeOut = false;
-  float fadeOutSeconds = 0.f;
-  PortMayaSpline fadeOut;
-  // The running interpolation, if any: a spline, or (older files) linear over `seconds`.
-  bool fading = false;
-  bool linear = false;
-  float seconds = 0.f;
-  PortMayaSpline spline;
-  float elapsed = 0.f;
-  FogCore from, out;
-  bool active = false; // a hint is picked or an interpolation runs
-  float time = 0.f;    // since the node was made; the noise moves by wind * time
-  uint32_t frames = 0; // updates since the state manager was made
-};
 FogFade sFog;
 uint64_t sFogOrder = 0;
 uint64_t sRegionOrder = 0;
@@ -300,20 +99,6 @@ void Invalidate() {
   ++sEpoch;
 }
 
-// The reflection probes blended around the camera (UpdateBlend), and the cube Aurora draws
-// them into. That cube is bound by its id, and a draw only binds a new one when the id
-// changes, so a new blend goes into the other of two ids.
-struct ProbeBlendState {
-  int enabled = -1;
-  bool hasView = false;
-  float view[3] = {};
-  Blend blend;
-  uint32_t dst[2] = {};
-  int shown = -1; // which dst holds `keys`/`weights`; -1: none
-  uint64_t keys[kMaxBlend] = {};
-  float weights[kMaxBlend] = {};
-  size_t count = 0;
-};
 ProbeBlendState sBlend;
 
 float HalfToFloat(uint16_t h) {
@@ -331,6 +116,9 @@ float HalfToFloat(uint16_t h) {
 }
 
 void Free(Area& area) {
+  if (area.pending.valid()) {
+    area.pending.wait(); // the loader thread reads nothing of the area, but the future must not outlive it
+  }
   // Before the file goes: the worker may be reading it.
   sWorker.Cancel(area.serial);
   for (GpuCube& cube : area.cubes) {
@@ -384,7 +172,8 @@ bool FillVolume(const File& file, const Grid& grid, std::vector<uint8_t>& texels
   static const int kLayers = int(port::EnvFloat("MP_ROOM_ENV_FILL_LAYERS", 0.f));
   const size_t sx = grid.size[0], sy = grid.size[1], sz = grid.size[2];
   const size_t count = sx * sy * sz;
-  std::vector<uint8_t> points(file.data.begin() + grid.offset, file.data.begin() + grid.offset + count * kPoint);
+  const uint8_t* source = grid.points ? grid.points->data() : file.data.data() + grid.offset;
+  std::vector<uint8_t> points(source, source + count * kPoint);
   const auto lit = [&points](size_t index) {
     const uint8_t* p = points.data() + index * kPoint;
     // Means are not negative, so any set bit but the sign is light.
@@ -473,6 +262,43 @@ bool FillVolume(const File& file, const Grid& grid, std::vector<uint8_t>& texels
   return true;
 }
 
+// A version 21 area's grid: its region's mapped tiles composed into points (ResolveGrid), then
+// filled as FillVolume does. On the worker; false when cancelled.
+bool ResolveVolume(const VolumeInput& input, const File* file, Result& out, const std::atomic<bool>& cancel) {
+  const PortRoomEnvTiles::Lookup lookup = [&input](const PortRoomEnvTiles::TileKey& key) {
+    const auto it = input.mapped.find(key);
+    return it != input.mapped.end() ? it->second : std::shared_ptr<const PortRoomEnvTiles::TileSet>();
+  };
+  PortRoomEnvTiles::ResolvedGrid resolved;
+  std::string note;
+  out.resolved = true;
+  bool composed;
+  if (input.world) {
+    std::vector<PortRoomEnvTiles::TileKey> keys;
+    keys.reserve(input.mapped.size());
+    for (const auto& entry : input.mapped) {
+      keys.push_back(entry.first);
+    }
+    composed = PortRoomEnvTiles::ResolveWorld(input.worldToPoint, keys, lookup, kMaxGridPoints, resolved, note);
+  } else {
+    composed = PortRoomEnvTiles::ResolveGrid(*input.own, lookup, kMaxGridPoints, resolved, note);
+  }
+  if (!composed) {
+    out.empty = true;
+    out.grid = {};
+    PortLog::Write("room env: %08X tiles: %s\n", out.area, note.c_str());
+    return true;
+  }
+  if (cancel.load(std::memory_order_relaxed)) {
+    return false;
+  }
+  std::copy(std::begin(resolved.worldToGrid), std::end(resolved.worldToGrid), out.grid.worldToGrid);
+  std::copy(std::begin(resolved.size), std::end(resolved.size), out.grid.size);
+  out.grid.average = resolved.average;
+  out.grid.points = std::make_shared<const std::vector<uint8_t>>(std::move(resolved.points));
+  return FillVolume(*file, out.grid, out.volume, cancel);
+}
+
 // How far outside a grid a point is, in metres; 0 inside.
 float GridDistance(const Grid& grid, const float pos[3]) {
   const float* m = grid.worldToGrid;
@@ -531,9 +357,14 @@ float RoomExposure(const Area& area) {
       std::nth_element(levels.begin(), levels.begin() + levels.size() / 2, levels.end());
       level = levels[levels.size() / 2];
     } else {
-      // The grid's points are the same radiance.
-      for (const Grid& grid : file.grids) {
+      // The grid's points are the same radiance (a version 21 area's own tiles before its
+      // grid is composed from the mapped ones).
+      for (const Grid& grid : Grids(area)) {
         level = std::max(level, grid.average);
+      }
+      level = std::max(level, area.ownAverage);
+      if (area.file.tiles != nullptr && level <= 0.f) {
+        level = sWorld.grid.average;
       }
     }
     if (!(level > 0.f)) {
@@ -548,386 +379,6 @@ float RoomExposure(const Area& area) {
   return std::exp2(3.f - ev);
 }
 
-// The whole file, in one read when its size is known. The stream is left as a read
-// through istreambuf_iterator leaves it: failed only when the file did not open.
-using port::ReadAll;
-
-// What `sender` drives on `state` among a kind of hints (grades or backlights).
-template <class Hint>
-void DriveHints(uint32_t mrea, const char* what, const std::vector<Hint>& hints,
-                std::vector<Area::GradeRequest>& requests, uint64_t& orderCounter, uint32_t sender, int state) {
-  for (size_t i = 0; i < requests.size() && i < hints.size(); ++i) {
-    for (const GradeLink& link : hints[i].links) {
-      if (link.sender != sender || link.state != state) {
-        continue;
-      }
-      Area::GradeRequest& request = requests[i];
-      const bool on = link.action == PortRoomGeo::kShow ? true
-                      : link.action == PortRoomGeo::kHide ? false
-                      : link.action == PortRoomGeo::kToggle ? !request.on
-                                                             : request.on;
-      if (on && !request.on) {
-        // Above every file-order start (StartGrades).
-        request.order = (uint64_t(1) << 32) + ++orderCounter;
-      }
-      if (on != request.on) {
-        PortLog::Write("room env: %08X %s %zu %s by %08X state %d\n", mrea, what, i, on ? "on" : "off", sender, state);
-      }
-      request.on = on;
-    }
-  }
-}
-
-// OnAction_Start: plays on from where it is, from the region's state now (GetTransitionState:
-// distance and transmittance always, colour and cap unsigned and only when the region has them).
-void StartTransition(Area& area, size_t i) {
-  Area::Transition& t = area.transitions[i];
-  const FogTransition& file = area.file.transitions[i];
-  t.playing = true;
-  t.hasRegion = file.region < area.live.size();
-  t.hasColor = false;
-  t.hasCap = false;
-  if (!t.hasRegion) {
-    return;
-  }
-  const FogRegion& region = area.live[file.region];
-  t.distance = region.distance;
-  t.transmittance = region.transmittance;
-  t.hasColor = region.hasColor;
-  for (int c = 0; c < 4; ++c) {
-    t.color[c] = std::fabs(region.color[c]);
-  }
-  t.hasCap = region.hasCap;
-  t.cap = std::fabs(region.cap);
-}
-
-// The transitions `sender` drives on `state` (AcceptScriptMsg).
-void DriveTransitions(uint32_t mrea, Area& area, uint32_t sender, int state) {
-  for (size_t i = 0; i < area.transitions.size() && i < area.file.transitions.size(); ++i) {
-    Area::Transition& t = area.transitions[i];
-    for (const GradeLink& link : area.file.transitions[i].links) {
-      if (link.sender != sender || link.state != state || t.dead) {
-        continue;
-      }
-      switch (link.action) {
-      case PortRoomGeo::kShow:
-      case PortRoomGeo::kHide:
-        t.active = link.action == PortRoomGeo::kShow;
-        break;
-      case kTransitionStart:
-        if (t.active) {
-          StartTransition(area, i);
-        }
-        break;
-      case kTransitionRestart:
-        if (t.active) {
-          t.time = 0.;
-          StartTransition(area, i);
-        }
-        break;
-      case kTransitionStop:
-        if (t.active) {
-          t.playing = false;
-        }
-        break;
-      case kTransitionDelete:
-        t.dead = true;
-        t.playing = false;
-        break;
-      default:
-        continue;
-      }
-      PortLog::Write("room env: %08X fog transition %zu action %d by %08X state %d\n", mrea, i, int(link.action),
-                     sender, state);
-    }
-  }
-}
-
-// CTimePlaybackManager's time step: to 1/60000 s.
-double QuantiseTime(double t) { return std::floor(t * 60000. + 0.5) / 60000.; }
-
-// Think: one frame of every playing transition, which leaves its region in the new state.
-void StepTransitions(Area& area, float dt) {
-  for (size_t i = 0; i < area.transitions.size() && i < area.file.transitions.size(); ++i) {
-    Area::Transition& t = area.transitions[i];
-    const FogTransition& file = area.file.transitions[i];
-    if (!t.playing || !t.active || t.dead || file.region >= area.live.size()) {
-      continue;
-    }
-    FogRegion& region = area.live[file.region];
-    if (region.layer >= 0 && region.layer < 64 && (area.layers >> region.layer & 1) == 0) {
-      continue;
-    }
-    const double first = file.phase.FirstTime();
-    const double last = file.phase.LastTime();
-    if (file.loop) {
-      t.time += dt;
-      if (t.time > last) {
-        t.time -= last - first;
-      }
-      t.time = QuantiseTime(t.time);
-    } else {
-      t.time = QuantiseTime(t.time + dt);
-      if (t.time >= last) {
-        t.time = last;
-        t.playing = false;
-      }
-    }
-    const float p = std::clamp(file.phase.Eval(float(t.time)), 0.f, 1.f);
-    const auto lerp = [p](float a, float b) { return a + (b - a) * p; };
-    // A field the start and the target both have blends; one only either has is that one.
-    const bool targetD = (file.select & 1) != 0;
-    const bool targetT = (file.select & 2) != 0;
-    const bool targetColor = (file.select & 4) != 0;
-    const bool targetCap = (file.select & 8) != 0;
-    const bool hasD = t.hasRegion || targetD;
-    const bool hasT = t.hasRegion || targetT;
-    const float d = t.hasRegion && targetD ? lerp(t.distance, file.distance) : targetD ? file.distance : t.distance;
-    const float tr = t.hasRegion && targetT ? lerp(t.transmittance, file.transmittance)
-                     : targetT                 ? file.transmittance
-                                               : t.transmittance;
-    // SetTransitionState: the signs come back from the region's mode.
-    const float s = region.subtract ? -1.f : 1.f;
-    // (A transmittance of 0 or a distance of 0 would make it infinite: kept as it was.)
-    if (hasD && hasT && std::isfinite(-std::log(tr) / d)) {
-      region.distance = d;
-      region.transmittance = tr;
-      region.density = s * (-std::log(tr) / d);
-    }
-    if (t.hasColor || targetColor) {
-      for (int c = 0; c < 4; ++c) {
-        const float v = t.hasColor && targetColor ? lerp(t.color[c], file.color[c])
-                        : targetColor             ? file.color[c]
-                                                  : t.color[c];
-        region.color[c] = c < 3 ? v * s : v;
-      }
-      region.hasColor = true;
-    }
-    if (t.hasCap || targetCap) {
-      const float cap = t.hasCap && targetCap ? lerp(t.cap, file.cap) : targetCap ? file.cap : t.cap;
-      region.cap = s * cap;
-      region.hasCap = true;
-    }
-  }
-}
-
-// The lights `sender` drives on `state` (AcceptScriptMsg).
-void DriveLights(uint32_t mrea, Area& area, uint32_t sender, int state) {
-  for (size_t i = 0; i < area.lights.size() && i < area.file.lights.size(); ++i) {
-    Area::Light& l = area.lights[i];
-    for (const GradeLink& link : area.file.lights[i].links) {
-      if (link.sender != sender || link.state != state) {
-        continue;
-      }
-      switch (link.action) {
-      case PortRoomGeo::kShow:
-      case PortRoomGeo::kHide:
-        l.active = link.action == PortRoomGeo::kShow;
-        break;
-      case PortRoomGeo::kToggle:
-        l.active = !l.active;
-        break;
-      case kLightStart:
-      case kLightStop:
-        if (l.active) {
-          l.playing = link.action == kLightStart;
-        }
-        break;
-      case kLightReset:
-        if (l.active) {
-          l.time = 0.;
-        }
-        break;
-      case kLightForward:
-      case kLightBackward:
-        if (l.active) {
-          l.forward = link.action == kLightForward;
-        }
-        break;
-      case kLightReverse:
-        if (l.active) {
-          l.forward = !l.forward;
-        }
-        break;
-      default:
-        continue;
-      }
-      PortLog::Write("room env: %08X light %zu action %d by %08X state %d\n", mrea, i, int(link.action), sender,
-                     state);
-    }
-  }
-}
-
-// Think: the script groups' word on each light, then one frame of every playing timeline
-// (CTimePlaybackManager::Update). One that ends without a loop stops there, and switches its
-// light off when its finished event is linked to do so.
-void StepLights(uint32_t mrea, Area& area, float dt) {
-  for (size_t i = 0; i < area.lights.size() && i < area.file.lights.size(); ++i) {
-    Area::Light& l = area.lights[i];
-    const PointLight& file = area.file.lights[i];
-    if (file.group != PortRoomGeo::kNoGroup) {
-      const int shown = PortRoomGeo::GroupShown(mrea, file.group);
-      if (shown >= 0 && shown != l.group) {
-        l.active = shown == 1;
-      }
-      l.group = shown;
-    }
-    if (!file.animated || !l.playing || !l.active ||
-        (file.layer >= 0 && file.layer < 64 && (area.layers >> file.layer & 1) == 0)) {
-      continue;
-    }
-    const double length = file.length;
-    bool ended = false;
-    if (l.forward) {
-      l.time = QuantiseTime(l.time + dt);
-      if (l.time > length) {
-        if (file.loop && length > 0.) {
-          l.time = QuantiseTime(std::fmod(l.time, length));
-        } else {
-          l.time = length;
-          ended = true;
-        }
-      } else if (l.time == length && !file.loop) {
-        ended = true;
-      }
-    } else {
-      l.time = QuantiseTime(l.time - dt);
-      if (l.time < 0.) {
-        if (file.loop && length > 0.) {
-          l.time = QuantiseTime(length - std::fmod(-l.time, length));
-        } else {
-          l.time = 0.;
-          ended = true;
-        }
-      } else if (l.time == 0. && !file.loop) {
-        ended = true;
-      }
-    }
-    if (ended) {
-      l.playing = false;
-      // Only the backward end (t = 0) sends the event these links answer; the forward end's is unlinked.
-      if (file.offAtStart && !l.forward) {
-        l.active = false;
-      }
-    }
-  }
-}
-
-// The grades and backlights `sender` drives on `state`.
-void DriveGrades(uint32_t mrea, Area& area, uint32_t sender, int state) {
-  DriveHints(mrea, "grade", area.file.grades, area.grades, sGradeOrder, sender, state);
-  DriveHints(mrea, "backlight", area.file.backlights, area.backlights, sBacklightOrder, sender, state);
-  DriveHints(mrea, "fog", area.file.fogs, area.fogs, sFogOrder, sender, state);
-  DriveHints(mrea, "fog region", area.file.regions, area.regions, sRegionOrder, sender, state);
-  DriveTransitions(mrea, area, sender, state);
-  DriveLights(mrea, area, sender, state);
-}
-
-// Every grade and backlight as it starts, then the fluids the player and camera are in already.
-void StartGrades(uint32_t mrea, Area& area) {
-  area.grades.assign(area.file.grades.size(), {});
-  for (size_t i = 0; i < area.grades.size(); ++i) {
-    area.grades[i].on = area.file.grades[i].on;
-    // In file order, below anything turned on later: the last of equals wins, as before.
-    area.grades[i].order = i;
-  }
-  area.backlights.assign(area.file.backlights.size(), {});
-  for (size_t i = 0; i < area.backlights.size(); ++i) {
-    area.backlights[i].on = area.file.backlights[i].on;
-    area.backlights[i].order = i;
-  }
-  area.fogs.assign(area.file.fogs.size(), {});
-  for (size_t i = 0; i < area.fogs.size(); ++i) {
-    area.fogs[i].on = area.file.fogs[i].on;
-    area.fogs[i].order = i;
-  }
-  area.regions.assign(area.file.regions.size(), {});
-  for (size_t i = 0; i < area.regions.size(); ++i) {
-    area.regions[i].on = area.file.regions[i].on;
-  }
-  area.live = area.file.regions;
-  area.lights.assign(area.file.lights.size(), {});
-  for (size_t i = 0; i < area.lights.size(); ++i) {
-    area.lights[i].active = area.file.lights[i].on;
-    area.lights[i].playing = area.file.lights[i].playing;
-  }
-  area.transitions.assign(area.file.transitions.size(), {});
-  for (size_t i = 0; i < area.transitions.size(); ++i) {
-    area.transitions[i].active = area.file.transitions[i].on;
-    if (area.file.transitions[i].autoStart) {
-      StartTransition(area, i);
-    }
-  }
-  if (sPlayerFluid) {
-    DriveGrades(mrea, area, kSenderPlayerFluid, 0);
-  }
-  if (sCameraWater) {
-    DriveGrades(mrea, area, kSenderCameraWater, 0);
-  }
-}
-
-void Load(uint32_t mrea, Area& area) {
-  area.hasGeo = !PortMods::RoomGeoPath(mrea).empty();
-  const std::string path = PortMods::RoomEnvPath(mrea);
-  if (path.empty()) {
-    return;
-  }
-  std::ifstream in(PortGci::PathFromString(path), std::ios::binary);
-  std::vector<uint8_t> data = ReadAll(in);
-  std::string error;
-  if (!in || !Parse(std::move(data), area.file, error)) {
-    PortLog::Write("room env: %s: %s\n", path.c_str(), error.empty() ? "cannot read" : error.c_str());
-    area.file = {};
-    return;
-  }
-  area.cubes.resize(area.file.cubes.size());
-  for (size_t i = 0; i < area.cubes.size(); ++i) {
-    area.cubes[i].average = CubeAverage(area.file, area.file.cubes[i], area.cubes[i].peak);
-    // Black: nothing to reflect, and no exposure to set by it.
-    area.cubes[i].failed = !(area.cubes[i].average > 1e-6f);
-  }
-  area.volumes.resize(area.file.grids.size());
-  StartGrades(mrea, area);
-  area.exposure = RoomExposure(area);
-  const float* const t = area.file.tonemap;
-  if (area.exposure > 0.f && t[1] > 0.f && t[1] < 1.f) {
-    BuildTone(t[1], area.file.contrast, t[2], t[3], area.tone);
-  }
-  PortLog::Write("room env: %08X exposure %g (EV %g, hint %g..%g bias %g), tone mid %g contrast %g toe %g shoulder %g\n",
-                 mrea, area.exposure, area.exposure > 0.f ? 3.f - std::log2(area.exposure) : 0.f,
-                 area.file.exposure[0], area.file.exposure[1], area.file.exposureBias, t[1], area.file.contrast, t[2],
-                 t[3]);
-  area.hasFile = true;
-  area.serial = sNextSerial++;
-  if (sNextSerial == 0) {
-    sNextSerial = 1;
-  }
-  // The worker makes them all now, so no draw waits for one. The volumes first: until its
-  // area's are made, room geometry is lit as without volumes (see HasVolume).
-  for (size_t i = 0; i < area.file.grids.size(); ++i) {
-    if (area.file.grids[i].average > 0.f) {
-      sWorker.Submit({JobKind::Volume, mrea, area.serial, i, &area.file});
-    }
-  }
-  for (size_t i = 0; i < area.cubes.size(); ++i) {
-    if (!area.cubes[i].failed) {
-      sWorker.Submit({JobKind::Cube, mrea, area.serial, i, &area.file});
-    }
-  }
-  const Lightmap& lightmap = area.file.lightmap;
-  const bool lightmapFits = lightmap.width != 0 && lightmap.height != 0 && lightmap.layers >= 4 &&
-                            lightmap.offset <= area.file.data.size() &&
-                            lightmap.length <= area.file.data.size() - lightmap.offset;
-  if (lightmapFits && Lightmaps()) {
-    // BC6H wants whole blocks; a device without it gets the colours.
-    const bool raw = GXPBRLightmapBC6HSupported() && lightmap.width % 4 == 0 && lightmap.height % 4 == 0;
-    sWorker.Submit({JobKind::Lightmap, mrea, area.serial, 0, &area.file, raw});
-  }
-  // Drops the cubes' and lightmap's blocks once they are made.
-  if (!area.file.cubes.empty() || lightmapFits) {
-    sWorker.Submit({JobKind::Keep, mrea, area.serial, 0, &area.file});
-  }
-}
 
 // The frame's exposure, for radiance from `area`: one exposure covers the whole picture
 // (see UpdateFrame), or the area's own before the frame has one.
@@ -941,297 +392,6 @@ float LightGain() {
   return gain;
 }
 
-// What an area keeps of its file once its cubes and lightmap are made: the grids' points, which
-// SampleGrid reads for models every frame, and the grades' LUTs, handed to Aurora when one
-// is first shown; with where each starts in the copy. The cubes' and lightmap's blocks are left behind.
-void KeepData(const File& file, std::vector<uint8_t>& kept, std::vector<size_t>& offsets) {
-  constexpr size_t kPoint = 24;
-  size_t bytes = 0;
-  for (const Grid& grid : file.grids) {
-    bytes += size_t(grid.size[0]) * grid.size[1] * grid.size[2] * kPoint;
-  }
-  bytes += file.grades.size() * kGradeLutBytes;
-  kept.clear();
-  kept.reserve(bytes);
-  offsets.clear();
-  const auto keep = [&](size_t offset, size_t length) {
-    offsets.push_back(kept.size());
-    kept.insert(kept.end(), file.data.begin() + offset, file.data.begin() + offset + length);
-  };
-  for (const Grid& grid : file.grids) {
-    keep(grid.offset, size_t(grid.size[0]) * grid.size[1] * grid.size[2] * kPoint);
-  }
-  for (const Grade& grade : file.grades) {
-    keep(grade.offset, kGradeLutBytes);
-  }
-}
-
-// Decodes a cube into RGBA16Float, every mip of face 0, then face 1 (GXCreatePBRCube); the
-// file has every face of mip 0, then mip 1. On the worker; false when cancelled.
-bool DecodeCube(const File& file, const Cube& cube, std::vector<uint16_t>& texels, const std::atomic<bool>& cancel) {
-  std::vector<size_t> mipOffset(cube.mipCount);
-  size_t perFace = 0;
-  for (uint32_t mip = 0; mip < cube.mipCount; ++mip) {
-    const size_t edge = std::max(cube.size >> mip, 1u);
-    mipOffset[mip] = perFace;
-    perFace += edge * edge * 8;
-  }
-  texels.assign(perFace * 6 / 2, 0);
-  const uint8_t* blocks = file.data.data() + cube.offset;
-  for (uint32_t mip = 0; mip < cube.mipCount; ++mip) {
-    const uint32_t edge = std::max(cube.size >> mip, 1u);
-    const size_t blockBytes = size_t((edge + 3) / 4) * ((edge + 3) / 4) * 16;
-    for (uint32_t face = 0; face < 6; ++face) {
-      if (cancel.load(std::memory_order_relaxed)) {
-        return false;
-      }
-      uint16_t* out = texels.data() + (perFace * face + mipOffset[mip]) / 2;
-      PortRemastered::DecodeBc6hFace(blocks, edge, cube.isSigned, out);
-      blocks += blockBytes;
-    }
-  }
-  return true;
-}
-
-// A room's lightmap as GXCreatePBRLightmap takes it: its blocks as they are when `raw`, else
-// decoded to RGBA16F and halved until a layer has at most kMaxLightmapTexels (a 2888 square
-// of four layers is 267 MB at full size). On the worker; false when cancelled.
-constexpr size_t kMaxLightmapTexels = size_t(1) << 21;
-
-bool MakeLightmap(const File& file, bool raw, Result& out, const std::atomic<bool>& cancel) {
-  const Lightmap& map = file.lightmap;
-  const uint8_t* const blocks = file.data.data() + map.offset;
-  out.raw = raw;
-  out.width = map.width;
-  out.height = map.height;
-  if (raw) {
-    out.volume.assign(blocks, blocks + map.length);
-    return true;
-  }
-  uint32_t shift = 0;
-  while (size_t(std::max(map.width >> shift, 1u)) * std::max(map.height >> shift, 1u) > kMaxLightmapTexels) {
-    ++shift;
-  }
-  // Rounded up, so the edge texels count too (the box loop clamps).
-  const uint32_t width = std::max((map.width + (1u << shift) - 1) >> shift, 1u);
-  const uint32_t height = std::max((map.height + (1u << shift) - 1) >> shift, 1u);
-  const size_t layerBytes = map.length / map.layers;
-  std::vector<uint16_t> full(size_t(map.width) * map.height * 4);
-  out.width = width;
-  out.height = height;
-  out.cube.assign(size_t(width) * height * 4 * map.layers, 0);
-  for (uint32_t layer = 0; layer < map.layers; ++layer) {
-    if (cancel.load(std::memory_order_relaxed)) {
-      return false;
-    }
-    PortRemastered::DecodeBc6hImage(blocks + layerBytes * layer, map.width, map.height, map.isSigned, full.data());
-    uint16_t* const dst = out.cube.data() + size_t(width) * height * 4 * layer;
-    if (shift == 0) {
-      std::copy(full.begin(), full.end(), dst);
-      continue;
-    }
-    // Each texel the average of those under it at full size.
-    const uint32_t step = 1u << shift;
-    for (uint32_t y = 0; y < height; ++y) {
-      for (uint32_t x = 0; x < width; ++x) {
-        float sum[4] = {};
-        uint32_t count = 0;
-        for (uint32_t sy = y * step; sy < std::min((y + 1) * step, map.height); ++sy) {
-          for (uint32_t sx = x * step; sx < std::min((x + 1) * step, map.width); ++sx) {
-            const uint16_t* t = full.data() + (size_t(sy) * map.width + sx) * 4;
-            for (int c = 0; c < 4; ++c) {
-              sum[c] += HalfToFloat(t[c]);
-            }
-            ++count;
-          }
-        }
-        for (int c = 0; c < 4; ++c) {
-          dst[(size_t(y) * width + x) * 4 + c] = FloatToHalf(sum[c] / float(count));
-        }
-      }
-    }
-  }
-  return true;
-}
-
-Worker::~Worker() {
-  {
-    std::lock_guard<std::mutex> lock(mutex);
-    stop = true;
-    cancel = true;
-  }
-  wake.notify_all();
-  if (thread.joinable()) {
-    thread.join();
-  }
-}
-
-void Worker::Submit(const Job& job) {
-  {
-    std::lock_guard<std::mutex> lock(mutex);
-    if (!thread.joinable() && !noThread) {
-      try {
-        thread = std::thread(&Worker::Run, this);
-      } catch (...) {
-        noThread = true;
-        PortLog::Write("room env: no worker thread; cubes and volumes are made as areas load\n");
-      }
-    }
-    if (!noThread) {
-      jobs.push_back(job);
-      wake.notify_one();
-      return;
-    }
-  }
-  Result result;
-  if (Do(job, result)) {
-    std::lock_guard<std::mutex> lock(mutex);
-    results.push_back(std::move(result));
-  }
-}
-
-void Worker::Cancel(uint32_t serial) {
-  std::unique_lock<std::mutex> lock(mutex);
-  jobs.erase(std::remove_if(jobs.begin(), jobs.end(), [serial](const Job& job) { return job.serial == serial; }),
-             jobs.end());
-  results.erase(std::remove_if(results.begin(), results.end(),
-                               [serial](const Result& result) { return result.serial == serial; }),
-                results.end());
-  if (running && runningSerial == serial) {
-    cancel = true;
-    done.wait(lock, [this, serial] { return !running || runningSerial != serial; });
-  }
-  wake.notify_all();
-}
-
-bool Worker::Take(Result& out, bool gpu) {
-  std::lock_guard<std::mutex> lock(mutex);
-  if (results.empty() || (!gpu && results.front().kind != JobKind::Keep)) {
-    return false;
-  }
-  out = std::move(results.front());
-  results.pop_front();
-  wake.notify_all();
-  return true;
-}
-
-void Worker::Run() {
-  for (;;) {
-    Job job;
-    {
-      std::unique_lock<std::mutex> lock(mutex);
-      wake.wait(lock, [this] { return stop || (!jobs.empty() && results.size() < kMaxResults); });
-      if (stop) {
-        return;
-      }
-      job = jobs.front();
-      jobs.pop_front();
-      running = true;
-      runningSerial = job.serial;
-      cancel = false;
-    }
-    Result result;
-    const bool finished = Do(job, result);
-    {
-      std::lock_guard<std::mutex> lock(mutex);
-      running = false;
-      if (finished && !cancel) {
-        results.push_back(std::move(result));
-      }
-    }
-    done.notify_all();
-  }
-}
-
-bool Worker::Do(const Job& job, Result& out) {
-  out.kind = job.kind;
-  out.area = job.area;
-  out.serial = job.serial;
-  out.index = job.index;
-  switch (job.kind) {
-  case JobKind::Cube:
-    return DecodeCube(*job.file, job.file->cubes[job.index], out.cube, cancel);
-  case JobKind::Volume:
-    return FillVolume(*job.file, job.file->grids[job.index], out.volume, cancel);
-  case JobKind::Lightmap:
-    return MakeLightmap(*job.file, job.raw, out, cancel);
-  case JobKind::Keep:
-    KeepData(*job.file, out.volume, out.offsets);
-    return true;
-  }
-  return false;
-}
-
-// Hands the worker's decoded cubes and filled volumes to the GPU, one a frame: each is
-// megabytes for Aurora to copy and upload, and an area brings several at once. While the
-// room environment is off they wait (nothing would use them), and so does the worker.
-void TakeResults() {
-  bool gpu = Enabled();
-  Result result;
-  while (sWorker.Take(result, gpu)) {
-    const auto found = sAreas.find(result.area);
-    if (found == sAreas.end() || found->second.serial != result.serial) {
-      continue; // Free drops an area's results, so this does not happen
-    }
-    Area& area = found->second;
-    File& file = area.file;
-    if (result.kind == JobKind::Keep) {
-      // The worker has finished with the old bytes: Keep is the area's last job.
-      file.data.swap(result.volume);
-      for (size_t i = 0; i < file.grids.size(); ++i) {
-        file.grids[i].offset = result.offsets[i];
-      }
-      for (size_t i = 0; i < file.grades.size(); ++i) {
-        file.grades[i].offset = result.offsets[file.grids.size() + i];
-      }
-      for (Cube& cube : file.cubes) {
-        cube.offset = cube.length = 0; // its blocks are gone
-      }
-      continue;
-    }
-    if (result.kind == JobKind::Lightmap) {
-      const Lightmap& lightmap = file.lightmap;
-      const GXPBRLightmapFormat format = !result.raw         ? GX_PBR_LIGHTMAP_RGBA16F
-                                         : lightmap.isSigned ? GX_PBR_LIGHTMAP_BC6H_SFLOAT
-                                                             : GX_PBR_LIGHTMAP_BC6H_UFLOAT;
-      const void* data = result.raw ? static_cast<const void*>(result.volume.data()) : result.cube.data();
-      const size_t bytes = result.raw ? result.volume.size() : result.cube.size() * 2;
-      if (area.lightmap != 0) {
-        GXDestroyPBRLightmap(area.lightmap);
-      }
-      area.lightmap = GXCreatePBRLightmap(result.width, result.height, lightmap.layers, format, data, uint32_t(bytes));
-      PortLog::Write("room env: %08X lightmap %u %ux%u x %u layers%s\n", result.area, area.lightmap, result.width,
-                     result.height, lightmap.layers, result.raw ? " (BC6H)" : " (RGBA16F)");
-      Invalidate();
-      gpu = false;
-      continue;
-    }
-    if (result.kind == JobKind::Cube) {
-      const Cube& cube = file.cubes[result.index];
-      GpuCube& gpuCube = area.cubes[result.index];
-      gpuCube.id = sNextCube++;
-      if (sNextCube == 0) {
-        sNextCube = 1;
-      }
-      gpuCube.mipCount = cube.mipCount;
-      GXCreatePBRCube(gpuCube.id, cube.size, cube.mipCount, result.cube.data(), uint32_t(result.cube.size() * 2));
-    } else {
-      const Grid& grid = file.grids[result.index];
-      GpuVolume& gpuVolume = area.volumes[result.index];
-      gpuVolume.id = sNextVolume++;
-      if (sNextVolume == 0) {
-        sNextVolume = 1;
-      }
-      GXCreatePBRVolume(gpuVolume.id, grid.size[0], grid.size[1], grid.size[2], result.volume.data(),
-                        uint32_t(result.volume.size()));
-      PortLog::Write("room env: %08X volume %u %ux%ux%u average %g\n", result.area, gpuVolume.id, grid.size[0],
-                     grid.size[1], grid.size[2], grid.average);
-    }
-    // What Select finds changes with what is on the GPU.
-    Invalidate();
-    gpu = false;
-  }
-}
 
 // A probe's GPU cube; null when it is black or the worker has not made it yet.
 GpuCube* ProbeCube(Area& area, const Probe& probe) {
@@ -1343,7 +503,9 @@ void UpdateProbeBlend() {
   }
 }
 
-} // namespace
+}  // namespace EnvDetail
+
+using namespace EnvDetail;
 
 void BuildTone(float mid, float contrast, float toe, float shoulder, float rows[3][4]) {
   const float a25 = std::atan2(0.25f, mid);
@@ -1428,6 +590,7 @@ void UpdateFrame(bool roomGeoDrawing) {
   constexpr float kGrey = 0.2158605f; // sRGB 128, linear
   constexpr uint32_t kInFlight = 3;   // readbacks Aurora may have queued
   using Clock = std::chrono::steady_clock;
+  FinishLoads();
   TakeResults();
   // The exposure moves every frame, so a model's last answer is stale.
   sLastValid = false;
@@ -1450,13 +613,29 @@ void UpdateFrame(bool roomGeoDrawing) {
     f.loaded.swap(loaded);
     return;
   }
-  const Area& area = view->second;
+  Area& area = view->second;
   const File& file = area.file;
   const float* const t = file.tonemap;
-  const bool hint = file.exposure[0] != 0.f || file.exposure[1] != 0.f;
+  // The hint in force: a registered fluid hint, else the room's plain one.
+  struct Hint {
+    float exposure[2];
+    float bias, sigma, staticLerp;
+  } eff = {{file.exposure[0], file.exposure[1]}, file.exposureBias, file.exposureSigma, file.staticLerp};
+  const int fluidPick = area.hints.Pick(file.fluidHints.size());
+  if (fluidPick >= 0) {
+    const FluidHint& h = file.fluidHints[size_t(fluidPick)];
+    eff = {{h.exposure[0], h.exposure[1]}, h.bias, h.sigma, h.staticLerp};
+  }
+  const bool hint = eff.exposure[0] != 0.f || eff.exposure[1] != 0.f;
+  // A hint that registered this frame is type 1: SetValue instead of the Gaussian's easing. The
+  // types are cleared after every frame, wherever the view was.
+  const bool hintSnap = fluidPick >= 0 && area.hintSnap;
+  for (auto& entry : sAreas) {
+    entry.second.hintSnap = false;
+  }
   // CSceneTonemapParams' static exposure: a fixed point in the hint's range, or the
   // tonemap's own EV without one.
-  const float staticEv = hint ? file.exposure[0] + (file.exposure[1] - file.exposure[0]) * file.staticLerp : t[0];
+  const float staticEv = hint ? eff.exposure[0] + (eff.exposure[1] - eff.exposure[0]) * eff.staticLerp : t[0];
   const float target[6] = {t[0], t[1], file.contrast, t[2], t[3], staticEv};
   float radiance[3] = {};
   uint32_t serial = 0;
@@ -1470,22 +649,39 @@ void UpdateFrame(bool roomGeoDrawing) {
     f.started = true;
     std::memcpy(f.from, target, sizeof(target));
     std::memcpy(f.to, target, sizeof(target));
-    f.start = f.last = now;
+    f.last = now;
+    f.moving = false;
+    f.progress = 0.f;
     f.carry = 0.f;
     f.measured = false;
     f.ignoreUntil = serial + kInFlight;
-  } else if (std::memcmp(target, f.to, sizeof(target)) != 0) {
-    std::memcpy(f.from, f.shown, sizeof(f.shown));
+  } else {
     std::memcpy(f.to, target, sizeof(target));
-    f.start = now;
   }
   f.area = sViewArea;
-  const float moved = std::min(std::chrono::duration<float>(now - f.start).count(), 1.f);
-  for (int i = 0; i < 6; ++i) {
-    f.shown[i] = f.from[i] + (f.to[i] - f.from[i]) * moved;
+  // TransitionTonemapParams 0xb005bc: idle at `from`; a target that differs starts a move at
+  // progress 0, and every moving frame adds dt over the transition time (1 s up or down,
+  // skTonemap_ParamTransition*Time) before it blends. Retargeting mid-move keeps `from` and
+  // the progress; the move ends by making the target `from`.
+  {
+    ParamTransition tr;
+    std::memcpy(tr.from, f.from, sizeof(tr.from));
+    std::memcpy(tr.to, f.to, sizeof(tr.to));
+    tr.progress = f.progress;
+    tr.moving = f.moving;
+    if (jump) {
+      tr.Snap(target);
+    } else {
+      tr.Step(target, std::chrono::duration<float>(now - f.last).count());
+    }
+    std::memcpy(f.from, tr.from, sizeof(f.from));
+    std::memcpy(f.to, tr.to, sizeof(f.to));
+    std::memcpy(f.shown, tr.shown, sizeof(f.shown));
+    f.progress = tr.progress;
+    f.moving = tr.moving;
   }
-  if (f.sigma != file.exposureSigma) {
-    f.sigma = file.exposureSigma;
+  if (f.sigma != eff.sigma) {
+    f.sigma = eff.sigma;
     f.ev.SetSigma(f.sigma);
   }
   // Measuring settles only where the picture follows the exposure: room geometry, lit by
@@ -1496,8 +692,8 @@ void UpdateFrame(bool roomGeoDrawing) {
     f.serial = serial;
     const float peak = std::max(std::max(radiance[0], radiance[1]), radiance[2]);
     if (f.measuring && int32_t(serial - f.ignoreUntil) > 0 && peak > 0.f && std::isfinite(peak)) {
-      const float ev = std::log2(peak / kGrey) + 3.f + file.exposureBias;
-      f.measuredEv = std::min(std::max(ev, file.exposure[0]), file.exposure[1]);
+      const float ev = std::log2(peak / kGrey) + 3.f + eff.bias;
+      f.measuredEv = std::min(std::max(ev, eff.exposure[0]), eff.exposure[1]);
       f.measured = true;
     }
   }
@@ -1515,7 +711,7 @@ void UpdateFrame(bool roomGeoDrawing) {
   // through the Gaussian, a step every 60th of a second.
   f.carry += std::chrono::duration<float>(now - f.last).count();
   f.last = now;
-  if (jump || !hint) {
+  if (jump || !hint || hintSnap) {
     f.ev.SetValue(f.targetEv);
     f.carry = 0.f;
   } else {
@@ -1530,6 +726,12 @@ void UpdateFrame(bool roomGeoDrawing) {
   f.hasTone = f.exposure > 0.f && f.shown[1] > 0.f && f.shown[1] < 1.f;
   if (f.hasTone) {
     BuildTone(f.shown[1], f.shown[2], f.shown[3], f.shown[4], f.tone);
+  }
+  static const bool sLog = port::EnvFlag("MP_ROOM_ENV_EXPOSURE_LOG");
+  if (sLog) {
+    PortLog::Write("room env exposure: area %08X jump %d shown %g %g %g %g %g %g ev %g target %g fluid %d snap %d\n",
+                   sViewArea, int(jump), f.shown[0], f.shown[1], f.shown[2], f.shown[3], f.shown[4], f.shown[5],
+                   f.ev.value, f.targetEv, fluidPick, int(hintSnap));
   }
 }
 
@@ -1773,16 +975,22 @@ bool ColorGrade(LayerActive layerActive, void* context, uint32_t& a, uint32_t& b
     const auto now = std::chrono::steady_clock::now();
     if (!f.started) {
       f = {true, target, target, 0.f, 0.f, now};
+    } else if (pick == nullptr) {
+      // No grade requested: CColorGradeManager::OnHintChangedCallback (0x6b86ec) returns
+      // without a transition when the new hint is null, so the last grade keeps its full
+      // weight (Remastered never fades to identity).
     } else if (target != f.to) {
       // Mid-fade, the new fade starts from whichever grade showed more.
       const float shown = f.seconds > 0.f
           ? std::chrono::duration<float>(now - f.start).count() / f.seconds : 1.f;
       f.from = shown >= 0.5f ? f.to : f.from;
       f.to = target;
-      f.seconds = off != nullptr ? off->fadeOut : pick != nullptr ? pick->fadeIn : f.fadeOut;
+      f.seconds = off != nullptr ? off->fadeOut : pick->fadeIn;
       f.start = now;
     }
-    f.fadeOut = pick != nullptr ? pick->fadeOut : 0.f;
+    if (pick != nullptr) {
+      f.fadeOut = pick->fadeOut;
+    }
   }
   GradeFade& f = sGradeFade;
   if (!f.started) {
@@ -2439,12 +1647,20 @@ void OnScriptState(uint32_t mrea, uint32_t sender, int state) {
     Load(mrea, found->second);
     Invalidate();
   }
+  if (found->second.pending.valid()) {
+    found->second.queued.emplace_back(sender, state);
+    return;
+  }
   DriveGrades(mrea, found->second, sender, state);
 }
 
 void SendScriptState(uint32_t sender, int state) {
   for (auto& [mrea, area] : sAreas) {
-    DriveGrades(mrea, area, sender, state);
+    if (area.pending.valid()) {
+      area.queued.emplace_back(sender, state);
+    } else {
+      DriveGrades(mrea, area, sender, state);
+    }
   }
 }
 
@@ -2460,6 +1676,10 @@ void SetFluid(bool player, bool camera) {
     sCameraWater = camera;
     for (auto& [mrea, area] : sAreas) {
       DriveGrades(mrea, area, kSenderCameraWater, camera ? 0 : 1);
+      // The hints hear the camera's fluid state in every loaded area (once their file is in).
+      if (area.hasFile && area.hints.Set(area.file.fluidHints, camera)) {
+        area.hintSnap = true;
+      }
     }
   }
 }
@@ -2471,13 +1691,40 @@ void ResetGrades() {
   sBacklight = {};
   sFog = {};
   for (auto& [mrea, area] : sAreas) {
-    StartGrades(mrea, area);
+    // A load still waiting for its file starts its grades when it finishes.
+    if (!area.pending.valid()) {
+      StartGrades(mrea, area, false, false);
+    } else {
+      area.pendingFluid = area.pendingWater = false;
+      area.queued.clear();
+    }
+  }
+}
+
+void SetViewGradesOn(bool on) {
+  const auto it = sAreas.find(sViewArea);
+  if (it == sAreas.end()) {
+    return;
+  }
+  for (auto& request : it->second.grades) {
+    request.on = on;
+    if (on) {
+      request.order = ++sGradeOrder;
+    }
   }
 }
 
 std::string GradeInfo() {
   std::string out;
   char line[256];
+  if (sGradeFade.started) {
+    const GradeFade& f = sGradeFade;
+    const float t = f.seconds > 0.f
+        ? std::min(1.f, std::chrono::duration<float>(std::chrono::steady_clock::now() - f.start).count() / f.seconds)
+        : 1.f;
+    std::snprintf(line, sizeof(line), "grade fade: %08X -> %08X, weight %.3f over %g s\n", f.from, f.to, t, f.seconds);
+    out += line;
+  }
   std::snprintf(line, sizeof(line), "player in fluid %d, camera in water %d\n", int(sPlayerFluid), int(sCameraWater));
   out += line;
   float top, back;
@@ -2531,6 +1778,11 @@ void SetViewArea(uint32_t mrea) {
   if (sViewArea != mrea) {
     sViewArea = mrea;
     sLastValid = false;
+    // It draws this frame: no waiting for its file past here.
+    const auto found = sAreas.find(mrea);
+    if (found != sAreas.end()) {
+      Finish(mrea, found->second);
+    }
   }
 }
 
@@ -2631,7 +1883,7 @@ void SetLightmapHint(const float lookup[3]) { std::memcpy(sHintLightmap, lookup,
 
 void ClearVolumeHint() {
   sHint = false;
-  sHintLightmap[2] = 0.f;
+  std::fill(std::begin(sHintLightmap), std::end(sHintLightmap), 0.f);
 }
 
 static bool sProbeOverride = false;
@@ -2662,9 +1914,13 @@ bool HasVolume(uint32_t mrea) {
   // Only once the worker has made every volume the area has: until then its models are lit
   // as they are without volumes.
   const Area& area = found->second;
+  if (area.file.tiles != nullptr) {
+    return area.ownAverage > 0.f && sWorld.has();
+  }
   bool lit = false;
-  for (size_t i = 0; i < area.file.grids.size(); ++i) {
-    if (area.file.grids[i].average > 0.f) {
+  const std::vector<Grid>& grids = Grids(area);
+  for (size_t i = 0; i < grids.size() && i < area.volumes.size(); ++i) {
+    if (grids[i].average > 0.f) {
       if (area.volumes[i].id == 0) {
         return false;
       }
@@ -2734,6 +1990,17 @@ void Reset() {
     Free(area);
   }
   sAreas.clear();
+  sTiles.Clear();
+  sTileSets.clear();
+  sTileSeq = 0;
+  sWorker.Cancel(0);
+  if (sWorld.volume != 0) {
+    GXDestroyPBRVolume(sWorld.volume);
+  }
+  sWorld.volume = 0;
+  sWorld.grid = {};
+  sWorld.dirty = false;
+  ++sWorld.gen;
   FreeBlend();
   sFrame = {};
   sBrdfSent = false;
@@ -2747,6 +2014,13 @@ void SetLoadedAreas(const uint32_t* mreas, size_t count) {
   bool changed = false;
   for (auto it = sAreas.begin(); it != sAreas.end();) {
     if (std::find(mreas, mreas + count, it->first) == mreas + count) {
+      if (it->second.registered) {
+        // Its mapped tiles go to the most recent copy another area holds (or unmap).
+        if (!sTiles.Unregister(it->first).empty()) {
+          sWorld.dirty = true;
+        }
+      }
+      sTileSets.erase(it->first);
       Free(it->second);
       it = sAreas.erase(it);
       changed = true;
@@ -2754,12 +2028,16 @@ void SetLoadedAreas(const uint32_t* mreas, size_t count) {
       ++it;
     }
   }
+  if (sAreas.empty()) {
+    sTileSeq = 0;
+  }
   for (size_t i = 0; i < count; ++i) {
     if (sAreas.find(mreas[i]) == sAreas.end()) {
       Load(mreas[i], sAreas[mreas[i]]);
       changed = true;
     }
   }
+  RegisterReady(); // also composes the world texture again when a tile changed hands
   if (changed) {
     Invalidate();
   }
@@ -2842,25 +2120,42 @@ void Locate(const float pos[3], Located& out) {
       out.cube = &gpu;
     }
   }
-  if (sHint && VolumesEnabled()) {
+  if (VolumesEnabled() && !sHint && sWorld.has() && !sAreas.empty() && sAreas.begin()->second.file.tiles != nullptr) {
+    // A draw with no hint area: Remastered samples the same world texture by position, so it
+    // gets the world volume, with the first area's exposure.
+    out.volumeArea = &sAreas.begin()->second;
+    out.grid = &sWorld.grid;
+    out.volume = sWorld.volume;
+  } else if (sHint && VolumesEnabled()) {
     const auto found = sAreas.find(sHintArea);
     if (found != sAreas.end()) {
       Area& area = found->second;
-      int pick = -1;
-      float nearest = 0.f;
-      for (size_t i = 0; i < area.file.grids.size(); ++i) {
-        const float distance = GridDistance(area.file.grids[i], pos);
-        if (area.file.grids[i].average > 0.f && (pick < 0 || distance < nearest)) {
-          pick = int(i);
-          nearest = distance;
-        }
-      }
-      if (pick >= 0) {
-        const GpuVolume& gpu = area.volumes[pick];
-        if (gpu.id != 0) {
+      if (area.file.tiles != nullptr) {
+        // One texture for the world, sampled by position alone (a tap past the mapped
+        // tiles reads the transparent black border).
+        if (sWorld.has()) {
           out.volumeArea = &area;
-          out.grid = &area.file.grids[pick];
-          out.volume = gpu.id;
+          out.grid = &sWorld.grid;
+          out.volume = sWorld.volume;
+        }
+      } else {
+        int pick = -1;
+        float nearest = 0.f;
+        const std::vector<Grid>& grids = Grids(area);
+        for (size_t i = 0; i < grids.size() && i < area.volumes.size(); ++i) {
+          const float distance = GridDistance(grids[i], pos);
+          if (grids[i].average > 0.f && (pick < 0 || distance < nearest)) {
+            pick = int(i);
+            nearest = distance;
+          }
+        }
+        if (pick >= 0) {
+          const GpuVolume& gpu = area.volumes[pick];
+          if (gpu.id != 0) {
+            out.volumeArea = &area;
+            out.grid = &grids[pick];
+            out.volume = gpu.id;
+          }
         }
       }
     }
@@ -2869,13 +2164,19 @@ void Locate(const float pos[3], Located& out) {
     // The first grid with light whose texture holds the point is the one. Remastered has
     // no fallback spot: outside a texture the sampler reads its transparent black border.
     for (auto& [mrea, area] : sAreas) {
-      for (const Grid& grid : area.file.grids) {
+      for (const Grid& grid : Grids(area)) {
         if (grid.average > 0.f && SampleGrid(area.file, grid, pos, out.sample)) {
           out.ambientArea = &area;
           out.average = grid.average;
           return;
         }
       }
+    }
+    // Version 21 areas: the world grid. Its exposure is the hint's area's, else the first's.
+    if (sWorld.grid.average > 0.f && !sAreas.empty() && SampleGrid(sNoFile, sWorld.grid, pos, out.sample)) {
+      const auto hint = sAreas.find(sHintArea);
+      out.ambientArea = hint != sAreas.end() ? &hint->second : &sAreas.begin()->second;
+      out.average = sWorld.grid.average;
     }
   }
 }
@@ -3018,7 +2319,7 @@ bool Compose(const Located& located, Selection& out) {
 // cache, which is by position, since instances that share a middle need not share a lookup.
 bool AddLightmap(Selection& out) {
   out.lightmap = 0;
-  if (!sHint || !(sHintLightmap[2] > 0.f) || !Enabled() || !VolumesEnabled()) {
+  if (!sHint || !PortRoomGeo::HasLightmapLookup(sHintLightmap) || !Enabled() || !VolumesEnabled()) {
     return false;
   }
   const auto found = sAreas.find(sHintArea);
@@ -3038,6 +2339,10 @@ bool AddLightmap(Selection& out) {
     return false;
   }
   static const float scale = port::EnvFloat("MP_ROOM_ENV_LIGHTMAP_SCALE", 1.f);
+  // The shader takes a level of 0 for no lightmap (a scale of 0 is a one-texel lookup).
+  if (!(level * scale > 0.f)) {
+    return false;
+  }
   out.lightmap = area.lightmap;
   out.lightmapRect[0] = sHintLightmap[0];
   out.lightmapRect[1] = sHintLightmap[1];
@@ -3219,6 +2524,37 @@ std::string Info(const float pos[3]) {
       }
       out += line;
     }
+  }
+  if (sWorld.grid.size[0] != 0) {
+    Ambient ambient;
+    const float distance = GridDistance(sWorld.grid, pos);
+    const bool lit = distance == 0.f && SampleGrid(sNoFile, sWorld.grid, pos, ambient);
+    char here[160] = "no light here";
+    if (lit) {
+      std::snprintf(here, sizeof(here), "lit here, mean %g %g %g", ambient.mean[0], ambient.mean[1], ambient.mean[2]);
+    }
+    std::snprintf(line, sizeof(line), "  world grid: %u x %u x %u (%.1f M points), average %g, volume %u, %s\n",
+                  sWorld.grid.size[0], sWorld.grid.size[1], sWorld.grid.size[2],
+                  double(sWorld.grid.size[0]) * sWorld.grid.size[1] * sWorld.grid.size[2] / 1e6, sWorld.grid.average,
+                  sWorld.volume, here);
+    out += line;
+  }
+  // The tile table: per registered area, its load order, tiles, and how many it owns (the
+  // mapped copy of a key is the first loaded one; see Grids()).
+  for (const auto& [mrea, area] : sAreas) {
+    const auto set = sTileSets.find(mrea);
+    if (!area.registered || set == sTileSets.end()) {
+      continue;
+    }
+    size_t own = 0;
+    for (const PortRoomEnvTiles::Tile& tile : set->second->tiles) {
+      uint32_t node = 0;
+      own += sTiles.Active(tile.key, &node) && node == mrea ? 1 : 0;
+    }
+    std::snprintf(line, sizeof(line), "  tiles %08X: load #%llu, %zu tiles, %zu mapped to it, %zu keys in the table\n",
+                  mrea, static_cast<unsigned long long>(area.loadSeq), set->second->tiles.size(), own,
+                  sTiles.KeyCount());
+    out += line;
   }
   return out;
 }

@@ -141,11 +141,13 @@ std::array<PADButtonMapping, PAD_BUTTON_COUNT> g_defaultButtonsNSOGamecube{{
     {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, PAD_BUTTON_RIGHT},
 }};
 
+// Nintendo pads map by printed label (A on the right, B at the bottom, X on
+// top, Y on the left), so the glyphs and the buttons agree.
 std::array<PADButtonMapping, PAD_BUTTON_COUNT> g_defaultButtonsProCon{{
-    {SDL_GAMEPAD_BUTTON_SOUTH, PAD_BUTTON_A},
-    {SDL_GAMEPAD_BUTTON_EAST, PAD_BUTTON_B},
-    {SDL_GAMEPAD_BUTTON_WEST, PAD_BUTTON_X},
-    {SDL_GAMEPAD_BUTTON_NORTH, PAD_BUTTON_Y},
+    {SDL_GAMEPAD_BUTTON_EAST, PAD_BUTTON_A},
+    {SDL_GAMEPAD_BUTTON_SOUTH, PAD_BUTTON_B},
+    {SDL_GAMEPAD_BUTTON_NORTH, PAD_BUTTON_X},
+    {SDL_GAMEPAD_BUTTON_WEST, PAD_BUTTON_Y},
     {SDL_GAMEPAD_BUTTON_START, PAD_BUTTON_START},
     {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, PAD_TRIGGER_Z},
     {PAD_NATIVE_BUTTON_INVALID, PAD_TRIGGER_L},
@@ -187,10 +189,10 @@ std::array<PADButtonMapping, PAD_BUTTON_COUNT> g_defaultButtonsJoyConLeft{{
 }};
 
 std::array<PADButtonMapping, PAD_BUTTON_COUNT> g_defaultButtonsJoyPair{{
-    {SDL_GAMEPAD_BUTTON_SOUTH, PAD_BUTTON_A},
-    {SDL_GAMEPAD_BUTTON_EAST, PAD_BUTTON_B},
-    {SDL_GAMEPAD_BUTTON_WEST, PAD_BUTTON_X},
-    {SDL_GAMEPAD_BUTTON_NORTH, PAD_BUTTON_Y},
+    {SDL_GAMEPAD_BUTTON_EAST, PAD_BUTTON_A},
+    {SDL_GAMEPAD_BUTTON_SOUTH, PAD_BUTTON_B},
+    {SDL_GAMEPAD_BUTTON_NORTH, PAD_BUTTON_X},
+    {SDL_GAMEPAD_BUTTON_WEST, PAD_BUTTON_Y},
     {SDL_GAMEPAD_BUTTON_START, PAD_BUTTON_START},
     {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, PAD_TRIGGER_Z},
     {PAD_NATIVE_BUTTON_INVALID, PAD_TRIGGER_L},
@@ -475,6 +477,28 @@ void PADClearPort(const u32 port) {
   SDL_SetGamepadPlayerIndex(ctrl->m_controller, -1);
 }
 
+// SDL also types pads as GameCube by VID/PID alone (PowerA's 20d6:a711 is shared with a Switch-style pad), and
+// those have no full-pull click on MISC3/MISC4. Bound to it, L and R could never press, and the analog fallback
+// in PADRead is skipped; unbound, the trigger past its click point presses them. Also run on saved mappings,
+// which hold the old default for such pads.
+static void UnbindMissingTriggerClick(aurora::input::GameController* controller) {
+  if (SDL_GamepadHasButton(controller->m_controller, SDL_GAMEPAD_BUTTON_MISC3)) {
+    return;
+  }
+  bool changed = false;
+  for (auto& mapping : controller->m_buttonMapping) {
+    if ((mapping.padButton == PAD_TRIGGER_L || mapping.padButton == PAD_TRIGGER_R) &&
+        (mapping.nativeButton == SDL_GAMEPAD_BUTTON_MISC3 || mapping.nativeButton == SDL_GAMEPAD_BUTTON_MISC4)) {
+      mapping.nativeButton = PAD_NATIVE_BUTTON_INVALID;
+      changed = true;
+    }
+  }
+  if (changed) {
+    Log.info("{} has no trigger click: L and R follow the analog triggers",
+             SDL_GetGamepadName(controller->m_controller));
+  }
+}
+
 void __PADSetDefaultMapping(aurora::input::GameController* controller) /*  NOLINT(*-reserved-identifier) */
 {
   switch (SDL_GetGamepadType(controller->m_controller)) {
@@ -509,8 +533,12 @@ void __PADSetDefaultMapping(aurora::input::GameController* controller) /*  NOLIN
   case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
     controller->m_buttonMapping = g_defaultButtonsJoyConLeft;
     break;
+  case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+    controller->m_buttonMapping = g_defaultButtonsJoyPair;
+    break;
   case SDL_GAMEPAD_TYPE_GAMECUBE:
     controller->m_buttonMapping = g_defaultButtonsGamecube;
+    UnbindMissingTriggerClick(controller);
     break;
   default:
     controller->m_buttonMapping = g_defaultButtonsStandard;
@@ -633,6 +661,8 @@ void __PADLoadMapping(aurora::input::GameController* controller) /*  NOLINT(*-re
   if (buttonCorrupt) {
     Log.warn("__PADLoadMapping port={}: corrupt button data in file, resetting buttons to defaults", playerIndex);
     __PADSetDefaultMapping(controller);
+  } else {
+    UnbindMissingTriggerClick(controller);
   }
 }
 
@@ -1548,6 +1578,9 @@ static void load_keyboard_bindings() {
 }
 
 static void save_keyboard_bindings() {
+  if (aurora::io::config_persistence_disabled()) {
+    return;
+  }
   if (aurora::g_config.userPath == nullptr) {
     return;
   }
@@ -1576,6 +1609,9 @@ static void save_keyboard_bindings() {
 }
 
 void PADSerializeMappings() {
+  if (aurora::io::config_persistence_disabled()) {
+    return;
+  }
   if (aurora::g_config.userPath == nullptr) {
     return;
   }
@@ -1836,6 +1872,26 @@ void PADSetDefaultMapping(const PADDefaultMapping* mapping, const PADControllerT
     break;
   }
   g_defaultAxes = toStdArray(mapping->axes);
+}
+
+void PADGetDefaultMapping(PADDefaultMapping* mapping, const PADControllerType type) {
+  const std::array<PADButtonMapping, PAD_BUTTON_COUNT>* buttons = &g_defaultButtonsStandard;
+  switch (type) {
+  case PAD_TYPE_XBOX360: buttons = &g_defaultButtonsXBox360; break;
+  case PAD_TYPE_XBOXONE: buttons = &g_defaultButtonsXBoxOne; break;
+  case PAD_TYPE_PS3: buttons = &g_defaultButtonsPS3; break;
+  case PAD_TYPE_PS4: buttons = &g_defaultButtonsPS4; break;
+  case PAD_TYPE_PS5: buttons = &g_defaultButtonsPS5; break;
+  case PAD_TYPE_SWITCH_PROCON: buttons = &g_defaultButtonsProCon; break;
+  case PAD_TYPE_JOYCON_LEFT: buttons = &g_defaultButtonsJoyConLeft; break;
+  case PAD_TYPE_JOYCON_RIGHT: buttons = &g_defaultButtonsJoyConRight; break;
+  case PAD_TYPE_JOYCON_PAIR: buttons = &g_defaultButtonsJoyPair; break;
+  case PAD_TYPE_GAMECUBE: buttons = &g_defaultButtonsGamecube; break;
+  case PAD_TYPE_NSO_GAMECUBE: buttons = &g_defaultButtonsNSOGamecube; break;
+  default: break;
+  }
+  std::copy(buttons->begin(), buttons->end(), mapping->buttons);
+  std::copy(g_defaultAxes.begin(), g_defaultAxes.end(), mapping->axes);
 }
 
 BOOL PADSetColor(const u32 port, const u8 red, const u8 green, const u8 blue) {

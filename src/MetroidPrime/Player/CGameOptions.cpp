@@ -14,6 +14,10 @@
 #include "dolphin/os.h"
 
 #ifdef TARGET_PC
+#include "MetroidPrime/CStateManager.hpp"
+#include "MetroidPrime/Player/CPlayerState.hpp"
+#include "MetroidPrime/PortSaveFormat.hpp"
+#include "port_debug.h"
 #include "port_apclient.h"
 #include "port_randomizer.h"
 #endif
@@ -37,11 +41,19 @@ inline void WriteValue(COutputStream& out, uint value, int maxSize) {
 }
 
 void CGameOptions::InitSoundMode() {
+#ifdef TARGET_PC
+  // Preserve valid stored modes (0=Mono, 1=Stereo, 2=Surround); clamp invalid to stereo.
+  if (x44_soundMode < 0 || x44_soundMode > 2) {
+    x44_soundMode = CAudioSys::kSM_Stereo;
+  }
+#else
+  // Console path: honour the system's sound mode if present.
   if (OSGetSoundMode() == 0) {
     x44_soundMode = 0;
   } else {
     x44_soundMode = (x44_soundMode != 0) ? x44_soundMode : 1;
   }
+#endif
 }
 
 CGameOptions::CGameOptions()
@@ -59,7 +71,12 @@ CGameOptions::CGameOptions()
 , x68_25_invertY(skDefaultInvertY)
 , x68_26_rumble(skDefaultRumble)
 , x68_27_swapBeamsControls(skDefaultSwapBeamsControls)
+#ifdef TARGET_PC
+, x68_28_hintSystem(skDefaultHintSystem)
+, x68_29_palFlag(false) {
+#else
 , x68_28_hintSystem(skDefaultHintSystem) {
+#endif
   InitSoundMode();
 }
 
@@ -78,7 +95,12 @@ CGameOptions::CGameOptions(CInputStream& in)
 , x68_25_invertY(skDefaultInvertY)
 , x68_26_rumble(skDefaultRumble)
 , x68_27_swapBeamsControls(skDefaultSwapBeamsControls)
+#ifdef TARGET_PC
+, x68_28_hintSystem(skDefaultHintSystem)
+, x68_29_palFlag(false) {
+#else
 , x68_28_hintSystem(skDefaultHintSystem) {
+#endif
 
   for (int i = 0; i < x0_.size(); ++i) {
     x0_[i] = in.ReadBits(8);
@@ -98,6 +120,10 @@ CGameOptions::CGameOptions(CInputStream& in)
   x68_25_invertY = in.ReadPackedBool();
   x68_26_rumble = in.ReadPackedBool();
   x68_27_swapBeamsControls = in.ReadPackedBool();
+#ifdef TARGET_PC
+  if (PortSaveFormat::IsPal())
+    x68_29_palFlag = in.ReadPackedBool();
+#endif
 
   InitSoundMode();
 }
@@ -122,6 +148,10 @@ void CGameOptions::PutTo(COutputStream& out) {
   out.WriteBits(x68_25_invertY != false, 1);
   out.WriteBits(x68_26_rumble != false, 1);
   out.WriteBits(x68_27_swapBeamsControls != false, 1);
+#ifdef TARGET_PC
+  if (PortSaveFormat::IsPal())
+    out.WriteBits(x68_29_palFlag != false, 1);
+#endif
 }
 
 void CGameOptions::ResetToDefaults() {
@@ -225,6 +255,45 @@ void CGameOptions::SetSurroundMode(CAudioSys::ESurroundModes mode, bool apply) {
 const float CGameOptions::GetHudAlpha() const { return x60_hudAlpha * 0.003921569f; }
 
 const float CGameOptions::GetHelmetAlpha() const { return x64_helmetAlpha * 0.003921569f; }
+
+#ifdef TARGET_PC
+float CGameOptions::GetHudAlpha(EHudType type) const {
+  int percent;
+  switch (type) {
+  case kHT_XRay:
+    percent = PortDebug::HudOpacity(PortDebug::kHudOpacityXRay);
+    break;
+  case kHT_Thermal:
+    percent = PortDebug::HudOpacity(PortDebug::kHudOpacityThermal);
+    break;
+  case kHT_Scan:
+    percent = PortDebug::HudOpacity(PortDebug::kHudOpacityScan);
+    break;
+  default:
+    percent = PortDebug::kHudOpacityVisor;
+    break;
+  }
+  return percent == PortDebug::kHudOpacityVisor ? GetHudAlpha() : percent / 100.f;
+}
+
+float CGameOptions::GetActiveHudAlpha(const CStateManager& mgr) const {
+  switch (mgr.GetPlayerState()->GetActiveVisor(mgr)) {
+  case CPlayerState::kPV_XRay:
+    return GetHudAlpha(kHT_XRay);
+  case CPlayerState::kPV_Thermal:
+    return GetHudAlpha(kHT_Thermal);
+  case CPlayerState::kPV_Scan:
+    return GetHudAlpha(kHT_Scan);
+  default:
+    return GetHudAlpha(kHT_Combat);
+  }
+}
+
+float CGameOptions::GetEnergyHudAlpha(EHudType type) const {
+  const int percent = PortDebug::HudOpacity(PortDebug::kHudOpacityEnergy);
+  return percent == PortDebug::kHudOpacityVisor ? GetHudAlpha(type) : percent / 100.f;
+}
+#endif
 
 void CGameOptions::SetHelmetAlpha(const int alpha) { x64_helmetAlpha = alpha; }
 

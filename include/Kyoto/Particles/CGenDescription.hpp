@@ -23,8 +23,10 @@ class CSwooshDescription;
 class CTexture;
 
 #ifdef TARGET_PC
-// Port-only Remastered particle material (VMAT and friends, build/mpr/vfx/DESIGN.md
-// section 1). Present only when the PART carries a VMAT; everything else draws as retail.
+// Port-only Remastered particle material (VMAT and friends, docs/REMASTERED_VFX.md).
+// Present only when the PART carries a VMAT; everything else draws as retail.
+#include "Kyoto/Particles/CPortVfxConstants.hpp"
+
 struct CPortVfxElem {
   enum EKind : u32 { kReal = 0, kVector = 1, kInt = 2, kColor = 3 };
   u32 kind = kReal;
@@ -56,6 +58,7 @@ struct CPortVfxMat {
   // erosion, thrX, thrY, thrW, fresnelX, fresnelY, fadeX, fadeY, indexScale, indexOffset, indexRow
   Src src[11];
   float modulate = 1.f, depthSoften = 0.f;
+  float opacityGain = 1.f, opacityBias = 0.f; // v3 tail; v2 keeps the identity
   u32 spriteCenter = 0; // 0..8, a row of the sprite pivot table
 };
 
@@ -136,10 +139,23 @@ public:
   u8 xPortXfmd = kPortXfmdRetail;
   // port-only PIRN: a converted Remastered effect, whose nested IRND elements are stable per particle
   bool xPortIrnd = false;
+  // Exact-source nested Remastered point-light metadata (PHDR/PIR0/POR0). The
+  // radius elements are owned here and evaluated by the live generator.
+  bool xPortNestedHdrLight = false;
+  CRealElement* xPortNestedLightInnerRadius = nullptr;
+  CRealElement* xPortNestedLightOuterRadius = nullptr;
   // port-only PVRT: Remastered particle variables (names, types, defaults)
   std::unique_ptr< CPortVarTable > xPortVars;
   // port-only PFCM: each model particle is turned to face the camera before PMRT
   bool xPortFaceCamera = false;
+  // port-only PSHP: Remastered SSHP sprite mesh (0 quad; 3 triangle, 4 pentagon, 5 hexagon, 6 octagon)
+  u8 xPortSpriteShape = 0;
+  // port-only PSWX: swooshes started beyond SSWH's one, each with its start frame
+  struct PortExtraSwoosh {
+    TCachedToken< CSwooshDescription > swoosh;
+    int frame;
+  };
+  std::vector< PortExtraSwoosh > xPortExtraSwooshes;
 #endif
   CVectorElement* x58_PMOP;
   CVectorElement* x5c_PMRT;

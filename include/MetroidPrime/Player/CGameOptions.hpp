@@ -10,10 +10,12 @@
 #include "Kyoto/Audio/CAudioSys.hpp"
 #include "Kyoto/SObjectTag.hpp"
 #include "MetroidPrime/TGameTypes.hpp"
+#include "MetroidPrime/HUD/CHudInterface.hpp"
 
 class CInputStream;
 class CMemoryStreamOut;
 class CFinalInput;
+class CStateManager;
 
 enum EGameOption {
   kGO_VisorOpacity,
@@ -69,8 +71,18 @@ public:
   }
   int GetMusicVolume() const { return x5c_musicVol; }
   int GetSfxVolume() const { return x58_sfxVol; }
+  CAudioSys::ESurroundModes GetSurroundMode() const { return static_cast<CAudioSys::ESurroundModes>(x44_soundMode); }
   const float GetHudAlpha() const;
   int GetHUDAlpha() const { return x60_hudAlpha; }
+#ifdef TARGET_PC
+  // Visor Opacity for one HUD type (issue #144): the X-Ray, Thermal and Scan HUDs can have their
+  // own (PortDebug::HudOpacity), the Combat and Ball HUDs use the option.
+  float GetHudAlpha(EHudType type) const;
+  // The HUD type in use: the active visor's, Combat outside first person.
+  float GetActiveHudAlpha(const CStateManager& mgr) const;
+  // The energy readout on a HUD of this type: opaque as in the game unless set otherwise.
+  float GetEnergyHudAlpha(EHudType type) const;
+#endif
   const float GetHelmetAlpha() const;
   void SetHelmetAlpha(const int);
   void SetHUDLag(const bool);
@@ -108,6 +120,12 @@ private:
   bool x68_26_rumble : 1;
   bool x68_27_swapBeamsControls : 1;
   bool x68_28_hintSystem : 1;
+#ifdef TARGET_PC
+  // PAL's sixth option flag (option 4, after the swap-beams flag): default off,
+  // no menu row; only the PAL world draw (0x801ff0b4) reads it, to pick its
+  // draw masks. Kept so a PAL save round-trips; the port never acts on it.
+  bool x68_29_palFlag : 1;
+#endif
   rstl::vector< rstl::pair< CAssetId, CAssetId > > x6c_controlTxtrMap;
 };
 

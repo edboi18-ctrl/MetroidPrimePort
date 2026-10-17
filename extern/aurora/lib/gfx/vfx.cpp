@@ -6,6 +6,7 @@
 #include "../logging.hpp"
 #include "../webgpu/gpu.hpp"
 #include "fx_pipelines.hpp"
+#include "hdr_tone.hpp"
 #include "pipeline_cache.hpp"
 #include "recording.hpp"
 #include "resource_cache.hpp"
@@ -64,7 +65,7 @@ struct Uniform {
   float fogColor[4];
   float fog[4];     // type, a, b, c
   float misc[4];    // modulate, reversed Z, ramp row 0, ramp row 1
-  float misc2[4];   // add row
+  float misc2[4];   // add row, opacity gain, opacity bias, unused (layout unchanged)
   float srcs[6][4]; // Src i = (code, value) at [i / 2][2 * (i % 2)]; code = -1 or row * 4 + comp
   float uvSets[4];  // per slot
   float layers[4];  // per slot
@@ -72,6 +73,7 @@ struct Uniform {
   float pad[32];
 };
 static_assert(sizeof(Uniform) == UniformSize);
+static_assert(offsetof(Uniform, misc2) == 208 && offsetof(Uniform, srcs) == 224);
 
 // ---- Array textures ----
 // A slot's texture as a texture_2d_array: a 1-layer view of the GX texture itself, or, for an atlas,
@@ -352,13 +354,13 @@ fn fs_main(in: VOut) -> @location(0) vec4f {
     let fx = src(in, 4);
     let fy = src(in, 5);
     let q = fy - fx;
-    x = x * smooth3(select(select(0.0, 1.0, d >= fx), sat((d - fx) / q), q != 0.0));
+    x = x * u.misc2.y * sat(smooth3(select(select(0.0, 1.0, d >= fx), sat((d - fx) / q), q != 0.0)) - u.misc2.z);
   }
   if ((FEAT & 2048u) != 0u) {
     let fx = src(in, 6);
     let fy = src(in, 7);
     let q = fy - fx;
-    x = x * smooth3(select(select(0.0, 1.0, fx <= 0.0), sat(-fx / q), q != 0.0));
+    x = x * u.misc2.y * sat(smooth3(select(select(0.0, 1.0, fx <= 0.0), sat(-fx / q), q != 0.0)) - u.misc2.z);
   }
   if ((FEAT & 4u) != 0u) {
     x = max(0.0, x - src(in, 0));
@@ -380,6 +382,7 @@ fn fs_main(in: VOut) -> @location(0) vec4f {
     alpha = clamp(a * hdr, 0.0, 1.0);
     col = tone(rgb * (a / alpha));
   }
+  // BLEND 5 (AdditiveOne) takes no alpha compensation above and no fog below, as Additive; its tone is unchanged.
   // Remastered sets a no-fog bit for every particle blend but alpha and opaque
   // (SetupFogFromBlendMode), so additive and premultiplied draws are not fogged at all.
   if (BLEND == 0u || BLEND == 3u) {
@@ -447,8 +450,12 @@ uint32_t block_size(wgpu::TextureFormat format) {
   }
 }
 
+} // namespace
+
 // The PBDM factors (RESOLVED-state.md Q1): alpha (SrcAlpha, 1-SrcAlpha | One, 1-SrcAlpha), premultiplied
 // (One, 1-SrcAlpha | Zero, One), additive (SrcAlpha, One | Zero, One), opaque (One, Zero for both).
+// AdditiveOne (port-only, the wave orb's model blend) is (One, One | Zero, One). Not in the anonymous namespace:
+// the unit tests call it.
 wgpu::BlendState blend_state(Blend blend) {
   wgpu::BlendComponent c{.operation = wgpu::BlendOperation::Add};
   wgpu::BlendComponent a{.operation = wgpu::BlendOperation::Add};
@@ -471,6 +478,12 @@ wgpu::BlendState blend_state(Blend blend) {
     a.srcFactor = wgpu::BlendFactor::Zero;
     a.dstFactor = wgpu::BlendFactor::One;
     break;
+  case Blend::AdditiveOne:
+    c.srcFactor = wgpu::BlendFactor::One;
+    c.dstFactor = wgpu::BlendFactor::One;
+    a.srcFactor = wgpu::BlendFactor::Zero;
+    a.dstFactor = wgpu::BlendFactor::One;
+    break;
   case Blend::Opaque:
     c.srcFactor = a.srcFactor = wgpu::BlendFactor::One;
     c.dstFactor = a.dstFactor = wgpu::BlendFactor::Zero;
@@ -484,6 +497,8 @@ wgpu::BlendState blend_state(Blend blend) {
   }
   return {.color = c, .alpha = a};
 }
+
+namespace {
 
 // Pool threads of the pipeline cache create pipelines too.
 std::mutex g_staticMutex;
@@ -545,16 +560,7 @@ PipelineConfig make_config(const RenderTargetLayout& layout, const Payload& p) {
 wgpu::RenderPipeline make_pipeline(const PipelineConfig& p) {
   const wgpu::Device& device = webgpu::g_device;
   ensure_static(device);
-  // The slot a feature reads is a pipeline constant (3 bits each, 7 = none).
-  static constexpr const char* SlotNames[] = {"S_COLOR",  "S_OPACITY",   "S_RAMP",   "S_RAMP2",
-                                              "S_THRESHOLD", "S_INDIRECT", "S_PALETTE"};
-  std::string source = "const FEAT: u32 = " + std::to_string(p.features) + "u;\nconst BLEND: u32 = " +
-                       std::to_string(p.blend) + "u;\n";
-  for (uint32_t i = 0; i < std::size(SlotNames); ++i) {
-    const uint32_t v = (p.slotKey >> (3 * i)) & 7;
-    source += std::string("const ") + SlotNames[i] + ": i32 = " + (v == 7 ? "-1" : std::to_string(v)) + ";\n";
-  }
-  source += ShaderSource;
+  const std::string source = pipeline_source(p);
   wgpu::ShaderSourceWGSL wgsl{};
   wgsl.code = source.c_str();
   const wgpu::ShaderModuleDescriptor moduleDescriptor{.nextInChain = &wgsl, .label = "VFX Module"};
@@ -579,7 +585,7 @@ wgpu::RenderPipeline make_pipeline(const PipelineConfig& p) {
       .attributes = attributes.data(),
   };
 
-  const wgpu::BlendState blend = blend_state(static_cast<Blend>(p.blend));
+  const wgpu::BlendState blend = pipeline_blend(p);
   std::array<wgpu::ColorTargetState, MaxColorAttachments> targets{};
   for (uint32_t i = 0; i < p.colorAttachmentCount; ++i) {
     const bool scene = i == SceneColorAttachmentIndex;
@@ -724,6 +730,10 @@ bool ensure_registered() {
           }
           Payload p;
           std::memcpy(&p, data, sizeof(p));
+          if (!scene_format_matches(ctx.layout, p.blend)) {
+            // Fail closed: an HDR shader into an LDR target (or the reverse) would draw the wrong domain.
+            return;
+          }
           ensure_static(ctx.device);
           ensure_dummy(ctx);
           wgpu::TextureView views[SlotCount];
@@ -865,13 +875,66 @@ void evict_idle() {
 
 wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) { return make_pipeline(config); }
 
+wgpu::BlendState pipeline_blend(const PipelineConfig& config) {
+  return blend_state(static_cast<Blend>(config.blend & ~BlendSceneHdr));
+}
+
+bool scene_format_matches(const RenderTargetLayout& layout, uint32_t blend) noexcept {
+  const bool hdrTarget = layout.colorAttachmentCount > SceneColorAttachmentIndex &&
+                         layout.colorAttachments[SceneColorAttachmentIndex].format == webgpu::SceneHdrFormat;
+  return hdrTarget == ((blend & BlendSceneHdr) != 0);
+}
+
+std::string pipeline_source(const PipelineConfig& p) {
+  const bool hdr = (p.blend & BlendSceneHdr) != 0;
+  // The slot a feature reads is a pipeline constant (3 bits each, 7 = none).
+  static constexpr const char* SlotNames[] = {"S_COLOR",  "S_OPACITY",   "S_RAMP",   "S_RAMP2",
+                                              "S_THRESHOLD", "S_INDIRECT", "S_PALETTE"};
+  std::string source = "const FEAT: u32 = " + std::to_string(p.features) + "u;\nconst BLEND: u32 = " +
+                       std::to_string(p.blend & ~BlendSceneHdr) + "u;\n";
+  for (uint32_t i = 0; i < std::size(SlotNames); ++i) {
+    const uint32_t v = (p.slotKey >> (3 * i)) & 7;
+    source += std::string("const ") + SlotNames[i] + ": i32 = " + (v == 7 ? "-1" : std::to_string(v)) + ";\n";
+  }
+  if (!hdr) {
+    // LDR: the source as it always was, byte for byte.
+    source += ShaderSource;
+    return source;
+  }
+  source += "const HDR: bool = true;\n";
+  std::string body = ShaderSource;
+  static constexpr std::string_view Anchor = "  var col = tone(rgb);\n";
+  // The HDR scene holds exposed linear light: the exposure once, no tone, clamp or encode, and no
+  // trade of alpha for brightness (the blend keeps what is above 1). Multiply has returned already,
+  // unscaled. Fog mixes in linear, its display colour taken back through the room's curve. Only that
+  // reconstruction is capped (at the RGBA16F limit); the effect's own light is not, and a source
+  // above 65504 is outside what the target holds.
+  static constexpr std::string_view HdrTail = R"(  if (HDR) {
+    var lin = max(rgb, vec3f(0.0));
+    if (u.tone1.x > 0.0 && u.tone0.w > 0.0) { lin = lin * u.tone0.w; }
+    if (BLEND == 0u || BLEND == 3u) {
+      lin = mix(lin, hdr_exposed(u.fogColor.rgb, u.tone0, u.tone1, u.tone2), fog_factor(in.pos.z));
+    }
+    return vec4f(lin, alpha);
+  }
+)";
+  const size_t at = body.find(Anchor);
+  if (at == std::string::npos) {
+    Log.fatal("VFX HDR: the shader's tone anchor is gone");
+  }
+  body.insert(at, HdrTail);
+  source += body;
+  source += hdr::ToneWgsl;
+  return source;
+}
+
 // Quads (4 vertices, 6 indices) or triangles (3 vertices, drawn in order).
 static void draw_prims(const DrawDesc& desc, const Vertex* verts, uint32_t vertexCount, bool quads) {
   if (verts == nullptr || vertexCount == 0 || vertexCount > MaxQuads * 4 || !ensure_registered()) {
     return;
   }
   evict_idle();
-  const uint32_t features = desc.features & ~uint32_t(DepthSoften);
+  const uint32_t features = shader_features(desc.features);
   // The slots each enabled feature reads; a slot nothing reads is left unbound (the dummy).
   const std::pair<uint32_t, int8_t> reads[] = {
       {ColorTex | ColorIndexing, desc.colorSlot},
@@ -923,6 +986,9 @@ static void draw_prims(const DrawDesc& desc, const Vertex* verts, uint32_t verte
   std::memcpy(u.pn, &gx.pnMtx[gx.currentPnMtx].pos, sizeof(u.pn));
   static_assert(sizeof(gx.pbrTone) == sizeof(u.tone));
   std::memcpy(u.tone, &gx.pbrTone, sizeof(u.tone));
+  // Per draw: the GX state keeps the room's exposure for every later draw.
+  const bool hdr = scene_hdr_pass_active();
+  u.tone[0][3] = draw_exposure(u.tone[0][3], hdr, desc.alreadyExposed);
   std::memcpy(u.fogColor, &gx.fog.color, sizeof(u.fogColor));
   u.fog[0] = float(gx.fog.type);
   u.fog[1] = gx.fog.a;
@@ -933,6 +999,8 @@ static void draw_prims(const DrawDesc& desc, const Vertex* verts, uint32_t verte
   u.misc[2] = float(desc.rampRow[0]);
   u.misc[3] = float(desc.rampRow[1]);
   u.misc2[0] = float(desc.addRow);
+  u.misc2[1] = desc.opacityGain;
+  u.misc2[2] = desc.opacityBias;
   const Src* srcs[SrcCount] = {&desc.erosion,   &desc.thrX,      &desc.thrY,        &desc.thrW,
                                &desc.fresnelX,  &desc.fresnelY,  &desc.fadeX,       &desc.fadeY,
                                &desc.indexScale, &desc.indexOffset, &desc.indexRow};
@@ -967,7 +1035,7 @@ static void draw_prims(const DrawDesc& desc, const Vertex* verts, uint32_t verte
   Payload p{};
   p.features = features;
   p.slotKey = slotKey;
-  p.blend = uint32_t(desc.blend);
+  p.blend = uint32_t(desc.blend) | (hdr ? BlendSceneHdr : 0u);
   p.compare = uint32_t(gx.depthCompare ? to_compare(gx.depthFunc) : wgpu::CompareFunction::Always);
   p.depthWrite = gx.depthCompare && gx.depthUpdate ? 1 : 0;
   p.indexCount = uint32_t(indices.size());

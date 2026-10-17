@@ -24,6 +24,7 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #include <SDL3/SDL_iostream.h>
@@ -384,12 +385,6 @@ template <typename Queue>
 static auto find_pending_pipeline(Queue& queue, PipelineRef hash) {
   return std::find_if(queue.begin(), queue.end(), [=](const PendingPipeline& pending) { return pending.hash == hash; });
 }
-
-enum class PipelinePriority {
-  Background, // loaded from cache
-  Normal,     // async skip draw
-  Blocking,   // block until compiled
-};
 
 static PendingPipeline* touch_pending_pipeline(PipelineRef hash, PipelinePriority priority) {
   auto priorityIt = find_pending_pipeline(g_pipelineQueue, hash);
@@ -1159,6 +1154,7 @@ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersio
   }
 
   size_t acceptedRows = 0;
+  size_t skippedIncompatibleRows = 0;
   while ((ret = sqlite3_step(g_pipelineCacheLoadStmt)) == SQLITE_ROW) {
     const auto* configBlob = static_cast<const uint8_t*>(sqlite3_column_blob(g_pipelineCacheLoadStmt, 0));
     const auto configSize = sqlite3_column_bytes(g_pipelineCacheLoadStmt, 0);
@@ -1173,6 +1169,13 @@ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersio
       continue;
     }
 
+    if constexpr (std::is_same_v<PipelineConfig, gx::PipelineConfig>) {
+      if (!gx::pipeline_config_compatible(config, webgpu::g_lightmapBinding)) {
+        ++skippedIncompatibleRows;
+        continue;
+      }
+    }
+
     find_pipeline_impl(type, config, [=] { return create(config); }, PipelinePriority::Background, firstFrameUsed);
     ++acceptedRows;
   }
@@ -1184,6 +1187,9 @@ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersio
 
   sqlite3_reset(g_pipelineCacheLoadStmt);
   sqlite3_clear_bindings(g_pipelineCacheLoadStmt);
+  if constexpr (std::is_same_v<PipelineConfig, gx::PipelineConfig>) {
+    Log.info("pipeline cache: skipped {} incompatible GX rows", skippedIncompatibleRows);
+  }
   return acceptedRows;
 }
 
@@ -1244,6 +1250,11 @@ PipelineRef find_pipeline(ShaderType type, const clear::PipelineConfig& config, 
 template <>
 PipelineRef find_pipeline(ShaderType type, const gx::PipelineConfig& config, NewPipelineCallback&& cb) {
   return find_pipeline_impl(type, config, std::move(cb));
+}
+
+PipelineRef find_pipeline(ShaderType type, const gx::PipelineConfig& config, NewPipelineCallback&& cb,
+                          PipelinePriority priority) {
+  return find_pipeline_impl(type, config, std::move(cb), priority);
 }
 
 bool touch_pipeline(PipelineRef ref) {

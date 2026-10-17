@@ -193,11 +193,13 @@ set(MP_GAME_SOURCES
     src/Kyoto/Particles/CModVectorElement.cpp
     src/Kyoto/Particles/CParticleData.cpp
     src/Kyoto/Particles/CParticleDataFactory.cpp
+    src/Kyoto/Particles/CPortVfxMat.cpp
     src/Kyoto/Particles/CParticleElectric.cpp
     src/Kyoto/Particles/CParticleElectricDataFactory.cpp
     src/Kyoto/Particles/CParticleGen.cpp
     src/Kyoto/Particles/CParticleGlobals.cpp
     src/Kyoto/Particles/CParticleSwoosh.cpp
+    src/Kyoto/Particles/CParticleElectric2Port.cpp
     src/Kyoto/Particles/CParticleSwooshDataFactory.cpp
     src/Kyoto/Particles/CRealElement.cpp
     src/Kyoto/Particles/CSpawnSystemKeyframeData.cpp

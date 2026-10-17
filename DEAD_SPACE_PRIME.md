@@ -299,7 +299,12 @@ surface, which the port now draws.
 | `platform/include/port_input_engine.h` | The `stasis` action in the binding engine. |
 | `platform/input/port_input_devices.cpp` | Routes the Stasis action and adds its default bindings, and feeds the keyboard's movement keys to the double-tap check. |
 | `platform/include/port_input_settings.h`, `platform/port_input_settings.cpp` | The settings and their `port_settings.ini` lines (covered by `tests/port_input_settings.cpp`). |
-| `platform/include/port_debug.h`, `platform/debug_ui.cpp` | Getters, setters and the F1 > Game > Dead Space section. |
+| `platform/include/port_debug.h`, `platform/debug_ui/options.cpp` | The settings' getters and setters. |
+| `platform/debug_ui/input.cpp` | Keeps a Stasis press and a double-tap dash for the game's next tick. |
+| `platform/debug_ui/controls.cpp` | The F1 overlay's Dead Space section. |
+| `platform/debug_ui/cheats.cpp` | Shows the sorted-draw counters under Frame statistics. |
+| `platform/debug_ui/tabs.cpp` | **Original experience**'s help, which names what it turns off. |
+| `CMakeLists.txt` | Builds the new `platform/` files into the game and registers their tests (`mp_port_test`). |
 | `src/MetroidPrime/CStateManager.cpp` | Runs Stasis each tick, scales a held enemy's `PreThink`, `Think` and collision move, and draws the charges after the rooms. |
 | `src/MetroidPrime/Player/CGrappleArm.cpp`, `include/MetroidPrime/Player/CGrappleArm.hpp` | The throw: the grapple animations in order, and the charge let go at the thrust's projectile event. |
 | `src/MetroidPrime/Player/CPlayerOrbit.cpp` | Points the throwing hand at the enemy; manual aim's limits on lock-on and the aim assist. |

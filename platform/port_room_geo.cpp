@@ -1,7 +1,10 @@
 // Room geometry at run time: which areas have a file, their models, and the draw. See
 // port_room_geo.h.
 #include "port_env.h"
+#include "port_strings.h"
+#include "port_bytes.h"
 #include "port_room_geo.h"
+#include "port_maya_spline.h"
 #include "port_room_sky.h"
 
 #include "port_gci.h"
@@ -38,11 +41,13 @@
 #include <dolphin/gx/GXExtra.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <future>
 #include <iterator>
 #include <memory>
 #include <string>
@@ -147,6 +152,21 @@ struct Placed {
   bool sky = false; // Instance::sky: drawn by Sky, not with the room
   float skyRadiance[3] = {};
   float lightmap[3] = {}; // Instance::lightmap
+  // Instance::drivers[0]: a float driver of one kind parameter. `value` is the spline at the
+  // area's clock, from `startAt` (infinite until it starts).
+  bool driven = false;
+  int driverSlot = 0;
+  double startAt = 1e300;
+  float driverValue = 0.f;
+  PortMayaSpline driverSpline;
+};
+
+// A driven instance's driver starting: the delay after `sender` sends `state`.
+struct DriverStart {
+  uint32_t sender;
+  uint8_t state;
+  size_t item;
+  float delay;
 };
 
 // Copies of one small model that never move or change, built into one model at their world
@@ -210,6 +230,7 @@ struct Area {
   size_t levelsLoaded = 0;
   bool clusterLevels = false; // BuildClusterLevels has run
   std::vector< Trigger > triggers;
+  std::vector< DriverStart > driverStarts;
   bool gated = false; // some instance has a layer
   size_t loaded = 0;
   // Remastered's own script objects (Script), what each is now, the items of each group,
@@ -313,26 +334,10 @@ const size_t kMergeCopies = 4;
 const size_t kMergeVertices = 4096;
 const float kMergeCell = 64.f;
 
-uint32_t ReadBig(const uint8_t* p) {
-  return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | uint32_t(p[3]);
-}
-void WriteBig(uint8_t* p, uint32_t v) {
-  p[0] = uint8_t(v >> 24);
-  p[1] = uint8_t(v >> 16);
-  p[2] = uint8_t(v >> 8);
-  p[3] = uint8_t(v);
-}
-float ReadBigFloat(const uint8_t* p) {
-  const uint32_t v = ReadBig(p);
-  float f;
-  std::memcpy(&f, &v, 4);
-  return f;
-}
-void WriteBigFloat(uint8_t* p, float f) {
-  uint32_t v;
-  std::memcpy(&v, &f, 4);
-  WriteBig(p, v);
-}
+using port::ReadBEFloat;
+using port::ReadBE32;
+using port::WriteBE32;
+using port::WriteBEFloat;
 
 // A CMDL's sections, as CModel::CModel reads them.
 struct CmdlSections {
@@ -346,20 +351,20 @@ struct CmdlSections {
 };
 
 bool ReadCmdl(const std::vector< uint8_t >& data, CmdlSections& out) {
-  if (data.size() < 0x2c || ReadBig(data.data()) != 0xdeadbabe) {
+  if (data.size() < 0x2c || ReadBE32(data.data()) != 0xdeadbabe) {
     return false;
   }
-  out.version = ReadBig(&data[4]);
-  out.flags = ReadBig(&data[8]);
-  const size_t count = ReadBig(&data[0x24]);
+  out.version = ReadBE32(&data[4]);
+  out.flags = ReadBE32(&data[8]);
+  const size_t count = ReadBE32(&data[0x24]);
   const size_t sizesAt = out.version == 1 ? 0x28 : 0x2c;
-  out.matSets = out.version >= 2 ? ReadBig(&data[0x28]) : 1;
+  out.matSets = out.version >= 2 ? ReadBE32(&data[0x28]) : 1;
   if (sizesAt + count * 4 > data.size()) {
     return false;
   }
   size_t at = (sizesAt + count * 4 + 31) & ~size_t(31);
   for (size_t i = 0; i < count; ++i) {
-    const size_t size = ReadBig(&data[sizesAt + i * 4]);
+    const size_t size = ReadBE32(&data[sizesAt + i * 4]);
     if (at + size > data.size()) {
       return false;
     }
@@ -372,7 +377,7 @@ bool ReadCmdl(const std::vector< uint8_t >& data, CmdlSections& out) {
     return false;
   }
   out.surfaces = info + 1;
-  out.surfaceCount = ReadBig(&data[out.sections[info].first]);
+  out.surfaceCount = ReadBE32(&data[out.sections[info].first]);
   return out.surfaces + out.surfaceCount <= count;
 }
 
@@ -407,16 +412,16 @@ std::vector< uint8_t > MergeCmdl(const std::vector< uint8_t >& source, const CCu
       return {};
     }
     const uint8_t* const header = &source[at];
-    const uint32_t extra = ReadBig(header + 0x1c);
+    const uint32_t extra = ReadBE32(header + 0x1c);
     if (extra > size) {
       return {};
     }
     const size_t headerSize = (0x4b + size_t(extra)) & ~size_t(31);
-    const size_t listSize = ReadBig(header + 0x10) & 0x7fffffff;
+    const size_t listSize = ReadBE32(header + 0x10) & 0x7fffffff;
     if (headerSize + listSize > size) {
       return {};
     }
-    const CCubeMaterial material = cube.GetMaterialByIndex(int(ReadBig(header + 0xc)));
+    const CCubeMaterial material = cube.GetMaterialByIndex(int(ReadBE32(header + 0xc)));
     if (material.PortNeedsModelMatrix()) {
       return {};
     }
@@ -436,9 +441,9 @@ std::vector< uint8_t > MergeCmdl(const std::vector< uint8_t >& source, const CCu
     if ((desc & 3) != GX_INDEX16) {
       return {};
     }
-    if (extra >= 0x40 && ReadBig(header + 0x44) == 0x50424958) { // 'PBIX'
-      surface.bases[0] = ReadBig(header + 0x48);
-      surface.bases[1] = ReadBig(header + 0x4c);
+    if (extra >= 0x40 && ReadBE32(header + 0x44) == 0x50424958) { // 'PBIX'
+      surface.bases[0] = ReadBE32(header + 0x48);
+      surface.bases[1] = ReadBE32(header + 0x4c);
     }
     const uint8_t* const list = header + headerSize;
     for (size_t i = 0; i < listSize;) {
@@ -482,8 +487,8 @@ std::vector< uint8_t > MergeCmdl(const std::vector< uint8_t >& source, const CCu
   std::vector< std::vector< uint8_t > > lists(in.surfaceCount);
   for (size_t s = 0; s < in.surfaceCount; ++s) {
     const uint8_t* const header = &source[in.sections[in.surfaces + s].first];
-    const size_t headerSize = (0x4b + ReadBig(header + 0x1c)) & ~31u;
-    const size_t listSize = ReadBig(header + 0x10) & 0x7fffffff;
+    const size_t headerSize = (0x4b + ReadBE32(header + 0x1c)) & ~31u;
+    const size_t listSize = ReadBE32(header + 0x10) & 0x7fffffff;
     const uint8_t* const list = header + headerSize;
     const Surface& surface = surfaces[s];
     std::vector< uint8_t >& out = lists[s];
@@ -527,11 +532,11 @@ std::vector< uint8_t > MergeCmdl(const std::vector< uint8_t >& source, const CCu
   const CVector3f hi = bounds.GetMaxPoint();
   const float box[6] = {lo.GetX(), lo.GetY(), lo.GetZ(), hi.GetX(), hi.GetY(), hi.GetZ()};
   for (int i = 0; i < 6; ++i) {
-    WriteBigFloat(&out[0xc + i * 4], box[i]);
+    WriteBEFloat(&out[0xc + i * 4], box[i]);
   }
   size_t at = aligned(sizesAt + sizes.size() * 4);
   for (size_t i = 0; i < sizes.size(); ++i) {
-    WriteBig(&out[sizesAt + i * 4], uint32_t(sizes[i]));
+    WriteBE32(&out[sizesAt + i * 4], uint32_t(sizes[i]));
     uint8_t* const dst = &out[at];
     const uint8_t* const src = &source[in.sections[i].first];
     if (i == in.positions) {
@@ -539,11 +544,11 @@ std::vector< uint8_t > MergeCmdl(const std::vector< uint8_t >& source, const CCu
         const CTransform4f& xf = *places[copy];
         for (size_t v = 0; v < positionCount; ++v) {
           const uint8_t* const p = src + v * 12;
-          const CVector3f world = xf * CVector3f(ReadBigFloat(p), ReadBigFloat(p + 4), ReadBigFloat(p + 8));
+          const CVector3f world = xf * CVector3f(ReadBEFloat(p), ReadBEFloat(p + 4), ReadBEFloat(p + 8));
           uint8_t* const q = dst + (copy * positionCount + v) * 12;
-          WriteBigFloat(q, world.GetX());
-          WriteBigFloat(q + 4, world.GetY());
-          WriteBigFloat(q + 8, world.GetZ());
+          WriteBEFloat(q, world.GetX());
+          WriteBEFloat(q + 4, world.GetY());
+          WriteBEFloat(q + 8, world.GetZ());
         }
       }
     } else if (i == in.positions + 1) {
@@ -566,7 +571,7 @@ std::vector< uint8_t > MergeCmdl(const std::vector< uint8_t >& source, const CCu
           uint8_t* const q = dst + (copy * normalCount + v) * normalSize;
           float n[3], wn[3];
           for (int k = 0; k < 3; ++k) {
-            n[k] = ReadBigFloat(p + k * 4);
+            n[k] = ReadBEFloat(p + k * 4);
           }
           for (int r = 0; r < 3; ++r) {
             wn[r] = c[r * 3] * n[0] + c[r * 3 + 1] * n[1] + c[r * 3 + 2] * n[2];
@@ -574,14 +579,14 @@ std::vector< uint8_t > MergeCmdl(const std::vector< uint8_t >& source, const CCu
           const float nLength = std::sqrt(wn[0] * wn[0] + wn[1] * wn[1] + wn[2] * wn[2]);
           for (int k = 0; k < 3; ++k) {
             wn[k] = nLength > 0.f ? sign * wn[k] / nLength : 0.f;
-            WriteBigFloat(q + k * 4, wn[k]);
+            WriteBEFloat(q + k * 4, wn[k]);
           }
           for (size_t f = 0; f < frames; ++f) {
             const size_t bAt = 12 + 24 * f, tAt = 24 + 24 * f;
             float b[3], t[3];
             for (int k = 0; k < 3; ++k) {
-              b[k] = ReadBigFloat(p + bAt + k * 4);
-              t[k] = ReadBigFloat(p + tAt + k * 4);
+              b[k] = ReadBEFloat(p + bAt + k * 4);
+              t[k] = ReadBEFloat(p + tAt + k * 4);
             }
             const float handed = (n[1] * t[2] - n[2] * t[1]) * b[0] + (n[2] * t[0] - n[0] * t[2]) * b[1] +
                                          (n[0] * t[1] - n[1] * t[0]) * b[2] < 0.f ? -sign : sign;
@@ -598,8 +603,8 @@ std::vector< uint8_t > MergeCmdl(const std::vector< uint8_t >& source, const CCu
             const float wb[3] = {(wn[1] * wt[2] - wn[2] * wt[1]) * handed, (wn[2] * wt[0] - wn[0] * wt[2]) * handed,
                                  (wn[0] * wt[1] - wn[1] * wt[0]) * handed};
             for (int k = 0; k < 3; ++k) {
-              WriteBigFloat(q + bAt + k * 4, wb[k]);
-              WriteBigFloat(q + tAt + k * 4, wt[k]);
+              WriteBEFloat(q + bAt + k * 4, wb[k]);
+              WriteBEFloat(q + tAt + k * 4, wt[k]);
             }
           }
         }
@@ -607,7 +612,7 @@ std::vector< uint8_t > MergeCmdl(const std::vector< uint8_t >& source, const CCu
           const uint8_t* const p = src + v * normalSize;
           float n[3];
           for (int k = 0; k < 3; ++k) {
-            n[k] = format > 0 ? float(int16_t(p[k * 2] << 8 | p[k * 2 + 1])) / 16384.f : ReadBigFloat(p + k * 4);
+            n[k] = format > 0 ? float(int16_t(p[k * 2] << 8 | p[k * 2 + 1])) / 16384.f : ReadBEFloat(p + k * 4);
           }
           // Row r of the world matrix's cofactors dotted with the normal.
           float w[3];
@@ -623,29 +628,29 @@ std::vector< uint8_t > MergeCmdl(const std::vector< uint8_t >& source, const CCu
               q[k * 2] = uint8_t(uint16_t(s) >> 8);
               q[k * 2 + 1] = uint8_t(s);
             } else {
-              WriteBigFloat(q + k * 4, value);
+              WriteBEFloat(q + k * 4, value);
             }
           }
         }
       }
     } else if (i >= in.surfaces && i < in.surfaces + in.surfaceCount) {
       const size_t s = i - in.surfaces;
-      const uint32_t extra = ReadBig(src + 0x1c);
+      const uint32_t extra = ReadBE32(src + 0x1c);
       const size_t headerSize = (0x4b + size_t(extra)) & ~size_t(31);
       std::memcpy(dst, src, headerSize);
       const CVector3f centre = bounds.GetCenterPoint();
-      WriteBigFloat(dst, centre.GetX());
-      WriteBigFloat(dst + 4, centre.GetY());
-      WriteBigFloat(dst + 8, centre.GetZ());
-      WriteBig(dst + 0x10, (ReadBig(src + 0x10) & 0x80000000) | uint32_t(lists[s].size()));
+      WriteBEFloat(dst, centre.GetX());
+      WriteBEFloat(dst + 4, centre.GetY());
+      WriteBEFloat(dst + 8, centre.GetZ());
+      WriteBE32(dst + 0x10, (ReadBE32(src + 0x10) & 0x80000000) | uint32_t(lists[s].size()));
       if (extra != 0) {
         for (int k = 0; k < 6; ++k) {
-          WriteBigFloat(dst + 0x2c + k * 4, box[k]);
+          WriteBEFloat(dst + 0x2c + k * 4, box[k]);
         }
       }
       if (surfaces[s].bases[0] != 0 || surfaces[s].bases[1] != 0) {
-        WriteBig(dst + 0x48, 0); // folded into the indices
-        WriteBig(dst + 0x4c, 0);
+        WriteBE32(dst + 0x48, 0); // folded into the indices
+        WriteBE32(dst + 0x4c, 0);
       }
       std::memcpy(dst + headerSize, lists[s].data(), lists[s].size());
     } else {
@@ -684,7 +689,7 @@ void BuildClusters(Area& area) {
   std::vector< size_t > copies(area.models.size(), 0);
   const auto mergeable = [&](const Placed& item) {
     return item.layer == kEveryLayer && item.platform == 0 && item.follow == 0 && item.active && !item.glows &&
-           item.anim.empty() && !item.sky;
+           item.anim.empty() && !item.sky && !item.driven;
   };
   std::vector< bool > linked(area.items.size(), false);
   for (const Trigger& trigger : area.triggers) {
@@ -854,25 +859,7 @@ void BindMaterialValues() {
 
 // The whole file, in one read when its size is known. The stream is left as a read
 // through istreambuf_iterator leaves it: failed only when the file did not open.
-std::vector< uint8_t > ReadAll(std::ifstream& in) {
-  std::vector< uint8_t > data;
-  if (!in) {
-    return data;
-  }
-  in.seekg(0, std::ios::end);
-  const std::streamoff size = in.tellg();
-  in.seekg(0, std::ios::beg);
-  if (in && size > 0) {
-    data.resize(size_t(size));
-    in.read(reinterpret_cast< char* >(data.data()), std::streamsize(size));
-    data.resize(size_t(in.gcount()));
-  } else {
-    in.clear();
-    data.assign(std::istreambuf_iterator< char >(in), std::istreambuf_iterator< char >());
-  }
-  in.clear();
-  return data;
-}
+using port::ReadAll;
 
 // The seconds a clip takes to play once, first frame to last.
 float ClipLength(const Instance::AnimClip& clip) {
@@ -905,10 +892,25 @@ CTransform4f Pose(const Instance::AnimClip& clip, double seconds) {
   }
   n = n > 0.f ? 1.f / std::sqrt(n) : 0.f;
   const float x = q[0] * n, y = q[1] * n, z = q[2] * n, s = q[3] * n;
-  return CTransform4f(1.f - 2.f * (y * y + z * z), 2.f * (x * y - s * z), 2.f * (x * z + s * y),
-                      a[4] + (b[4] - a[4]) * w, 2.f * (x * y + s * z), 1.f - 2.f * (x * x + z * z),
-                      2.f * (y * z - s * x), a[5] + (b[5] - a[5]) * w, 2.f * (x * z - s * y),
-                      2.f * (y * z + s * x), 1.f - 2.f * (x * x + y * y), a[6] + (b[6] - a[6]) * w);
+  float r[9] = {1.f - 2.f * (y * y + z * z), 2.f * (x * y - s * z), 2.f * (x * z + s * y),
+                2.f * (x * y + s * z), 1.f - 2.f * (x * x + z * z), 2.f * (y * z - s * x),
+                2.f * (x * z - s * y), 2.f * (y * z + s * x), 1.f - 2.f * (x * x + y * y)};
+  if (clip.stretch.size() == frames * 9) {
+    // A scaling joint: the pose is rotation * stretch, the stretch blended frame to frame.
+    const float* const ua = clip.stretch.data() + 9 * i;
+    float u[9], m[9];
+    for (int k = 0; k < 9; ++k) {
+      u[k] = ua[k] + (ua[k + 9] - ua[k]) * w;
+    }
+    for (int row = 0; row < 3; ++row) {
+      for (int col = 0; col < 3; ++col) {
+        m[3 * row + col] = r[3 * row] * u[col] + r[3 * row + 1] * u[3 + col] + r[3 * row + 2] * u[6 + col];
+      }
+    }
+    std::copy(m, m + 9, r);
+  }
+  return CTransform4f(r[0], r[1], r[2], a[4] + (b[4] - a[4]) * w, r[3], r[4], r[5], a[5] + (b[5] - a[5]) * w, r[6],
+                      r[7], r[8], a[6] + (b[6] - a[6]) * w);
 }
 
 // The script objects as the file has them: a counter at 0, the camera in no volume.
@@ -938,6 +940,31 @@ void ReadLods() {
   }
 }
 
+// An area's file, read and parsed: all of the load that needs nothing of the game's, so
+// it can run on a worker while the game streams the area in (Prefetch).
+struct Parsed {
+  bool ok = false;
+  std::string error;
+  std::vector< Instance > instances;
+  Script script;
+};
+
+Parsed ReadAndParse(const std::string& path) {
+  Parsed parsed;
+  std::ifstream in(PortGci::PathFromString(path), std::ios::binary);
+  const std::vector< uint8_t > data = ReadAll(in);
+  parsed.ok = in && Parse(data, parsed.instances, parsed.error, &parsed.script);
+  return parsed;
+}
+
+// Prefetches by MREA, with the path each was read from: the main thread only.
+struct Prefetched {
+  std::string path;
+  std::future< Parsed > parsed;
+};
+std::unordered_map< uint32_t, Prefetched > sPrefetched;
+constexpr size_t kMaxPrefetched = 16;
+
 void Load(uint32_t mrea, Area& area) {
   const std::string path = PortMods::RoomGeoPath(mrea);
   if (path.empty() || gpResourceFactory == nullptr) {
@@ -946,15 +973,24 @@ void Load(uint32_t mrea, Area& area) {
   if (!sLodsRead) {
     ReadLods();
   }
-  std::ifstream in(PortGci::PathFromString(path), std::ios::binary);
-  const std::vector< uint8_t > data = ReadAll(in);
-  std::string error;
-  if (!in || !Parse(data, area.instances, error, &area.script)) {
-    PortLog::Write("room geo: %s: %s\n", path.c_str(), error.empty() ? "cannot read" : error.c_str());
+  Parsed parsed;
+  const auto prefetched = sPrefetched.find(mrea);
+  if (prefetched != sPrefetched.end() && prefetched->second.path == path && prefetched->second.parsed.valid()) {
+    parsed = prefetched->second.parsed.get(); // waits only if the worker is not done yet
+  } else {
+    parsed = ReadAndParse(path);
+  }
+  if (prefetched != sPrefetched.end()) {
+    sPrefetched.erase(prefetched);
+  }
+  if (!parsed.ok) {
+    PortLog::Write("room geo: %s: %s\n", path.c_str(), parsed.error.empty() ? "cannot read" : parsed.error.c_str());
     area.instances.clear();
     area.script = Script();
     return;
   }
+  area.instances = std::move(parsed.instances);
+  area.script = std::move(parsed.script);
   // A model the import could not convert leaves its instances behind.
   std::unordered_map< uint32_t, size_t > index;
   size_t missing = 0;
@@ -1023,6 +1059,15 @@ void Load(uint32_t mrea, Area& area) {
       }
       area.groups[instance.group].push_back(area.items.size() - 1);
     }
+    if (!instance.drivers.empty()) {
+      const Instance::Driver& driver = instance.drivers[0];
+      if (item.driverSpline.Load(driver.spline.data(), driver.spline.size())) {
+        item.driven = true;
+        item.driverSlot = driver.slot;
+        item.driverValue = item.driverSpline.Eval(item.driverSpline.FirstTime());
+        area.driverStarts.push_back({driver.sender & 0x3ffffff, driver.state, area.items.size() - 1, driver.delay});
+      }
+    }
     for (const Link& link : instance.links) {
       if (link.action == kFollow) {
         // GetIdForScript wants the layer bits too.
@@ -1051,7 +1096,7 @@ void Load(uint32_t mrea, Area& area) {
     }
   }
   ResetNodes(area);
-  sTriggers = sTriggers || !area.triggers.empty() || area.retailEdges;
+  sTriggers = sTriggers || !area.triggers.empty() || !area.driverStarts.empty() || area.retailEdges;
   area.instances.clear();
   area.instances.shrink_to_fit();
   area.hasFile = !area.items.empty();
@@ -1192,6 +1237,33 @@ void Apply(Area& area, const ScriptEdge& edge, int depth) {
 
 } // namespace
 
+void Prefetch(uint32_t mrea) {
+  if (GetMode() == Mode::Off || Areas().count(mrea) != 0 || sPrefetched.count(mrea) != 0) {
+    return;
+  }
+  std::string path = PortMods::RoomGeoPath(mrea);
+  if (path.empty()) {
+    return;
+  }
+  // Areas streamed in and dropped again before they loaded: the finished ones go first.
+  for (auto it = sPrefetched.begin(); sPrefetched.size() >= kMaxPrefetched && it != sPrefetched.end();) {
+    if (it->second.parsed.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+      it = sPrefetched.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  if (sPrefetched.size() >= kMaxPrefetched) {
+    return;
+  }
+  try {
+    std::future< Parsed > parsed = std::async(std::launch::async, ReadAndParse, path);
+    sPrefetched.emplace(mrea, Prefetched{std::move(path), std::move(parsed)});
+  } catch (...) {
+    // No thread to spare: Load reads the file itself.
+  }
+}
+
 void SetLoadedAreas(const uint32_t* mreas, size_t count) {
   auto& areas = Areas();
   if (!sBuffersReady && !sWarned) {
@@ -1246,6 +1318,31 @@ void SetLoadedAreas(const uint32_t* mreas, size_t count) {
   sDrawnCoarse = 0;
   if (!sMaterialValues.empty()) {
     BindMaterialValues();
+  }
+}
+
+namespace {
+struct ShadowReceiver {
+  const CModel* model;
+  const CTransform4f* xf;
+  CAABox bounds;
+};
+std::vector< ShadowReceiver > sShadowReceivers;
+} // namespace
+
+void ClearShadowReceivers() { sShadowReceivers.clear(); }
+
+void DrawShadowReceivers(const float lo[3], const float hi[3]) {
+  CGraphics::DisableAllLights();
+  for (const ShadowReceiver& r : sShadowReceivers) {
+    const CVector3f& a = r.bounds.GetMinPoint();
+    const CVector3f& b = r.bounds.GetMaxPoint();
+    if (b.GetX() < lo[0] || a.GetX() > hi[0] || b.GetY() < lo[1] || a.GetY() > hi[1] ||
+        b.GetZ() < lo[2] || a.GetZ() > hi[2]) {
+      continue;
+    }
+    gpRender->SetModelMatrix(*r.xf);
+    r.model->DrawUnsortedParts(CModelFlags::Normal());
   }
 }
 
@@ -1465,6 +1562,7 @@ bool Draw(const CStateManager& mgr, const CGameArea& gameArea, const CFrustumPla
     // Placed::lightmap; null for a cluster, whose members each have their own (it takes the
     // volume instead)
     const float* lightmap;
+    const Placed* driven; // its float driver's instance, or null
   };
   static std::vector< Visible > visible;
   visible.clear();
@@ -1474,9 +1572,12 @@ bool Draw(const CStateManager& mgr, const CGameArea& gameArea, const CFrustumPla
   static const CTransform4f kIdentity = CTransform4f::Identity();
   const auto add = [&](Model& model, const CModel& drawn, const CTransform4f& xf, CActorLights* lights,
                        const CAABox& bounds, const float* glow = nullptr, const float* lightmap = nullptr,
-                       bool inView = true) {
+                       bool inView = true, const Placed* driven = nullptr) {
     (inView ? visible : casters)
-        .push_back({cutout(model), distanceSq(bounds), &drawn, &xf, lights, &bounds, glow, lightmap});
+        .push_back({cutout(model), distanceSq(bounds), &drawn, &xf, lights, &bounds, glow, lightmap, driven});
+    if (inView && !visible.back().cutout) {
+      sShadowReceivers.push_back({&drawn, &xf, bounds});
+    }
   };
   // In view, or else whether it can cast into view: an opaque model in the shadow map's box.
   const auto inView = [&](Model& model, const CAABox& bounds, bool& casts) {
@@ -1485,7 +1586,9 @@ bool Draw(const CStateManager& mgr, const CGameArea& gameArea, const CFrustumPla
     }
     const float lo[3] = {bounds.GetMinPoint().GetX(), bounds.GetMinPoint().GetY(), bounds.GetMinPoint().GetZ()};
     const float hi[3] = {bounds.GetMaxPoint().GetX(), bounds.GetMaxPoint().GetY(), bounds.GetMaxPoint().GetZ()};
-    casts = sOffscreenCasters && !cutout(model) && GXPortShadowBoxCasts(lo, hi);
+    // A cutout casts too: aurora gives a draw a caster only when it can discard like the colour pass does
+    // (a Remastered cut bit); a retail alpha-tested draw (alphaCompare) still gets none.
+    casts = sOffscreenCasters && GXPortShadowBoxCasts(lo, hi);
     return false;
   };
   for (Cluster& cluster : area.clusters) {
@@ -1538,7 +1641,7 @@ bool Draw(const CStateManager& mgr, const CGameArea& gameArea, const CFrustumPla
     const CModelData& data = item.level < 0 ? *model.data : *model.levels[item.level].data;
     const CModel& cmodel = **data.PickStaticModel(CModelData::kWM_Normal);
     if (casts) {
-      add(model, cmodel, item.xf, item.lights.get(), item.bounds, nullptr, nullptr, false);
+      add(model, cmodel, item.xf, item.lights.get(), item.bounds, nullptr, nullptr, false, item.driven ? &item : nullptr);
       continue;
     }
     if (item.level >= 0) {
@@ -1549,7 +1652,8 @@ bool Draw(const CStateManager& mgr, const CGameArea& gameArea, const CFrustumPla
       ++sDrawn;
       continue;
     }
-    add(model, cmodel, item.xf, item.lights.get(), item.bounds, item.glows ? item.glow : nullptr, item.lightmap);
+    add(model, cmodel, item.xf, item.lights.get(), item.bounds, item.glows ? item.glow : nullptr, item.lightmap, true,
+        item.driven ? &item : nullptr);
     if (!cmodel.IsDefinitelyOpaque()) {
       area.sorted.push_back(&item);
     }
@@ -1575,7 +1679,13 @@ bool Draw(const CStateManager& mgr, const CGameArea& gameArea, const CFrustumPla
     if (draw.glow != nullptr) {
       CCubeModel::PortSetGlow(draw.glow);
     }
+    if (draw.driven != nullptr) {
+      CCubeModel::PortSetKindParam(draw.driven->driverSlot, draw.driven->driverValue);
+    }
     draw.model->DrawUnsortedParts(CModelFlags::Normal());
+    if (draw.driven != nullptr) {
+      CCubeModel::PortSetKindParam(-1, 0.f);
+    }
     if (draw.glow != nullptr) {
       CCubeModel::PortSetGlow(nullptr);
     }
@@ -1658,10 +1768,16 @@ void DrawSorted(const void* drawable) {
   if (item.glows) {
     CCubeModel::PortSetGlow(item.glow);
   }
+  if (item.driven) {
+    CCubeModel::PortSetKindParam(item.driverSlot, item.driverValue);
+  }
   if (item.alpha < 1.f) {
     cmodel.Draw(CModelFlags(CModelFlags::kT_Blend, item.alpha));
   } else {
     cmodel.DrawSortedParts(CModelFlags::Normal());
+  }
+  if (item.driven) {
+    CCubeModel::PortSetKindParam(-1, 0.f);
   }
   if (item.glows) {
     CCubeModel::PortSetGlow(nullptr);
@@ -1836,6 +1952,12 @@ void OnScriptState(CStateManager& mgr, uint32_t editorId, int state) {
     }
     Act(mrea, area, trigger);
   }
+  // A driver's ResetAndStart: started over, the delay after the state.
+  for (const DriverStart& start : area.driverStarts) {
+    if (start.sender == sender && start.state == state) {
+      area.items[start.item].startAt = area.clock + start.delay;
+    }
+  }
   if (area.retailEdges) {
     for (const ScriptEdge& edge : area.script.edges) {
       if (edge.retail && (edge.from & 0x3ffffff) == sender && edge.event == state) {
@@ -1869,6 +1991,13 @@ void Think(CStateManager& mgr, float dt) {
       const size_t trigger = next->trigger;
       area.pending.erase(next);
       Act(mrea, area, area.triggers[trigger]);
+    }
+    for (const DriverStart& start : area.driverStarts) {
+      Placed& item = area.items[start.item];
+      item.startAt = DriverStartAt(item.shown, item.startAt, area.clock);
+      // Before it starts the parameter is the first key; after the last it holds that key.
+      item.driverValue = item.driverSpline.Eval(
+          item.driverSpline.FirstTime() + float(std::max(0., area.clock - item.startAt)));
     }
   }
   if (!any) {
@@ -1990,6 +2119,10 @@ void ResetScriptState() {
       item.clipStart = 0.;
       item.following = false;
       item.alpha = 1.f;
+      if (item.driven) {
+        item.startAt = 1e300;
+        item.driverValue = item.driverSpline.Eval(item.driverSpline.FirstTime());
+      }
     }
   }
 }
@@ -2235,6 +2368,7 @@ int ClearMaterialValues() {
 
 void Reset() {
   CCubeModel::PortClearPBROverrides();
+  sPrefetched.clear(); // waits for any still reading: the files are about to change
   Areas().clear();
   sLods.clear();
   sLodsRead = false;
@@ -2311,7 +2445,7 @@ Mode GetMode() {
     return Mode::Off;
   }
   if (sMode < 0) {
-    const char* const env = std::getenv("MP_ROOM_GEO");
+    const char* const env = port::EnvString("MP_ROOM_GEO");
     sMode = int(env == nullptr || env[0] == '\0' ? Mode::Replace
                 : env[0] == '0'                  ? Mode::Off
                 : env[0] == 'o'                  ? Mode::Overlay

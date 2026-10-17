@@ -328,6 +328,14 @@ public:
   // the game's updates only (it stands still on the pause screen) and wraps at 15120 s.
   static void TickSimTime(float dt);
   static float GetSimTime();
+  // Port: a presented frame between ticks reads the clock this many seconds
+  // behind the last tick (the game sets it while drawing, 0 otherwise).
+  static void SetSimTimePresentLag(float seconds);
+  static float GetSimTimePresentLag();
+  // Port: seconds GetSecondsMod900 lags by during a smooth-frames draw.
+  static void SetRenderTimePresentLag(float seconds);
+  // Seconds the last TickSimTime added.
+  static float GetLastSimTimeStep();
   static const CProjectionState& GetProjectionState();
   static void SetProjectionState(const CProjectionState& proj);
   static CClippedScreenRect ClipScreenRectFromVS(const CVector3f& p1, const CVector3f& p2,
@@ -339,6 +347,8 @@ public:
   static const GXRenderModeObj& GetRenderMode() { return mRenderModeObj; }
   // Port: resize the internal framebuffer and viewport (dynamic aspect ratio).
   static void PortResizeFrameBuffer(u16 fbWidth);
+  // Port: re-send the copy clear colour and depth, after something else (the GPU self-test) set its own.
+  static void PortResendCopyClear();
   static float GetDepthNear() { return mDepthNear; }
   static float GetDepthFar() { return mDepthFar; }
 

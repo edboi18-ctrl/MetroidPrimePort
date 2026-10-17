@@ -1,4 +1,5 @@
 #include "port_fx_debug.h"
+#include "port_vfx_opacity.h"
 #include "port_vfx_particles.h"
 
 #include <algorithm>
@@ -28,6 +29,26 @@ constexpr float kPivot[9][4] = {
 
 // Quad corners in draw_quads order; (qx, qy) is the corner's position in the unit quad.
 constexpr float kCorner[4][2] = {{0.f, 0.f}, {1.f, 0.f}, {1.f, 1.f}, {0.f, 1.f}};
+
+// Remastered's sprite meshes for SSHP 3-6 (CGraphicsUtilCache::BuildParticleInstancingBuffers; kb
+// format/SSHP.md): the corner (qx, qy) is both the position in the unit quad and the UV. Each
+// triangle goes out as a degenerate quad (a, b, c, c). Shapes 0-2 are plain quad grids.
+struct PortSpriteShape {
+  const float (*pts)[2];
+  const uint8_t* idx;
+  int triangles;
+};
+constexpr float kTriPts[3][2] = {{0.f, 1.f}, {1.f, 1.f}, {.5f, 0.f}};
+constexpr uint8_t kTriIdx[] = {0, 1, 2};
+constexpr float kPentPts[5][2] = {{.2f, 0.f}, {.8f, 0.f}, {1.f, .6f}, {.5f, 1.f}, {0.f, .6f}};
+constexpr uint8_t kPentIdx[] = {0, 3, 4, 0, 1, 3, 1, 2, 3};
+constexpr float kHexPts[6][2] = {{.24f, 0.f}, {.76f, 0.f}, {1.f, .5f}, {.76f, 1.f}, {.24f, 1.f}, {0.f, .5f}};
+constexpr uint8_t kHexIdx[] = {0, 1, 5, 1, 2, 3, 3, 4, 5, 1, 3, 5};
+constexpr float kOctPts[8][2] = {{0.2928932f, 0.f}, {0.7071068f, 0.f}, {1.f, 0.2928932f}, {1.f, 0.7071068f},
+                                 {0.7071068f, 1.f}, {0.2928932f, 1.f}, {0.f, 0.7071068f}, {0.f, 0.2928932f}};
+constexpr uint8_t kOctIdx[] = {0, 1, 7, 1, 2, 3, 1, 3, 4, 1, 4, 7, 7, 4, 5, 7, 5, 6};
+constexpr PortSpriteShape kShapes[4] = {
+    {kTriPts, kTriIdx, 1}, {kPentPts, kPentIdx, 3}, {kHexPts, kHexIdx, 4}, {kOctPts, kOctIdx, 6}};
 
 // One VTMT row's evaluated terms.
 struct Tm {
@@ -78,12 +99,7 @@ int EvalElem(const CPortVfxElem& e, int frame, float out[4]) {
     if (e.color == nullptr) {
       return 0;
     }
-    CColor c;
-    e.color->GetValue(frame, c);
-    out[0] = c.GetRed();
-    out[1] = c.GetGreen();
-    out[2] = c.GetBlue();
-    out[3] = c.GetAlpha();
+    e.color->GetValueHdr(frame, out);
     return 4;
   }
   }
@@ -148,10 +164,10 @@ void PortVfxSetLaunchDir(CElementGen::CParticle& particle) {
       m > kEps ? particle.x1c_vel * (1.f / std::sqrt(m)) : CVector3f::Zero();
 }
 
-uint PortVfxEvalVsmt(const CPortVfxData& vfx, int frame, float vsmt[19]) {
+uint PortVfxEvalVsmt(const CPortVfxData& vfx, int frame, float vsmt[kPortVfxVsmtCount]) {
   uint mask = 0;
   for (const CPortVfxElem& e : vfx.vsmt) {
-    if (e.a >= 19) {
+    if (e.a >= kPortVfxVsmtCount) {
       continue;
     }
     float v[4] = {};
@@ -208,7 +224,8 @@ void CElementGen::PortVfxUpdateSystem() {
 bool PortVfxBuildDesc(const CPortVfxData& vfx, const float* vsmt, uint vsmtMask,
                       aurora::gfx::vfx::DrawDesc& desc) {
   const CPortVfxMat& mat = vfx.mat;
-  desc.features = mat.features;
+  desc.features = mat.features & ~uint32_t(aurora::gfx::vfx::AlreadyExposed);
+  desc.alreadyExposed = (mat.features & aurora::gfx::vfx::AlreadyExposed) != 0;
   desc.blend = static_cast< aurora::gfx::vfx::Blend >(mat.blend);
   desc.colorSlot = static_cast< int8_t >(mat.colorSlot);
   desc.opacitySlot = static_cast< int8_t >(mat.opacitySlot);
@@ -219,6 +236,8 @@ bool PortVfxBuildDesc(const CPortVfxData& vfx, const float* vsmt, uint vsmtMask,
   desc.paletteSlot = static_cast< int8_t >(mat.paletteSlot);
   desc.modulate = mat.modulate;
   desc.depthSoften = mat.depthSoften;
+  desc.opacityGain = (vsmtMask & (1u << kPortVfxOpacityGainTarget)) ? vsmt[kPortVfxOpacityGainTarget] : mat.opacityGain;
+  desc.opacityBias = (vsmtMask & (1u << kPortVfxOpacityBiasTarget)) ? vsmt[kPortVfxOpacityBiasTarget] : mat.opacityBias;
   desc.rampRow[0] = static_cast< int8_t >(mat.rampRow[0]);
   desc.rampRow[1] = static_cast< int8_t >(mat.rampRow[1]);
   desc.addRow = static_cast< int8_t >(mat.addRow);
@@ -355,8 +374,8 @@ void CElementGen::PortRenderParticlesVfx() {
       tm[s].f = EvalReal(r[5], partFrame, 0.f);
     }
 
-    float color[4] = {p.x34_color.GetRed() * p.xPortIten, p.x34_color.GetGreen() * p.xPortIten,
-                      p.x34_color.GetBlue() * p.xPortIten, p.x34_color.GetAlpha()};
+    float color[4] = {p.xPortColor[0] * p.xPortIten, p.xPortColor[1] * p.xPortIten,
+                      p.xPortColor[2] * p.xPortIten, p.xPortColor[3]};
     if (hasModu) {
       for (int i = 0; i < 4; ++i) {
         color[i] *= modu[i];
@@ -405,9 +424,20 @@ void CElementGen::PortRenderParticlesVfx() {
       vec[2] = n.GetY();
     }
 
-    for (int k = 0; k < 4; ++k) {
-      const float qx = kCorner[k][0];
-      const float qy = kCorner[k][1];
+    const u8 shapeId = x28_loadedGenDesc->xPortSpriteShape;
+    const PortSpriteShape* const shape = shapeId >= 3 && shapeId <= 6 ? &kShapes[shapeId - 3] : nullptr;
+    const int polyQuads = shape != nullptr ? shape->triangles : 1;
+    for (int pq = 0; pq < polyQuads * 4; ++pq) {
+      float qx, qy;
+      if (shape != nullptr) {
+        const uint8_t* tri = shape->idx + (pq / 4) * 3;
+        const float* pt = shape->pts[tri[std::min(pq % 4, 2)]];
+        qx = pt[0];
+        qy = pt[1];
+      } else {
+        qx = kCorner[pq][0];
+        qy = kCorner[pq][1];
+      }
       const float ex = pivot[0] + (pivot[2] - pivot[0]) * qx;
       const float ey = pivot[1] + (pivot[3] - pivot[1]) * qy;
       const float ox = ex * sx;
@@ -439,7 +469,7 @@ void CElementGen::PortRenderParticlesVfx() {
       v.vec[2] = vec[2];
       verts.push_back(v);
     }
-    if (verts.size() >= static_cast< size_t >(kMaxQuadsPerDraw) * 4) {
+    if (verts.size() >= static_cast< size_t >(kMaxQuadsPerDraw - 8) * 4) {
       flush();
     }
   }
@@ -471,10 +501,10 @@ void CPortVfxMeshBatch::Add(const CPortVfxData& vfx, const CTransform4f& model,
     tm[s].sinE = std::sin(e);
     tm[s].f = EvalReal(r[5], partFrame, 0.f);
   }
-  const float color[4] = {p.x34_color.GetRed() * p.xPortIten * modulate.GetRed(),
-                          p.x34_color.GetGreen() * p.xPortIten * modulate.GetGreen(),
-                          p.x34_color.GetBlue() * p.xPortIten * modulate.GetBlue(),
-                          p.x34_color.GetAlpha() * modulate.GetAlpha()};
+  const float color[4] = {p.xPortColor[0] * p.xPortIten * modulate.GetRed(),
+                          p.xPortColor[1] * p.xPortIten * modulate.GetGreen(),
+                          p.xPortColor[2] * p.xPortIten * modulate.GetBlue(),
+                          p.xPortColor[3] * modulate.GetAlpha()};
 
   // The vertices once, in world space; the triangles index them. One scratch buffer serves every
   // particle (the render thread is the only caller), so a frame allocates nothing per particle.
@@ -523,10 +553,16 @@ void CElementGen::PortRenderMeshesVfx(CPortVfxMeshBatch& batch) {
     batch.verts.clear();
     return;
   }
+  // This is a model draw, so a material whose mesh permutation was read against the shader takes its
+  // fade from the view-space normal (aurora's OpacityFresnel); every other material keeps the form
+  // its VMAT carries. port_vfx_opacity.h has the formula and why it is pinned to one recipe.
+  PortVfxSelectModelOpacity(x28_loadedGenDesc->xPortVfx->mat.features, desc);
   // The vertices are in world space already.
   CGraphics::SetModelMatrix(CTransform4f::Identity());
   CGraphics::SetCullMode(kCM_None);
-  CGraphics::SetDepthWriteMode(x26c_28_zTest, kE_LEqual, x26c_26_AAPH ? false : x26c_27_ZBUF);
+  const aurora::gfx::vfx::DepthSelection depth =
+      aurora::gfx::vfx::select_model_depth(desc.blend, x26c_28_zTest, x26c_26_AAPH, x26c_27_ZBUF);
+  CGraphics::SetDepthWriteMode(depth.compare, kE_LEqual, depth.write);
   PortFx::gTriangles += static_cast< uint32_t >(batch.verts.size() / 3);
   ++PortFx::gDraws;
   aurora::gfx::vfx::draw_triangles(desc, batch.verts.data(), static_cast< uint32_t >(batch.verts.size() / 3));

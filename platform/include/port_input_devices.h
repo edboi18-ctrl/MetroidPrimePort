@@ -12,6 +12,8 @@
 #include <dolphin/pad.h>
 
 #include <memory>
+#include <string>
+#include <vector>
 
 namespace PortInputDevices {
 
@@ -31,14 +33,16 @@ constexpr int kTouchMapTap = 34; // one poll of Z after a minimap tap
 
 struct SPoll {
   PADStatus status{};
-  bool beamShift = false; // the beam shift binding is held
-  bool mouseL = false;    // a gameplay mouse button presses L
 };
 
 // One poll of port 0: reads the devices, rebuilds the profile when the settings
 // changed, runs the engine and synthesises the status. mouseHeld: the held mouse
 // buttons (SDL mask order); focused: the window takes input.
 SPoll Poll(unsigned mouseHeld, bool focused);
+
+// Runs the port's own actions (port menu, save/load state, screenshot, Original
+// experience) from their bindings; called once a frame from the overlay update.
+void PollPortActions();
 
 // The user's bindings from <user>/controls.toml (port_input_bindings.h), loaded on
 // first use and reloaded when the file changes (checked at most once a second). A
@@ -67,9 +71,30 @@ bool ActivePad(std::string& guid, std::string& type, std::string& name);
 // deadzones) and SDL's mouse buttons (code kMouseKeySlot..).
 void ReadRaw(PortInput::RawState& raw);
 
+// A connected controller (virtual touch pads excluded): SDL GUID, gamepad type
+// string and name.
+struct SPadInfo {
+  std::string guid;
+  std::string type;
+  std::string name;
+};
+std::vector<SPadInfo> ConnectedPads();
+// The profile the saved controls describe without the user's bindings: what each
+// action inherits on the Remap page.
+void BuildBaseProfile(PortInput::Profile& out);
+
 // The profile the saved controls describe, with the user's bindings on top
 // (exposed for tests and the remap UI).
 void BuildProfile(PortInput::Profile& out);
+// For the button prompts: the single input of the last polled profile (user
+// bindings, and the "Menus and map" rows in menus and the map while "Separate
+// menu buttons" applies) that presses a PAD button or pushes a PAD axis from
+// `family`, preferring one that applies in the current context. False when none.
+bool PromptButtonInput(unsigned padButton, PortInput::Family family, PortInput::Input& out);
+bool PromptAxisInput(PADAxis axis, PortInput::Family family, PortInput::Input& out);
+// A pad input as the native button the prompts name (an SDL_GamepadButton or
+// PAD_NATIVE_BUTTON_TRIGGER_*), or PAD_NATIVE_BUTTON_INVALID.
+u32 PromptNativeButton(const PortInput::Input& in);
 // The PAD status an engine output describes, as Aurora's own mapping would.
 PADStatus Synthesize(const PortInput::Output& out);
 

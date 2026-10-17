@@ -5,6 +5,10 @@
 #include "Kyoto/CSimplePool.hpp"
 #include "Kyoto/Graphics/CGraphics.hpp"
 
+#ifdef TARGET_PC
+#include "port_pointer.h"
+#endif
+
 #if VERSION >= VERSION_GM8P_00 && VERSION != VERSION_GM8E_02
 bool CGuiTextPane::sDrawPaneRects = false;
 #elif defined(TARGET_PC)
@@ -93,6 +97,11 @@ void CGuiTextPane::Draw(const CGuiWidgetDrawParms& parms) const {
   }
 
   const float* vtxBuf = GetVtxBuf();
+#ifdef TARGET_PC
+  // Port: the pane's rect, for mouse and touch menus (the glyphs follow).
+  PortGuiHit::RecordPoints(this, GetWorldTransform() * CTransform4f::Translate(GetScaleCenter()), vtxBuf,
+                           4);
+#endif
   CVector2f dimensions = GetDimensions();
   float width = GetTextSupport().GetTextBoundingWidth() == 0
                     ? 0.f
@@ -105,6 +114,20 @@ void CGuiTextPane::Draw(const CGuiWidgetDrawParms& parms) const {
                                                GetPivot() + mPortDrawOffset) *
                        CTransform4f::Scale(width, 1.f, height);
   CTransform4f model = GetWorldTransform() * local;
+#ifdef TARGET_PC
+  // Text often runs past the pane: the glyphs are hit too (text y runs down, z up).
+  {
+    const rstl::pair< CVector2i, CVector2i >& bounds = xd4_textSupport.GetBounds();
+    if (bounds.first.GetX() < bounds.second.GetX() && bounds.first.GetY() < bounds.second.GetY()) {
+      const float x0 = static_cast< float >(bounds.first.GetX());
+      const float y0 = static_cast< float >(bounds.first.GetY());
+      const float x1 = static_cast< float >(bounds.second.GetX());
+      const float y1 = static_cast< float >(bounds.second.GetY());
+      const float glyphs[12] = {x0, 0.f, -y0, x1, 0.f, -y0, x0, 0.f, -y1, x1, 0.f, -y1};
+      PortGuiHit::RecordPoints(this, model, glyphs, 4);
+    }
+  }
+#endif
 #if VERSION >= VERSION_GM8P_00 && VERSION != VERSION_GM8E_02
   CColor geomCol = GetModifiedColor().WithAlphaModulatedBy(parms.GetAlpha());
   CGraphics::SetDepthWriteMode(GetIsAlwaysDepthRead(), kE_LEqual, GetIsAlwaysDepthWrite());

@@ -1,17 +1,13 @@
 #include "port_input_settings.h"
+#include "port_test.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <sstream>
 #include <string>
 
 namespace {
-void Check(bool condition, const char* what) {
-  if (!condition) {
-    std::fprintf(stderr, "input settings regression failed: %s\n", what);
-    std::abort();
-  }
-}
 
 std::string Text() {
   std::ostringstream out;
@@ -25,114 +21,170 @@ int main() {
 
   // Defaults, and the file they write.
   const std::string defaults = Text();
-  Check(!Get().mouseAim && !Get().twinStick && Get().remasteredMovement, "defaults");
-  Check(Get().shiftBindings[0] == kScancodeLShift && Get().shiftBindings[1] == -1, "default shift");
-  Check(defaults.rfind("mouse_aim=0\ntwin_stick=0\n", 0) == 0, "first lines");
-  Check(defaults.find("pad_alt=-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1\n") != std::string::npos, "pad_alt");
-  Check(defaults.find("mouse_left=") != std::string::npos && defaults.find("mouse_x2=") != std::string::npos,
-        "mouse action keys");
+  REQUIRE_MSG(!Get().mouseAim && !Get().twinStick && Get().remasteredMovement, "defaults");
+  REQUIRE_MSG(Get().shiftBindings[0] == kScancodeLShift && Get().shiftBindings[1] == -1, "default shift");
+  REQUIRE_MSG(defaults.rfind("mouse_aim=0\ntwin_stick=0\n", 0) == 0, "first lines");
+  REQUIRE_MSG(defaults.find("pad_alt=-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1\n") != std::string::npos, "pad_alt");
+  REQUIRE_MSG(defaults.find("mouse_left=") != std::string::npos && defaults.find("mouse_x2=") != std::string::npos,
+              "mouse action keys");
 
   // Keys that aren't input keys are left to the caller.
-  Check(!ApplySetting("fov", "90") && !ApplySetting("game_options", "00") && !ApplySetting("nonsense", "1"),
-        "foreign keys");
+  REQUIRE_MSG(!ApplySetting("fov", "90") && !ApplySetting("game_options", "00") && !ApplySetting("nonsense", "1"),
+              "foreign keys");
 
   // Toggles, ranges and rejects.
-  Check(ApplySetting("mouse_aim", "1") && Get().mouseAim, "mouse_aim");
-  Check(ApplySetting("stick_aim_rate", "2000") && Get().stickAimRate == 2000.f, "stick_aim_rate");
+  REQUIRE_MSG(ApplySetting("mouse_aim", "1") && Get().mouseAim, "mouse_aim");
+  REQUIRE_MSG(ApplySetting("stick_aim_rate", "2000") && Get().stickAimRate == 2000.f, "stick_aim_rate");
   ApplySetting("stick_aim_rate", "10");
-  Check(Get().stickAimRate == 2000.f, "stick_aim_rate below range");
+  REQUIRE_MSG(Get().stickAimRate == 2000.f, "stick_aim_rate below range");
   ApplySetting("stick_aim_rate", "20000");
-  Check(Get().stickAimRate == 2000.f, "stick_aim_rate above range");
+  REQUIRE_MSG(Get().stickAimRate == 2000.f, "stick_aim_rate above range");
+  REQUIRE_MSG(ApplySetting("stick_aim_split", "1") && Get().stickAimSplit, "stick_aim_split");
+  REQUIRE_MSG(ApplySetting("stick_aim_rate_y", "450") && Get().stickAimRateY == 450.f, "stick_aim_rate_y");
+  ApplySetting("stick_aim_rate_y", "20000");
+  REQUIRE_MSG(Get().stickAimRateY == 450.f, "stick_aim_rate_y above range");
+  ApplySetting("stick_aim_split", "0");
   ApplySetting("crosshair_size", "80");
-  Check(Get().crosshairSize == 80, "crosshair_size");
+  REQUIRE_MSG(Get().crosshairSize == 80, "crosshair_size");
   ApplySetting("crosshair_size", "5");
-  Check(Get().crosshairSize == 80, "crosshair_size range");
+  REQUIRE_MSG(Get().crosshairSize == 80, "crosshair_size range");
   ApplySetting("touch_side_margin", "40");
-  Check(Get().touchSideMargin.load() == 40.f, "touch_side_margin");
+  REQUIRE_MSG(Get().touchSideMargin.load() == 40.f, "touch_side_margin");
   ApplySetting("touch_side_margin", "400");
-  Check(Get().touchSideMargin.load() == 40.f, "touch_side_margin range");
+  REQUIRE_MSG(Get().touchSideMargin.load() == 40.f, "touch_side_margin range");
+  ApplySetting("touch_opacity", "50");
+  REQUIRE_MSG(Get().touchOpacity.load() == 50.f, "touch_opacity");
+  ApplySetting("touch_opacity", "400");
+  REQUIRE_MSG(Get().touchOpacity.load() == 50.f, "touch_opacity above range");
+  ApplySetting("touch_opacity", "0");
+  REQUIRE_MSG(Get().touchOpacity.load() == 50.f, "touch_opacity below range");
   ApplySetting("gyro_mode", "2");
   ApplySetting("gyro_mode", "3");
-  Check(Get().gyroMode == 2, "gyro_mode range");
+  ApplySetting("gyro_mode", "4");
+  REQUIRE_MSG(Get().gyroMode == 4, "gyro toggle mode");
+  ApplySetting("gyro_mode", "5");
+  REQUIRE_MSG(Get().gyroMode == 4, "gyro_mode range");
+  REQUIRE_MSG(Get().gyroSensitivity == 2.f, "gyro_sensitivity default");
+  ApplySetting("gyro_sensitivity", "1.5");
+  ApplySetting("gyro_sensitivity", "50");
+  REQUIRE_MSG(Get().gyroSensitivity == 1.5f, "gyro_sensitivity range");
+  PostLoad();
+  // An old gyro_rate (pixels per rad/s at mouse_sensitivity rad per pixel) becomes
+  // the same turn on the natural scale, unless gyro_sensitivity is also there.
+  ApplySetting("mouse_sensitivity", "0.0035");
+  ApplySetting("gyro_rate", "600");
+  PostLoad();
+  REQUIRE_MSG(std::fabs(Get().gyroSensitivity - 2.1f) < 1e-4f, "gyro_rate migrates");
+  ApplySetting("gyro_rate", "600");
+  ApplySetting("gyro_sensitivity", "1.5");
+  PostLoad();
+  REQUIRE_MSG(Get().gyroSensitivity == 1.5f, "gyro_sensitivity wins over gyro_rate");
+  REQUIRE_MSG(Text().find("gyro_rate") == std::string::npos, "gyro_rate not written");
+  REQUIRE_MSG(Get().gyroSpace == 1 && Get().gyroAutoCalibrate, "gyro space/calibration defaults");
+  ApplySetting("gyro_space", "2");
+  ApplySetting("gyro_space", "5");
+  ApplySetting("gyro_auto_calibrate", "0");
+  REQUIRE_MSG(Get().gyroSpace == 2 && !Get().gyroAutoCalibrate, "gyro space/calibration");
+  REQUIRE_MSG(Text().find("gyro_space=2\n") != std::string::npos &&
+                  Text().find("gyro_auto_calibrate=0\n") != std::string::npos,
+              "gyro space/calibration written");
+  REQUIRE_MSG(Get().gyroSmoothing == 0.f && Get().gyroTightening == 0.f, "gyro filter defaults off");
+  ApplySetting("gyro_smoothing", "5");
+  ApplySetting("gyro_tightening", "3");
+  ApplySetting("gyro_tightening", "51");
+  REQUIRE_MSG(Get().gyroSmoothing == 5.f && Get().gyroTightening == 3.f, "gyro filter");
+  REQUIRE_MSG(Text().find("gyro_smoothing=5\n") != std::string::npos &&
+                  Text().find("gyro_tightening=3\n") != std::string::npos,
+              "gyro filter written");
+  REQUIRE_MSG(Get().gyroCursorAngle == PortInput::kGyroCursorAngleDefault && !Get().gyroCursorCamera,
+              "gyro cursor defaults");
+  ApplySetting("gyro_cursor_angle", "60");
+  ApplySetting("gyro_cursor_angle", "200");
+  ApplySetting("gyro_cursor_camera", "1");
+  REQUIRE_MSG(Get().gyroCursorAngle == 60.f && Get().gyroCursorCamera, "gyro cursor");
+  REQUIRE_MSG(Text().find("gyro_cursor_angle=60\n") != std::string::npos &&
+                  Text().find("gyro_cursor_camera=1\n") != std::string::npos,
+              "gyro cursor written");
   ApplySetting("shift_key_alt", "44");
   ApplySetting("turbo_pad", "3");
-  Check(Get().shiftBindings[1] == 44 && Get().turboBindings[2] == 3, "bindings");
+  REQUIRE_MSG(Get().shiftBindings[1] == 44 && Get().turboBindings[2] == 3, "bindings");
   ApplySetting("mouse_right", "lock_on");
   const std::string before = Text();
   ApplySetting("mouse_right", "not_an_action");
-  Check(Text() == before, "unknown mouse action ignored");
+  REQUIRE_MSG(Text() == before, "unknown mouse action ignored");
 
   // Dead Space Prime's Stasis: off by default, its two numbers held to their ranges.
-  Check(!Get().stasis && Get().stasisSlow == kStasisSlowDefault &&
-            Get().stasisDuration == kStasisDurationDefault,
-        "stasis defaults");
-  Check(defaults.find("stasis=0\nstasis_slow=0.15\nstasis_duration=5\n") != std::string::npos,
-        "stasis lines");
-  Check(ApplySetting("stasis", "1") && Get().stasis, "stasis");
-  Check(ApplySetting("stasis_slow", "0.25") && Get().stasisSlow == 0.25f, "stasis_slow");
+  REQUIRE_MSG(!Get().stasis && Get().stasisSlow == kStasisSlowDefault &&
+                  Get().stasisDuration == kStasisDurationDefault,
+              "stasis defaults");
+  REQUIRE_MSG(defaults.find("stasis=0\nstasis_slow=0.15\nstasis_duration=5\n") != std::string::npos,
+              "stasis lines");
+  REQUIRE_MSG(ApplySetting("stasis", "1") && Get().stasis, "stasis");
+  REQUIRE_MSG(ApplySetting("stasis_slow", "0.25") && Get().stasisSlow == 0.25f, "stasis_slow");
   ApplySetting("stasis_slow", "0.9");
-  Check(Get().stasisSlow == 0.25f, "stasis_slow above range");
+  REQUIRE_MSG(Get().stasisSlow == 0.25f, "stasis_slow above range");
   ApplySetting("stasis_slow", "0");
-  Check(Get().stasisSlow == 0.25f, "stasis_slow below range");
-  Check(ApplySetting("stasis_duration", "8") && Get().stasisDuration == 8.f, "stasis_duration");
+  REQUIRE_MSG(Get().stasisSlow == 0.25f, "stasis_slow below range");
+  REQUIRE_MSG(ApplySetting("stasis_duration", "8") && Get().stasisDuration == 8.f,
+              "stasis_duration");
   ApplySetting("stasis_duration", "0.5");
-  Check(Get().stasisDuration == 8.f, "stasis_duration below range");
+  REQUIRE_MSG(Get().stasisDuration == 8.f, "stasis_duration below range");
   ApplySetting("stasis_duration", "nan");
-  Check(Get().stasisDuration == 8.f, "stasis_duration not a number");
+  REQUIRE_MSG(Get().stasisDuration == 8.f, "stasis_duration not a number");
 
   // Dead Space Prime's manual aim and double-tap dash: off by default, saved after Stasis.
-  Check(!Get().manualAim && !Get().doubleTapDash, "manual aim and dash defaults");
-  Check(defaults.find("stasis_duration=5\nmanual_aim=0\ndouble_tap_dash=0\n") !=
-            std::string::npos,
-        "manual aim and dash lines");
-  Check(ApplySetting("manual_aim", "1") && Get().manualAim, "manual_aim");
-  Check(ApplySetting("double_tap_dash", "1") && Get().doubleTapDash, "double_tap_dash");
-  Check(ApplySetting("manual_aim", "0") && !Get().manualAim, "manual_aim off");
+  REQUIRE_MSG(!Get().manualAim && !Get().doubleTapDash, "manual aim and dash defaults");
+  REQUIRE_MSG(defaults.find("stasis_duration=5\nmanual_aim=0\ndouble_tap_dash=0\n") !=
+                  std::string::npos,
+              "manual aim and dash lines");
+  REQUIRE_MSG(ApplySetting("manual_aim", "1") && Get().manualAim, "manual_aim");
+  REQUIRE_MSG(ApplySetting("double_tap_dash", "1") && Get().doubleTapDash, "double_tap_dash");
+  REQUIRE_MSG(ApplySetting("manual_aim", "0") && !Get().manualAim, "manual_aim off");
 
   // Dead Space Prime's walk and dash speeds and gun sway: a faster walk, a 130% dash and a 3
   // degree sway by default, each held to its range.
-  Check(Get().walkSpeed == kWalkSpeedDefault && Get().dashSpeed == kDashSpeedDefault &&
-            Get().gunSway == kGunSwayDefault,
-        "walk, dash and sway defaults");
-  Check(defaults.find("double_tap_dash=0\nwalk_speed=1.15\ndash_speed=1.3\ngun_sway=3\n") !=
-            std::string::npos,
-        "walk, dash and sway lines");
-  Check(ApplySetting("walk_speed", "1.3") && Get().walkSpeed == 1.3f, "walk_speed");
+  REQUIRE_MSG(Get().walkSpeed == kWalkSpeedDefault && Get().dashSpeed == kDashSpeedDefault &&
+                  Get().gunSway == kGunSwayDefault,
+              "walk, dash and sway defaults");
+  REQUIRE_MSG(defaults.find("double_tap_dash=0\nwalk_speed=1.15\ndash_speed=1.3\ngun_sway=3\n") !=
+                  std::string::npos,
+              "walk, dash and sway lines");
+  REQUIRE_MSG(ApplySetting("walk_speed", "1.3") && Get().walkSpeed == 1.3f, "walk_speed");
   ApplySetting("walk_speed", "0.5");
-  Check(Get().walkSpeed == 1.3f, "walk_speed below range");
+  REQUIRE_MSG(Get().walkSpeed == 1.3f, "walk_speed below range");
   ApplySetting("walk_speed", "inf");
-  Check(Get().walkSpeed == 1.3f, "walk_speed not finite");
-  Check(ApplySetting("dash_speed", "1.25") && Get().dashSpeed == 1.25f, "dash_speed");
+  REQUIRE_MSG(Get().walkSpeed == 1.3f, "walk_speed not finite");
+  REQUIRE_MSG(ApplySetting("dash_speed", "1.25") && Get().dashSpeed == 1.25f, "dash_speed");
   ApplySetting("dash_speed", "2");
-  Check(Get().dashSpeed == 1.25f, "dash_speed above range");
-  Check(ApplySetting("gun_sway", "0") && Get().gunSway == 0.f, "gun_sway off");
-  Check(ApplySetting("gun_sway", "5.5") && Get().gunSway == 5.5f, "gun_sway");
+  REQUIRE_MSG(Get().dashSpeed == 1.25f, "dash_speed above range");
+  REQUIRE_MSG(ApplySetting("gun_sway", "0") && Get().gunSway == 0.f, "gun_sway off");
+  REQUIRE_MSG(ApplySetting("gun_sway", "5.5") && Get().gunSway == 5.5f, "gun_sway");
   ApplySetting("gun_sway", "11");
-  Check(Get().gunSway == 5.5f, "gun_sway above range");
+  REQUIRE_MSG(Get().gunSway == 5.5f, "gun_sway above range");
   ApplySetting("gun_sway", "-1");
-  Check(Get().gunSway == 5.5f, "gun_sway below range");
+  REQUIRE_MSG(Get().gunSway == 5.5f, "gun_sway below range");
 
   // Dead Space Prime's faster Power Beam: 150% by default, held to 100-300%.
-  Check(Get().powerBeamSpeed == kPowerBeamSpeedDefault, "power beam speed default");
-  Check(defaults.find("gun_sway=3\npower_beam_speed=1.5\n") != std::string::npos,
-        "power beam speed line");
-  Check(ApplySetting("power_beam_speed", "2.25") && Get().powerBeamSpeed == 2.25f,
-        "power_beam_speed");
+  REQUIRE_MSG(Get().powerBeamSpeed == kPowerBeamSpeedDefault, "power beam speed default");
+  REQUIRE_MSG(defaults.find("gun_sway=3\npower_beam_speed=1.5\n") != std::string::npos,
+              "power beam speed line");
+  REQUIRE_MSG(ApplySetting("power_beam_speed", "2.25") && Get().powerBeamSpeed == 2.25f,
+              "power_beam_speed");
   ApplySetting("power_beam_speed", "0.5");
-  Check(Get().powerBeamSpeed == 2.25f, "power_beam_speed below range");
+  REQUIRE_MSG(Get().powerBeamSpeed == 2.25f, "power_beam_speed below range");
   ApplySetting("power_beam_speed", "4");
-  Check(Get().powerBeamSpeed == 2.25f, "power_beam_speed above range");
+  REQUIRE_MSG(Get().powerBeamSpeed == 2.25f, "power_beam_speed above range");
 
   // Touch layout.
-  Check(ApplySetting("touch_layout", "1:0.5,0.5,1") && TouchLayout() == "1:0.5,0.5,1", "touch_layout");
-  Check(!SetTouchLayout(std::string(kTouchLayoutMaxLen + 1, 'x')), "touch layout length");
-  Check(TouchLayout() == "1:0.5,0.5,1", "touch layout kept");
+  REQUIRE_MSG(ApplySetting("touch_layout", "1:0.5,0.5,1") && TouchLayout() == "1:0.5,0.5,1", "touch_layout");
+  REQUIRE_MSG(!SetTouchLayout(std::string(kTouchLayoutMaxLen + 1, 'x')), "touch layout length");
+  REQUIRE_MSG(TouchLayout() == "1:0.5,0.5,1", "touch layout kept");
 
   // Classic GameCube wins over twin stick on load.
   ApplySetting("touch_twin_stick", "1");
   ApplySetting("touch_classic_gc", "1");
   PostLoad();
-  Check(Get().touchClassic && !Get().touchTwinStick, "classic wins");
+  REQUIRE_MSG(Get().touchClassic && !Get().touchTwinStick, "classic wins");
 
   // Write then read back reproduces the same text.
   const std::string saved = Text();
@@ -142,15 +194,15 @@ int main() {
   ApplySetting("shift_key", "5");
   ApplySetting("touch_classic_gc", "0");
   SetTouchLayout("");
-  Check(Text() != saved, "state changed before the read-back");
+  REQUIRE_MSG(Text() != saved, "state changed before the read-back");
   std::istringstream in(saved);
   for (std::string line; std::getline(in, line);) {
     const size_t eq = line.find('=');
-    Check(eq != std::string::npos, "line has =");
-    Check(ApplySetting(line.substr(0, eq), line.substr(eq + 1)) || line.compare(0, 12, "touch_layout") == 0,
-          "every written key is read");
+    REQUIRE_MSG(eq != std::string::npos, "line has =");
+    REQUIRE_MSG(ApplySetting(line.substr(0, eq), line.substr(eq + 1)) || line.compare(0, 12, "touch_layout") == 0,
+                "every written key is read");
   }
   PostLoad();
-  Check(Text() == saved, "round trip");
+  REQUIRE_MSG(Text() == saved, "round trip");
   return 0;
 }

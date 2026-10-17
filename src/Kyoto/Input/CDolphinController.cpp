@@ -1,6 +1,7 @@
 #include "Kyoto/Input/CDolphinController.hpp"
 #include "port_console.h"
 #include "port_debug.h"
+#include "port_freecam.h"
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_mouse.h>
@@ -27,26 +28,14 @@ static_assert(PortInputMap::kPadA == PAD_BUTTON_A && PortInputMap::kPadL == PAD_
                   PortInputMap::kPadStart == PAD_BUTTON_START && PortInputMap::kPadZ == PAD_TRIGGER_Z,
               "PortInputMap's pad bits are dolphin/pad.h's");
 
-// The D-pad picks beams while the shift is held (PortInputMap::ShiftDPadToCStick).
-void ApplyBeamShift(PADStatus& status) {
-  unsigned buttons = status.button;
-  int x = status.substickX;
-  int y = status.substickY;
-  PortInputMap::ShiftDPadToCStick(buttons, x, y);
-  status.button = static_cast< u16 >(buttons);
-  status.substickX = static_cast< s8 >(x);
-  status.substickY = static_cast< s8 >(y);
-}
-
 bool KeyHeld(const bool* keys, int numKeys, s32 scancode) {
   return keys != nullptr && scancode > PAD_KEY_INVALID && scancode < numKeys && keys[scancode];
 }
 
 // Port 0's keyboard keys held on a C-stick direction (the keyboard presets pick
-// beams that way) and on L.
+// beams that way).
 struct SKeyboardPadHeld {
   bool cStick = false;
-  bool triggerL = false;
 };
 
 SKeyboardPadHeld KeyboardPadHeld() {
@@ -60,15 +49,6 @@ SKeyboardPadHeld KeyboardPadHeld() {
         if (!KeyHeld(keys, numKeys, axes[i].scancode)) continue;
         if (axes[i].padAxis >= PAD_AXIS_RIGHT_X_POS && axes[i].padAxis <= PAD_AXIS_RIGHT_Y_NEG) {
           held.cStick = true;
-        } else if (axes[i].padAxis == PAD_AXIS_TRIGGER_L) {
-          held.triggerL = true;
-        }
-      }
-    }
-    if (const PADKeyButtonBinding* buttons = PADGetKeyButtonBindingsSlot(PAD_CHAN0, slot, &count)) {
-      for (u32 i = 0; i < count; ++i) {
-        if (buttons[i].padButton == PAD_TRIGGER_L && KeyHeld(keys, numKeys, buttons[i].scancode)) {
-          held.triggerL = true;
         }
       }
     }
@@ -135,8 +115,6 @@ void CDolphinController::ReadDevices() {
   PADStatus status[4]{};
   PADRead(status);
   PADClamp(status);
-  const bool mouseL = devices.mouseL;
-  const bool shiftHeld = devices.beamShift;
   for (int i = 0; i < 4; ++i) {
     // One disconnected port must not prevent the other ports updating. Clear
     // stale held buttons on disconnect and keep UI interaction out of gameplay.
@@ -147,12 +125,13 @@ void CDolphinController::ReadDevices() {
     }
   }
   memcpy(x4_status, status, sizeof(status));
-  PortDebug::SetBeamShiftHeld(shiftHeld && inputFocused && !PortDebug::Visible());
 
   // Twin-stick: feed the right stick into the first-person aim and consume it,
   // so it does not also drive the game's own free-look. The map screen keeps
-  // the C-stick: it pans the map there.
-  if (PortDebug::TwinStick() && !PortDebug::MapScreenOpen() && x4_status[0].err == PAD_ERR_NONE) {
+  // the C-stick: it pans the map there. So does the free camera (photo mode):
+  // it turns with it.
+  if (PortDebug::TwinStick() && !PortDebug::MapScreenOpen() && !PortFreeCam::Active() &&
+      x4_status[0].err == PAD_ERR_NONE) {
     // Under mouse aim the mouse aims, so a keyboard key on the C-stick picks a
     // beam, as without twin-stick (the mouse-and-keyboard preset's 1-4), and is
     // left to the game. Without it the keys aim (the classic preset's IJKL).
@@ -168,35 +147,8 @@ void CDolphinController::ReadDevices() {
       x4_status[0].substickX = 0;
       x4_status[0].substickY = 0;
     }
-
-    // Beams are selected from the C-stick, which twin-stick just consumed, so
-    // under twin-stick left shift (and the touch overlay's held Beam button) is a
-    // beam shift too, and so are the L trigger and LB unless a pad button is
-    // bound as the shift (Remastered's layout locks on with L and jumps with LB).
-    // LB bound to another button (e.g. a visor's D-pad direction) is that button
-    // only: held as the shift, it would turn its own D-pad press into a beam.
-    // Touch has its own shift button, so there L and LB stay lock-on and jump.
-    // Under mouse aim an L from a key or mouse button is lock-on only: the
-    // keyboard has its own beam keys, and the arrows stay the D-pad while locked on.
-    const bool* keys = SDL_GetKeyboardState(nullptr);
-    SDL_Gamepad* pad = PADGetSDLGamepadForIndex(0);
-    const bool padShiftBound = PortDebug::ShiftBinding(2) >= 0 || PortDebug::TouchActive();
-    const bool lFromPad =
-        !keyboard.triggerL && !mouseL && (x4_status[0].button & PAD_TRIGGER_L) != 0;
-    const bool lbShift = pad != nullptr && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER) &&
-                         !PortControls::PadButtonBoundBesidesL(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
-    const bool beamModifier = shiftHeld || (keys != nullptr && keys[SDL_SCANCODE_LSHIFT] != 0) ||
-                              (!padShiftBound && (lFromPad || lbShift));
-    if (beamModifier) {
-      ApplyBeamShift(x4_status[0]);
-    }
   } else {
     PortDebug::SetTwinStickRightY(0.f);
-    // Without twin-stick the C-stick still picks beams; the shift gives the
-    // D-pad the same job, for a keyboard or a pad whose C-stick is awkward.
-    if (shiftHeld && x4_status[0].err == PAD_ERR_NONE) {
-      ApplyBeamShift(x4_status[0]);
-    }
   }
 
   // Start+Back is the debug overlay chord; do not also pause the game with it.

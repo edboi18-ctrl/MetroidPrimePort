@@ -423,8 +423,7 @@ from what retail's elements compute (`CVEAngleCone`, `CVEAngleSphere`,
 
 ## In the import
 
-The import menu's "Particle effects (experimental)" checkbox, or
-`MP_REMASTERED_EFFECTS=1` (which wins when set), adds an effect step to the Remastered import
+The Remastered import has an effect step, on unless `MP_REMASTERED_EFFECTS=0`
 (`port_remastered_effect_import.cpp`, called from `port_remastered_import.cpp`
 after the models). Every effect whose id was carried over from retail and is
 on the disc is converted and written as `<ID>.PART`, replacing the disc's.
@@ -448,7 +447,7 @@ except where Remastered draws it elsewhere (`kStubReplaces`): the Artifact
 Temple laser hit 53861B29 spawns the same five PARTs as Ridley's 2D16014C,
 which Remastered's c3a53327 now carries, so its stub replaces it.
 Effects with no retail id (most world effects) are not used yet: nothing on
-the disc names them. The step is off by default. Like the rest of the import, the files take effect
+the disc names them. Like the rest of the import, the files take effect
 at the next mods reload (`mods reload` or the debug menu), no restart needed.
 
 ## HDR dynamic lights

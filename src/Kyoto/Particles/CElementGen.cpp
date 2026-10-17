@@ -33,6 +33,8 @@
 #include "dolphin/gx/GXGeometry.h"
 #include "dolphin/gx/GXTev.h"
 
+#include <cmath>
+
 #ifdef TARGET_PC
 #include "MetroidPrime/CActor.hpp"
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
@@ -174,8 +176,17 @@ CElementGen::CElementGen(TToken< CGenDescription > gen, EModelOrientationType or
 , xPortGlobalGeneration(0)
 , xPortPrevGlobalTranslation(CVector3f::Zero())
 , xPortPresenting(false)
+, xPortSpawnTranslation(CVector3f::Zero())
+, xPortPrevSpawnTranslation(CVector3f::Zero())
+, xPortSpawnGeneration(0)
+, xPortPrevSpawnGeneration(0)
+, xPortLineShiftSet(false)
 , xPortVsmt{}
 , xPortVsmtMask(0)
+, xPortNestedHdrColor{1.f, 1.f, 1.f, 1.f}
+, xPortNestedHdrInnerRadius(0.f)
+, xPortNestedHdrOuterRadius(0.f)
+, xPortNestedHdrRadiiValid(false)
 #endif
 {
 #ifdef TARGET_PC
@@ -448,6 +459,17 @@ void CElementGen::SetGlobalTranslation(const CVector3f& translation) {
   }
 }
 
+#ifdef TARGET_PC
+void CElementGen::PortGlobalIsPresented() {
+  xPortPrevGlobalTranslation = xe8_globalTranslation;
+  xPortGlobalGeneration = CActor::PortTickGeneration();
+  for (AUTO(it, x290_activePartChildren.begin()); it != x290_activePartChildren.end(); ++it) {
+    if ((*it)->Get4CharId() == 'PART')
+      static_cast< CElementGen* >(*it)->PortGlobalIsPresented();
+  }
+}
+#endif
+
 void CElementGen::SetModulationColor(const CColor& col) {
   x338_moduColor = col;
   for (AUTO(it, x290_activePartChildren.begin()); it != x290_activePartChildren.end(); ++it) {
@@ -648,6 +670,12 @@ bool CElementGen::InternalUpdate(double dt) {
   } else if (frameUpdateCount != 0 || x80_timeDeltaScale != 1.0f) {
     xPortStepGeneration = 0;
   }
+  if (frameUpdateCount != 0) {
+    xPortPrevSpawnTranslation = xPortSpawnTranslation;
+    xPortPrevSpawnGeneration = xPortSpawnGeneration;
+    xPortSpawnTranslation = xdc_translation;
+    xPortSpawnGeneration = frameUpdateCount == 1 ? xPortStepGeneration : 0;
+  }
 #endif
 
   BuildParticleSystemBounds();
@@ -664,6 +692,9 @@ void CElementGen::UpdateLightParameters() {
   CGenDescription* desc = x28_loadedGenDesc;
   if (desc->xf0_LCLR) {
     desc->xf0_LCLR->GetValue(x74_curFrame, x30c_LCLR);
+    if (desc->xPortNestedHdrLight) {
+      desc->xf0_LCLR->GetValueHdr(x74_curFrame, xPortNestedHdrColor);
+    }
   }
   if (desc->xf4_LINT) {
     desc->xf4_LINT->GetValue(x74_curFrame, x310_LINT);
@@ -681,6 +712,16 @@ void CElementGen::UpdateLightParameters() {
   }
   if (x308_lightType != kLT_Custom && desc->xfc_LDIR) {
     desc->xfc_LDIR->GetValue(x74_curFrame, x320_LDIR);
+  }
+  xPortNestedHdrRadiiValid = false;
+  if (desc->xPortNestedHdrLight && desc->xPortNestedLightInnerRadius != nullptr &&
+      desc->xPortNestedLightOuterRadius != nullptr) {
+    desc->xPortNestedLightInnerRadius->GetValue(x74_curFrame, xPortNestedHdrInnerRadius);
+    desc->xPortNestedLightOuterRadius->GetValue(x74_curFrame, xPortNestedHdrOuterRadius);
+    xPortNestedHdrRadiiValid = std::isfinite(xPortNestedHdrInnerRadius) &&
+                               std::isfinite(xPortNestedHdrOuterRadius) &&
+                               xPortNestedHdrInnerRadius >= 0.f &&
+                               xPortNestedHdrOuterRadius > xPortNestedHdrInnerRadius;
   }
 #else
   x28_loadedGenDesc->xf0_LCLR->GetValue(x74_curFrame, x30c_LCLR);
@@ -825,6 +866,11 @@ void CElementGen::UpdateExistingParticles() {
     }
     if (CColorElement* colr = x28_loadedGenDesc->x24_COLR) {
       colr->GetValue(particleFrame, p->x34_color);
+#ifdef TARGET_PC
+      if (x28_loadedGenDesc->xPortVfx) {
+        colr->GetValueHdr(particleFrame, p->xPortColor);
+      }
+#endif
     }
 #ifdef TARGET_PC
     if (x28_loadedGenDesc->xPortVfx) {
@@ -923,6 +969,11 @@ void CElementGen::CreateNewParticles(int count) {
 
     if (CColorElement* colr = x28_loadedGenDesc->x24_COLR) {
       colr->GetValue(0, particle.x34_color);
+#ifdef TARGET_PC
+      if (x28_loadedGenDesc->xPortVfx) {
+        colr->GetValueHdr(0, particle.xPortColor);
+      }
+#endif
     } else {
       particle.x34_color = CColor(0xFFFFFFFF);
     }
@@ -1109,6 +1160,26 @@ void CElementGen::UpdateChildParticleSystems(double dt) {
     x290_activePartChildren.push_back(swoosh);
   }
 
+#ifdef TARGET_PC
+  // PSWX - the further swooshes a converted Remastered effect starts
+  if (x84_prevFrame != x74_curFrame) {
+    for (auto& extra : x28_loadedGenDesc->xPortExtraSwooshes) {
+      if (x74_curFrame != extra.frame) {
+        continue;
+      }
+      CParticleSwoosh* swoosh = rs_new CParticleSwoosh(extra.swoosh, 0);
+      swoosh->SetGlobalTranslation(xe8_globalTranslation);
+      swoosh->SetGlobalScale(x100_globalScale);
+      swoosh->SetLocalScale(x16c_localScale);
+      swoosh->SetTranslation(xdc_translation + x2b0_SSPO);
+      swoosh->SetOrientation(x1d8_orientation);
+      swoosh->SetParticleEmission(x88_particleEmission);
+      x290_activePartChildren.reserve(x290_activePartChildren.size() + 1);
+      x290_activePartChildren.push_back(swoosh);
+    }
+  }
+#endif
+
   // SELC - electric child particle system
   if (x28_loadedGenDesc->xd8_SELC && x84_prevFrame != x74_curFrame && x74_curFrame == x2bc_SESD) {
     CParticleElectric* electric = rs_new CParticleElectric(*x28_loadedGenDesc->xd8_SELC);
@@ -1215,9 +1286,25 @@ void CElementGen::Render() {
 #endif
 
 #ifdef TARGET_PC
+  // A trail left by a moving local emitter (projectiles) is in world space: an
+  // enclosing actor shift would drag it back and forth every tick, so it drops
+  // that shift and moves only its newborn particles with the emitter instead.
+  const bool portLineShift = xPortLineShiftSet;
+  xPortLineShiftSet = false;
+  CVector3f portSpawnOffset;
+  const bool portSpawnMoved = !portLineShift && PortSpawnOffset(portSpawnOffset);
+  CPortRenderScopeSuspend portScopeSuspend(portSpawnMoved);
   CVector3f portSavedGlobal = xe8_globalTranslation;
   const float portSavedScale = x80_timeDeltaScale;
   xPortPresenting = PortBeginPresent(portSavedGlobal);
+  if (!xPortPresenting)
+    portScopeSuspend.Resume();
+  if (portLineShift) {
+    PortShiftNewbornsAlongLine();
+    xPortPresenting = true;
+  } else if (xPortPresenting && portSpawnMoved) {
+    PortShiftNewborns(portSpawnOffset * (x80_timeDeltaScale - 1.f));
+  }
 #endif
 
   if (x30_particles.size() > 0) {
@@ -1233,6 +1320,7 @@ void CElementGen::Render() {
 
 #ifdef TARGET_PC
   if (xPortPresenting) {
+    PortRestoreNewborns();
     xe8_globalTranslation = portSavedGlobal;
     x80_timeDeltaScale = portSavedScale;
     xPortPresenting = false;
@@ -1243,33 +1331,8 @@ void CElementGen::Render() {
 }
 
 #ifdef TARGET_PC
-// Draws the system between its last two tick states when uncapped. The
-// retail sub-frame path (x80_timeDeltaScale < 1) already draws particles
-// between their previous and current positions; this feeds it the
-// presentation factor, and blends the system's global translation. Systems
-// drawn inside a shifted actor draw follow the actor instead.
-bool CElementGen::PortBeginPresent(CVector3f& savedGlobal) {
-  savedGlobal = xe8_globalTranslation;
-  const float t = CCameraManager::GetPresentationInterpolation();
-  if (t < 0.f || t >= 1.f || !PortDebug::ParticleInterpolation() ||
-      CActor::PortRenderScopeActive())
-    return false;
-  const uint gen = CActor::PortTickGeneration();
-  bool presenting = false;
-  if (xPortGlobalGeneration == gen) {
-    const CVector3f delta = xe8_globalTranslation - xPortPrevGlobalTranslation;
-    // Same snap rule as actors: a jump of more than 4 units is a teleport.
-    if (delta.MagSquared() <= 16.f) {
-      xe8_globalTranslation = xPortPrevGlobalTranslation + delta * t;
-      presenting = true;
-    }
-  }
-  if (xPortStepGeneration == gen && x80_timeDeltaScale == 1.f) {
-    x80_timeDeltaScale = t;
-    presenting = true;
-  }
-  return presenting;
-}
+// CElementGen::PortBeginPresent and the newborn shift helpers live in
+// platform/port_element_gen.cpp.
 #endif
 
 void CElementGen::RenderBasicParticlesNoRotTS(const CTransform4f& xf) {
@@ -3117,64 +3180,6 @@ const CTransform4f& CElementGen::GetGlobalOrientation() const { return x22c_glob
 const CVector3f& CElementGen::GetGlobalTranslation() const { return xe8_globalTranslation; }
 
 #ifdef TARGET_PC
-uint CElementGen::PortFxAsset() const { return CToken(x1c_genDesc).GetTag().GetId(); }
-
-void CElementGen::PortFxDescribe(PortFxInfo& out) const {
-  out.kind = 'PART';
-  out.asset = PortFxAsset();
-  out.particles = static_cast< int >(x30_particles.size());
-  out.maxParticles = x90_MAXP;
-  out.frame = x74_curFrame;
-  out.lifetime = x268_PSLT;
-  out.emitting = x88_particleEmission;
-  out.deletable = IsSystemDeletable();
-  out.pos[0] = xe8_globalTranslation.GetX();
-  out.pos[1] = xe8_globalTranslation.GetY();
-  out.pos[2] = xe8_globalTranslation.GetZ();
-  for (AUTO(it, x290_activePartChildren.begin()); it != x290_activePartChildren.end(); ++it) {
-    out.children.push_back(*it);
-  }
-  const CGenDescription& desc = *x28_loadedGenDesc;
-  char buf[64];
-  if (const CPortVfxData* vfx = desc.xPortVfx.get()) {
-    out.vfx = vfx->mat.version == 2 ? "VMAT" : "VMAT(unsupported)";
-    if (vfx->vtmtCount != 0) {
-      std::snprintf(buf, sizeof(buf), " VTMT*%u", vfx->vtmtCount);
-      out.vfx += buf;
-    }
-    if (!vfx->vpmt.empty()) {
-      std::snprintf(buf, sizeof(buf), " VPMT*%zu", vfx->vpmt.size());
-      out.vfx += buf;
-    }
-    if (!vfx->vsmt.empty()) {
-      std::snprintf(buf, sizeof(buf), " VSMT*%zu", vfx->vsmt.size());
-      out.vfx += buf;
-    }
-    if (vfx->ssze != nullptr) {
-      out.vfx += " SSZE";
-    }
-    if (vfx->iten != nullptr) {
-      out.vfx += " ITEN";
-    }
-    if (vfx->vorn != 0) {
-      std::snprintf(buf, sizeof(buf), " VORN%u", vfx->vorn);
-      out.vfx += buf;
-    }
-    if (vfx->meshTris != 0) {
-      std::snprintf(buf, sizeof(buf), " VMSH(%u tris)", vfx->meshTris);
-      out.vfx += buf;
-    }
-  }
-  if (desc.xPortXfmd != kPortXfmdRetail) {
-    std::snprintf(buf, sizeof(buf), "%sXFMD%u", out.vfx.empty() ? "" : " ", unsigned(desc.xPortXfmd));
-    out.vfx += buf;
-  }
-  if (desc.xPortIrnd) {
-    out.vfx += out.vfx.empty() ? "IRND" : " IRND";
-  }
-  if (!desc.xPortPMDV.empty()) {
-    std::snprintf(buf, sizeof(buf), "%sPMDV*%zu", out.vfx.empty() ? "" : " ", desc.xPortPMDV.size());
-    out.vfx += buf;
-  }
-}
+// CElementGen::PortFxAsset, PortCollectNestedLightSnapshots and PortFxDescribe
+// live in platform/port_element_gen.cpp.
 #endif

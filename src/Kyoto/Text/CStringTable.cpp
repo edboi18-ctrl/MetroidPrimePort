@@ -93,10 +93,15 @@ CStringTable::CStringTable(CInputStream& in) : x0_stringCount(0), x4_data(NULL) 
 
 #ifdef TARGET_PC
   // Every section is decoded, so a language change shows in tables that are
-  // already loaded. The first one listed is the fallback.
+  // already loaded. ENGL is the fallback, else the first one listed: some PAL
+  // tables (Chozo Lore scans) list FREN first.
   std::vector< int > order;
+  int native = 0;
   for (int i = 0; i < langCount; ++i) {
     order.push_back(i);
+    if (langOffsets[i].first == mCurrentLanguage && langOffsets[native].first != mCurrentLanguage) {
+      native = i;
+    }
   }
   std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
     return langOffsets[a].second < langOffsets[b].second;
@@ -115,7 +120,7 @@ CStringTable::CStringTable(CInputStream& in) : x0_stringCount(0), x4_data(NULL) 
     rstl::vector< uchar > data(dataLen, uchar(0));
     in.ReadBytes(data.data(), dataLen);
     pos += sizeof(uint) + dataLen;
-    if (i == 0) {
+    if (i == native) {
       haveFirst = DecodeSection(data, x0_stringCount, mNativeStrings);
     } else {
       PortSection section;
@@ -332,6 +337,29 @@ void CStringTable::PortAddLanguages(const CStringTable& other) {
   }
 }
 
+void CStringTable::PortRemapImportedImageTextureIds() {
+  const auto remap = [](rstl::vector< rstl::vector< wchar_t > >& strings) {
+    for (size_t i = 0; i < strings.size(); ++i) {
+      std::wstring text;
+      text.reserve(strings[i].size());
+      for (size_t j = 0; j < strings[i].size() && strings[i][j] != L'\0'; ++j) {
+        text.push_back(strings[i][j]);
+      }
+      if (PortPalLanguages::RemapImportedImageTextureIds(text)) {
+        strings[i].clear();
+        for (wchar_t c : text) {
+          strings[i].push_back(c);
+        }
+        strings[i].push_back(L'\0');
+      }
+    }
+  };
+  remap(mNativeStrings);
+  for (size_t i = 0; i < mPortSections.size(); ++i) {
+    remap(mPortSections[i].strings);
+  }
+}
+
 // A PAL disc's string tables that the 1.00 code indexes by number are laid
 // out differently (PAL added a language menu, moved the image gallery's
 // labels into STRG_SlideShow and added inventory counters), so they're put
@@ -429,6 +457,9 @@ const CFactoryFnReturn FStringTableFactory(const SObjectTag& tag, CInputStream& 
       const rstl::single_ptr< CStringTable > slideShow(
           id == 0x0552A456 ? PortLoadLanguageTable(0xBD727D06) : rstl::single_ptr< CStringTable >());
       PortRemapPalTable(id, *pal, slideShow.get());
+      // Imported PAL text can name image TXTRs that the USA disc doesn't have.
+      // Remap the decoded imported sections, not the source file, before merge.
+      pal->PortRemapImportedImageTextureIds();
       table->PortAddLanguages(*pal);
     }
   }

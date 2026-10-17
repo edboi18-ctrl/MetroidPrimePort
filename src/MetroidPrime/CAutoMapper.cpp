@@ -47,8 +47,17 @@
 
 #include <math.h>
 
+#include <utility>
+#include <vector>
+
 #include "port_debug.h"
+#include "port_pointer.h"
+#include "port_pointer_menu.h"
 #include "port_map_icons.h"
+#include "port_custom_res.h"
+#include "port_map_marks.h"
+#include "port_map_pickups.h"
+#include "port_automapper.h"
 
 static const char* const skFRME_MapScreen = "FRME_MapScreen";
 
@@ -573,7 +582,14 @@ void CAutoMapper::UpdateHintNavigation(float dt, const CStateManager& mgr) {
   }
 }
 
-void CAutoMapper::ProcessControllerInput(const CFinalInput& input, const CStateManager& mgr) {
+void CAutoMapper::ProcessControllerInput(const CFinalInput& frameInput,
+                                         const CStateManager& mgr) {
+#ifdef TARGET_PC
+  CFinalInput input = frameInput;
+  PortPointerInput(input, mgr);
+#else
+  const CFinalInput& input = frameInput;
+#endif
   if (!IsRenderStateInterpolating()) {
     if (IsInPlayerControlState()) {
       if (x32c_loadingDummyWorld) {
@@ -646,7 +662,25 @@ void CAutoMapper::ProcessControllerInput(const CFinalInput& input, const CStateM
       x300_textpane_instructions->TextSupport().SetText(rstl::wstring_l(L""));
       x308_textpane_instructions2->TextSupport().SetText(rstl::wstring_l(L""));
     } else {
+#ifdef TARGET_PC
+      if (PortShowsMarkPrompt()) {
+        // Port: X marks or unmarks the shown room.
+        rstl::wstring mark;
+        mark.append(L"&image=", -1);
+        mark.append(CStringExtras::ConvertToUNICODE(rstl::string(CBasics::Stringize(
+                        "SI,0.6,1.0,%8.8X", gpTweakPlayerRes->xac_xButton[0]))));
+        mark.append(L"; ", -1);
+        mark.append(PortMapMarks::IsMarked(x24_world->IGetWorldAssetId(), xa0_curAreaId.value)
+                        ? L"Unmark room"
+                        : L"Mark room",
+                    -1);
+        x2fc_textpane_hint->TextSupport().SetText(mark);
+      } else {
+        x2fc_textpane_hint->TextSupport().SetText(rstl::wstring_l(L""));
+      }
+#else
       x2fc_textpane_hint->TextSupport().SetText(rstl::wstring_l(L""));
+#endif
 
       const wchar_t imagePrefix[] = L"&image=";
       const wchar_t imageSuffix[] = L";";
@@ -713,6 +747,12 @@ void CAutoMapper::ProcessControllerInput(const CFinalInput& input, const CStateM
   }
 }
 
+#ifdef TARGET_PC
+// The map screen's pointer input (PortRecordPointerHits, PortPointerInput), the
+// mark prompt and the legend live in platform/port_automapper.cpp; the helpers
+// called below are declared in port_automapper.h.
+#endif
+
 void CAutoMapper::ProcessMapScreenInput(const CFinalInput& input, const CStateManager& mgr) {
   CMatrix3f camRot(xa8_renderState0.x8_camOrientation.BuildTransform());
   if (x1bc_state == kAMS_MapScreen) {
@@ -736,6 +776,14 @@ void CAutoMapper::ProcessMapScreenInput(const CFinalInput& input, const CStateMa
           pointLocal, CUnitVector3f(camRot.GetColumn(1), CUnitVector3f::kN_No), mgr, *x24_world,
           *mwInfo);
       BeginMapperStateTransition(kAMS_MapScreen, mgr);
+    }
+  }
+
+  if (input.PX() && x1bc_state == kAMS_MapScreen && x328_ == 0 && x24_world != nullptr &&
+      IsInPlayerControlState()) {
+    if (PortMapMarks::Toggle(x24_world->IGetWorldAssetId(), xa0_curAreaId.value) != 0) {
+      CSfxManager::SfxStart(0x5ac, 127, 64, false, CSfxManager::kMedPriority, false,
+                            CSfxManager::kAllAreas);
     }
   }
 
@@ -929,6 +977,22 @@ void CAutoMapper::ProcessMapZoomInput(const CFinalInput& input, const CStateMana
 
   // Port: a pinch scales the camera distance by the inverse of the finger spread.
   const float pinch = PortDebug::TakeMapZoom();
+  // Port: pinching or scrolling out past the farthest area-map distance opens
+  // the world map, as A does. It takes a doubling of the distance (two wheel
+  // notches) beyond the limit, so reaching the limit alone doesn't switch.
+  static float sPortZoomOutPast = 0.f;
+  if (x1bc_state == kAMS_MapScreen && pinch < 1.f &&
+      xa8_renderState0.x18_camDist >= gpTweakAutoMapper->x10_maxCamDist &&
+      HasCurrentMapUniverseWorld(mgr)) {
+    sPortZoomOutPast -= static_cast< float >(log(pinch) / log(2.0));
+    if (sPortZoomOutPast >= 1.f) {
+      sPortZoomOutPast = 0.f;
+      BeginMapperStateTransition(kAMS_MapScreenUniverse, mgr);
+      return;
+    }
+  } else if (pinch != 1.f || xa8_renderState0.x18_camDist < gpTweakAutoMapper->x10_maxCamDist) {
+    sPortZoomOutPast = 0.f;
+  }
   if (pinch != 1.f) {
     xa8_renderState0.x18_camDist =
         GetClampedMapScreenCameraDistance(xa8_renderState0.x18_camDist / pinch);
@@ -1063,7 +1127,12 @@ void CAutoMapper::ProcessMapPanInput(const CFinalInput& input, const CStateManag
 }
 
 void CAutoMapper::Draw(const CStateManager& mgr, const CTransform4f& xf, float alpha) const {
+#ifdef TARGET_PC
+  // The opacity of the visor in use (issue #144).
+  float drawAlpha = alpha * gpGameState->GameOptions().GetActiveHudAlpha(mgr);
+#else
   float drawAlpha = alpha * gpGameState->GameOptions().GetHudAlpha();
+#endif
   gpRender->SetBlendMode_AlphaBlended();
   CGraphics::SetCullMode(kCM_Front);
 
@@ -1219,6 +1288,10 @@ void CAutoMapper::Draw(const CStateManager& mgr, const CTransform4f& xf, float a
                                                    x1dc_playerFlashPulse, mgr, planeXf, camXf),
                CVector3f::Zero(), 0.f, 0.f);
   }
+
+#ifdef TARGET_PC
+  PortRecordPointerHits(mgr, planeXf, planeXf * preXf);
+#endif
 
   if (!IsInMapperState(kAMS_MapScreenUniverse)) {
     CTransform4f mapXf = planeXf * preXf;
@@ -1418,6 +1491,11 @@ void CAutoMapper::Update(float dt, const CStateManager& mgr) {
   if (x28_frmeMapScreen.get() != NULL && x2c_frmeInitialized == NULL) {
     if (x28_frmeMapScreen->TryCache()) {
       x2c_frmeInitialized = x28_frmeMapScreen->GetObject();
+#ifdef TARGET_PC
+      // Port: the new frame's widgets, before the port's own state is taken from
+      // them (see PortForgetMapPanes).
+      PortForgetMapPanes();
+#endif
       // Port: keep the map screen's proportions in widescreen instead of
       // stretching it across the wider viewport.
       if (CGuiCamera* cam = x2c_frmeInitialized->GetFrameCamera()) {
@@ -1445,7 +1523,17 @@ void CAutoMapper::Update(float dt, const CStateManager& mgr) {
           static_cast< CGuiTextPane* >(x2c_frmeInitialized->FindWidget("textpane_mapLegend"));
       mapLegend->TextSupport().SetWordWrap(false);
       mapLegend->TextSupport().SetImageBaseline(true);
+#ifdef TARGET_PC
+      if (PortLegendReady()) {
+        sPortLegendKey = PortLegendKey();
+        PortSetLegend(mapLegend, PortLegendText());
+      } else {
+        sPortLegendKey = ~0u;
+        PortSetLegend(mapLegend, rstl::wstring(gpStringTable->GetString(0x31)));
+      }
+#else
       mapLegend->TextSupport().SetText(rstl::wstring(gpStringTable->GetString(0x31)));
+#endif
 
       x30c_basewidget_leftPane = x2c_frmeInitialized->FindWidget("basewidget_leftPane");
       x310_basewidget_yButtonPane = x2c_frmeInitialized->FindWidget("basewidget_yButtonPane");
@@ -1459,7 +1547,22 @@ void CAutoMapper::Update(float dt, const CStateManager& mgr) {
 
   // Update frame and text panes
   if (x2c_frmeInitialized != NULL) {
+#ifdef TARGET_PC
+    if (sPortLegendKey != PortLegendKey() && PortLegendReady()) {
+      sPortLegendKey = PortLegendKey();
+      CGuiTextPane* legend =
+          static_cast< CGuiTextPane* >(x2c_frmeInitialized->FindWidget("textpane_mapLegend"));
+      if (legend != NULL) {
+        PortSetLegend(legend, PortLegendText());
+      }
+    }
+#endif
     x2c_frmeInitialized->Update(dt);
+#ifdef TARGET_PC
+    // Port: the mark prompt's own place, and the disc's hint pane back when it
+    // is not showing it (see PortPlaceMarkHint).
+    PortPlaceMarkHint(x2fc_textpane_hint, PortShowsMarkPrompt());
+#endif
 
     {
       CGuiTextPane* right1 =
@@ -1760,6 +1863,10 @@ void CAutoMapper::CompleteMapperStateTransition(const CStateManager& mgr) {
   }
 
   if (x1c0_nextState == kAMS_MiniMap) {
+#ifdef TARGET_PC
+    // Port: the frame's widgets go away with it (see PortForgetMapPanes).
+    PortForgetMapPanes();
+#endif
     x28_frmeMapScreen = NULL;
     x2c_frmeInitialized = NULL;
     x2fc_textpane_hint = NULL;

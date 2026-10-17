@@ -44,6 +44,7 @@ else ()
   set(ABSL_PROPAGATE_CXX_STD ON)
   FetchContent_Declare(abseil-cpp
     URL https://github.com/abseil/abseil-cpp/archive/refs/tags/20240722.0.tar.gz
+    URL_HASH SHA256=f50e5ac311a81382da7fa75b97310e4b9006474f9560ac46f54a9967f07d4ae3
     DOWNLOAD_EXTRACT_TIMESTAMP FALSE
     EXCLUDE_FROM_ALL
   )
@@ -247,8 +248,11 @@ if (AURORA_ENABLE_GX)
       ${imgui_SOURCE_DIR}/imgui_tables.cpp
       ${imgui_SOURCE_DIR}/imgui_widgets.cpp
       ${imgui_SOURCE_DIR}/misc/cpp/imgui_stdlib.cpp
+      # Port: item hooks, so the settings search can find a widget by label.
+      ${CMAKE_CURRENT_SOURCE_DIR}/imgui_item_hook.cpp
     )
     target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR})
+    target_compile_definitions(imgui PUBLIC IMGUI_ENABLE_TEST_ENGINE)
 
     add_library(imgui_backends STATIC
       ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
