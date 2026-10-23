@@ -110,7 +110,7 @@ void UpdateWireframe(Passthrough::SharedBlock& block, const Passthrough::GuestSt
     }
     if (Passthrough::ReadDirect(block.triangles, *sSetBuffer) && sSetBuffer->generation != 0) {
       sSetSequence = sequence;
-      const uint32_t count = std::min(sSetBuffer->count, Passthrough::kMaxTriangles);
+      const uint32_t count = (std::min)(sSetBuffer->count, Passthrough::kMaxTriangles);
       triangles = std::make_shared< const std::vector< Passthrough::Triangle > >(
           sSetBuffer->triangles, sSetBuffer->triangles + count);
       generation = sSetBuffer->generation;

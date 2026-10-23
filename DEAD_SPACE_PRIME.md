@@ -279,17 +279,27 @@ in the Dead Space Prime repository. What the port has so far:
   velocity, the camera's position, axes and field of view, energy, visor,
   beam, morph state and a few flags. A host's state comes back the same way,
   and the F1 line shows whether one is connected.
+- **Bridge version 2:** the host also sends its collision near its player
+  (Dead Space's triangles within 20 m of Isaac, up to 16,384, in the port's
+  coordinates), and **Draw the host's collision**, under the bridge's switch,
+  draws them over the picture as a wireframe around Samus, as if Isaac stood
+  where she does, facing her way: blue for the level, orange for what moves
+  (doors, lifts). The F1 line under it counts them. Off at each start.
 - `passthrough_probe.exe`, next to the game in the Windows package, stands in
   for the Dead Space plugin: run it in a console while the bridge is on and
-  it prints Samus's state twice a second, and F1 shows it as connected.
-- Nothing from the host acts on the game yet; that comes with the Dead Space
-  plugin.
+  it prints Samus's state twice a second, and F1 shows it as connected. With
+  `--room` it also sends a made-up room (a floor 20 m square, a wall 6 m
+  ahead with a doorway, and an orange door in it) for the wireframe.
+- Nothing from the host acts on the game yet: the wireframe only draws.
 
 The wire format (`platform/include/passthrough_protocol.h`) uses only 4-byte
 fields, so a 32-bit plugin and the 64-bit port lay it out alike, and every
 read and write goes through a sequence lock so neither side sees half of the
 other's update (`tests/port_passthrough.cpp` races a writer against a reader
-to check it).
+to check it). The triangle set, at 640 KiB, is copied word by word straight
+between the block and the reader's copy, and only when it has changed; the
+wireframe's placement and projection (`platform/include/passthrough_view.h`)
+are covered by the same test.
 
 ## Fixes
 
@@ -348,8 +358,9 @@ and the times retail's buckets would have dropped a water surface.
 | `src/MetroidPrime/CTargetReticles.cpp` | Leans the crosshair with the gun. |
 | `src/MetaRender/CCubeRenderer.cpp`, `include/MetaRender/CCubeRenderer.hpp` | Bigger sorted-draw buckets, and their counters for F1 > Debug > Rendering. |
 | `platform/include/passthrough_protocol.h`, `platform/include/passthrough_shm.h`, `platform/passthrough_shm.cpp` | The passthrough bridge's wire format, sequence lock and shared memory, plain C++ for the Dead Space plugin too (covered by `tests/port_passthrough.cpp`). |
-| `platform/include/port_passthrough.h`, `platform/port_passthrough.cpp`, `src/MetroidPrime/CStateManager.cpp`, `platform/debug_ui/debug.cpp` | Publishes Samus's state once a tick, reads the host's, and the F1 > Debug > Passthrough switch. |
-| `tools/passthrough_probe.cpp` | The stand-in host. |
+| `platform/include/port_passthrough.h`, `platform/port_passthrough.cpp`, `src/MetroidPrime/CStateManager.cpp`, `platform/debug_ui/debug.cpp` | Publishes Samus's state once a tick, reads the host's and its triangle set, the F1 > Debug > Passthrough switches, and the wireframe drawn each frame (called from `platform/debug_ui/window.cpp`). |
+| `platform/include/passthrough_view.h` | The wireframe's math: the host's world put where Samus is, and projected as the port's camera has it. |
+| `tools/passthrough_probe.cpp` | The stand-in host (`--room`: a made-up room for the wireframe). |
 | `src/MetroidPrime/Player/CPlayerGun.cpp` | Draws the throwing hand, and keeps the suit's right arm drawn while it throws; under manual aim, has missiles, Super Missiles and the Wave Beam seek the target nearest the crosshair; gives lock-on the faster Power Beam's speed. |
 | `src/MetroidPrime/Enemies/CPatterned.cpp` | The glow, in `PreRender`. |
 | `src/GuiSys/CAuiEnergyBarT01.cpp`, `include/GuiSys/CAuiEnergyBarT01.hpp` | Draws the meter and its label along the energy bar, inside the bar's own draw. |
