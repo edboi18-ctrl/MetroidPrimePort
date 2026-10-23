@@ -341,6 +341,7 @@ void DrawUI() {
   PortImporters::Poll();
 #endif
   FinishRemasteredImport();
+  DrawPassthroughWireframe();
   DrawMenuHintToast();
   DrawStaleImportToast();
   HoldBackgroundShadersOnFrontEnd();

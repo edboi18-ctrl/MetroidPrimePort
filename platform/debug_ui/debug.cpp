@@ -72,6 +72,65 @@ static void DrawPassthrough() {
                         info.host.playerPosition.z);
     break;
   }
+  bool shown = PortPassthrough::WireframeShown();
+  if (ImGui::Checkbox("Draw the host's collision", &shown)) {
+    PortPassthrough::SetWireframeShown(shown);
+  }
+  ImGui::SetItemTooltip("Dead Space's collision near Isaac, as the plugin sends it, drawn as a\n"
+                        "wireframe around Samus, as if Isaac stood where she does, facing her\n"
+                        "way: blue for the level, orange for what moves (doors, lifts).\n"
+                        "Not saved: off at each start.");
+  if (shown && info.status == PortPassthrough::Status::Connected) {
+    PortPassthrough::Wireframe wireframe;
+    if (PortPassthrough::GetWireframe(wireframe)) {
+      ImGui::TextDisabled("%zu triangles within %.0f m of its player (set %u)",
+                          wireframe.triangles->size(), wireframe.radius, wireframe.generation);
+    } else {
+      ImGui::TextDisabled("No triangles from the host yet");
+    }
+  }
+}
+
+// Dead Space's collision near Isaac, put where Samus is and drawn over the game's picture, the
+// nearest triangles first.
+void DrawPassthroughWireframe() {
+  // Only those within this of Samus are drawn, at most this many (three lines each).
+  constexpr float kDrawnWithin = 25.f;
+  constexpr size_t kMostDrawn = 12000;
+  PortPassthrough::Wireframe wireframe;
+  if (!PortPassthrough::WireframeShown() || !PortPassthrough::GetWireframe(wireframe) ||
+      !wireframe.triangles) {
+    return;
+  }
+  const ImGuiViewport* viewport = ImGui::GetMainViewport();
+  ImDrawList* draw = ImGui::GetBackgroundDrawList(const_cast< ImGuiViewport* >(viewport));
+  const PassthroughView::Placement& place = wireframe.placement;
+  size_t drawn = 0;
+  for (const Passthrough::Triangle& triangle : *wireframe.triangles) {
+    const PassthroughView::Vec3 corners[3] = {PassthroughView::ToGuest(place, triangle.a),
+                                              PassthroughView::ToGuest(place, triangle.b),
+                                              PassthroughView::ToGuest(place, triangle.c)};
+    const PassthroughView::Vec3 centre = PassthroughView::Scale(
+        PassthroughView::Add(PassthroughView::Add(corners[0], corners[1]), corners[2]), 1.f / 3.f);
+    const PassthroughView::Vec3 off = PassthroughView::Sub(centre, place.to);
+    if (PassthroughView::Dot(off, off) > kDrawnWithin * kDrawnWithin) {
+      continue;
+    }
+    if (++drawn > kMostDrawn) {
+      break;
+    }
+    const ImU32 colour = (triangle.flags & Passthrough::kTriangleMoves) != 0
+                             ? IM_COL32(255, 160, 40, 220)
+                             : IM_COL32(60, 210, 255, 170);
+    for (int edge = 0; edge < 3; ++edge) {
+      float line[4];
+      if (PassthroughView::Project(wireframe.camera, viewport->Size.x, viewport->Size.y,
+                                   corners[edge], corners[(edge + 1) % 3], line)) {
+        draw->AddLine(ImVec2(viewport->Pos.x + line[0], viewport->Pos.y + line[1]),
+                      ImVec2(viewport->Pos.x + line[2], viewport->Pos.y + line[3]), colour, 1.f);
+      }
+    }
+  }
 }
 
 void DrawDebugTab() {

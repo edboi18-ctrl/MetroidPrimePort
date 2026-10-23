@@ -8,6 +8,7 @@
 #include "MetroidPrime/Player/CPlayer.hpp"
 #include "MetroidPrime/Player/CPlayerState.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -30,10 +31,17 @@ Clock::time_point sNextTry{};
 Clock::time_point sHostSeenAt{};
 uint32_t sLastHostFrame = 0;
 Passthrough::HostState sHost{};
+// The host's triangle set: copied out of the block (640 KiB, so on the heap) only when its
+// sequence has moved on.
+std::unique_ptr< Passthrough::TriangleSet > sSetBuffer;
+uint32_t sSetSequence = 0;
+std::atomic< bool > sWireframeShown{false};
 
 // GetInfo reads from the F1 overlay, which may draw on another thread than the game ticks.
 std::mutex sInfoMutex;
 Info sInfo;
+Wireframe sWireframe; // under sInfoMutex
+bool sHaveWireframe = false;
 
 void SetInfo(Status status, std::string message, const Passthrough::HostState* host) {
   std::lock_guard lock(sInfoMutex);
@@ -88,6 +96,40 @@ Passthrough::GuestState Gather(const CStateManager& mgr, float dt) {
   state.beam = static_cast< uint32_t >(playerState.GetCurrentBeam());
   return state;
 }
+// The host's triangle set, if it has published a new one, and where the overlay puts it: the host's
+// player where Samus stands, turned to her heading.
+void UpdateWireframe(Passthrough::SharedBlock& block, const Passthrough::GuestState& samus,
+                     const CPlayer& player, bool connected) {
+  std::shared_ptr< const std::vector< Passthrough::Triangle > > triangles;
+  uint32_t generation = 0;
+  float radius = 0.f;
+  const uint32_t sequence = Passthrough::Sequence(block.triangles);
+  if (sequence != sSetSequence && (sequence & 1u) == 0) {
+    if (!sSetBuffer) {
+      sSetBuffer = std::make_unique< Passthrough::TriangleSet >();
+    }
+    if (Passthrough::ReadDirect(block.triangles, *sSetBuffer) && sSetBuffer->generation != 0) {
+      sSetSequence = sequence;
+      const uint32_t count = std::min(sSetBuffer->count, Passthrough::kMaxTriangles);
+      triangles = std::make_shared< const std::vector< Passthrough::Triangle > >(
+          sSetBuffer->triangles, sSetBuffer->triangles + count);
+      generation = sSetBuffer->generation;
+      radius = sSetBuffer->radius;
+    }
+  }
+  const PassthroughView::Vec3 facing = ToVec(player.GetTransform().GetColumn(kDY));
+  std::lock_guard lock(sInfoMutex);
+  if (triangles) {
+    sWireframe.triangles = std::move(triangles);
+    sWireframe.generation = generation;
+    sWireframe.radius = radius;
+  }
+  sWireframe.placement = PassthroughView::Place(sHost.playerPosition, sHost.playerYaw,
+                                                samus.position, PassthroughView::Yaw(facing));
+  sWireframe.camera = {samus.eye, samus.forward, samus.up, samus.fovY, samus.aspect};
+  sHaveWireframe = connected && (sHost.flags & Passthrough::kHostInGame) != 0 &&
+                   sWireframe.triangles != nullptr;
+}
 } // namespace
 
 bool Enabled() { return sEnabled.load(std::memory_order_relaxed); }
@@ -134,7 +176,8 @@ void Tick(const CStateManager& mgr, float dt) {
     sTick = 1;
   }
   Passthrough::SharedBlock& block = *sMapping.Block();
-  Passthrough::Write(block.guest, Gather(mgr, dt));
+  const Passthrough::GuestState samus = Gather(mgr, dt);
+  Passthrough::Write(block.guest, samus);
 
   Passthrough::HostState host{};
   if (Passthrough::Read(block.host, host)) {
@@ -146,6 +189,7 @@ void Tick(const CStateManager& mgr, float dt) {
   }
   const bool connected = sLastHostFrame != 0 && now - sHostSeenAt < kHostTimeout;
   SetInfo(connected ? Status::Connected : Status::Waiting, {}, &sHost);
+  UpdateWireframe(block, samus, *mgr.GetPlayer(), connected);
 }
 
 Info GetInfo() {
@@ -158,12 +202,30 @@ Info GetInfo() {
   return sInfo;
 }
 
+bool GetWireframe(Wireframe& out) {
+  std::lock_guard lock(sInfoMutex);
+  if (!Enabled() || !sHaveWireframe) {
+    return false;
+  }
+  out = sWireframe;
+  return true;
+}
+
+bool WireframeShown() { return sWireframeShown.load(std::memory_order_relaxed); }
+
+void SetWireframeShown(bool shown) { sWireframeShown.store(shown, std::memory_order_relaxed); }
+
 void Shutdown() {
   sMapping.Close();
   sTick = 0;
   sLastHostFrame = 0;
   sHost = {};
+  sSetSequence = 0;
+  sSetBuffer.reset();
   SetInfo(Status::Off, {}, &sHost);
+  std::lock_guard lock(sInfoMutex);
+  sWireframe = {};
+  sHaveWireframe = false;
 }
 
 } // namespace PortPassthrough

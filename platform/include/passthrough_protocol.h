@@ -22,8 +22,8 @@ namespace Passthrough {
 // "DSPT" read as a little-endian uint32_t.
 constexpr uint32_t kMagic = 0x54505344u;
 // Raised whenever SharedBlock's layout or a field's meaning changes. Each side refuses a block
-// written for another version.
-constexpr uint32_t kVersion = 1;
+// written for another version. 2: the host's collision near its player (TriangleSet).
+constexpr uint32_t kVersion = 2;
 // The shared memory's name. Windows: in the session's Local\ namespace (CreateFileMappingW).
 // Elsewhere: a POSIX shared memory object (shm_open), for tests and tools.
 constexpr const char* kSharedMemoryName = "DeadSpacePrimePassthrough";
@@ -88,6 +88,29 @@ struct HostState {
   uint32_t reserved[16];
 };
 
+// The host's collision near its player (milestone 4 in docs/PASSTHROUGH.md): its world's
+// triangles within `radius` of `centre`, in wire space, which the host publishes again as its
+// player moves and as its world changes. The guest collides with them, and can draw them.
+constexpr uint32_t kMaxTriangles = 16384;
+
+enum TriangleFlags : uint32_t {
+  kTriangleMoves = 1u << 0, // on something the host moves itself (a door, a lift): may go stale
+};
+
+struct Triangle {
+  Vec3 a, b, c;   // its corners, wire space
+  uint32_t flags; // TriangleFlags
+};
+
+struct TriangleSet {
+  uint32_t generation; // raised with each set the host publishes; never 0 once published
+  uint32_t count;      // triangles in use, at most kMaxTriangles
+  Vec3 centre;         // the host's player as the set was picked
+  float radius;        // the triangles are those reaching within this of the centre
+  uint32_t reserved[10];
+  Triangle triangles[kMaxTriangles];
+};
+
 // One side's state behind a sequence lock: the writer makes `sequence` odd, writes, then makes
 // it even again; a reader copies between two even, equal reads of it.
 template < typename T >
@@ -104,6 +127,7 @@ struct SharedBlock {
   uint32_t reserved;
   Slot< GuestState > guest;
   Slot< HostState > host;
+  Slot< TriangleSet > triangles; // written by the host only; WriteDirect and ReadDirect
 };
 
 // The layout both sides rely on.
@@ -116,11 +140,16 @@ static_assert(sizeof(HostState) == 96, "HostState layout");
 static_assert(offsetof(HostState, playerPosition) == 8 &&
                   offsetof(HostState, playerMaxHealth) == 28,
               "HostState offsets");
+static_assert(sizeof(Triangle) == 40 && sizeof(TriangleSet) == 64 + 40 * kMaxTriangles &&
+                  offsetof(TriangleSet, triangles) == 64,
+              "TriangleSet layout");
 static_assert(offsetof(SharedBlock, guest) == 16 && offsetof(SharedBlock, host) == 188 &&
-                  sizeof(SharedBlock) == 292,
+                  offsetof(SharedBlock, triangles) == 292 &&
+                  sizeof(SharedBlock) == 292 + 8 + sizeof(TriangleSet),
               "SharedBlock layout");
 static_assert(std::is_trivially_copyable_v< GuestState > &&
-                  std::is_trivially_copyable_v< HostState >,
+                  std::is_trivially_copyable_v< HostState > &&
+                  std::is_trivially_copyable_v< TriangleSet >,
               "plain data");
 static_assert(sizeof(GuestState) % 4 == 0 && sizeof(HostState) % 4 == 0, "whole words");
 static_assert(std::atomic_ref< uint32_t >::is_always_lock_free, "lock-free words across processes");
@@ -130,6 +159,7 @@ static_assert(std::atomic_ref< uint32_t >::is_always_lock_free, "lock-free words
 // words it copied belong to one write.
 template < typename T >
 inline void Write(Slot< T >& slot, const T& value) {
+  static_assert(sizeof(T) <= 4096, "a large slot is written with WriteDirect");
   std::atomic_ref< uint32_t > sequence(slot.sequence);
   const uint32_t start = sequence.load(std::memory_order_relaxed);
   sequence.store(start + 1, std::memory_order_relaxed);
@@ -147,6 +177,7 @@ inline void Write(Slot< T >& slot, const T& value) {
 // try, or nothing has been written yet.
 template < typename T >
 inline bool Read(Slot< T >& slot, T& out, int tries = 8) {
+  static_assert(sizeof(T) <= 4096, "a large slot is read with ReadDirect");
   std::atomic_ref< uint32_t > sequence(slot.sequence);
   uint32_t* in = reinterpret_cast< uint32_t* >(&slot.value);
   for (int attempt = 0; attempt < tries; ++attempt) {
@@ -168,6 +199,58 @@ inline bool Read(Slot< T >& slot, T& out, int tries = 8) {
     }
   }
   return false;
+}
+
+// The same lock for a slot too large to copy through the stack (TriangleSet: 640 KiB), word by
+// word straight between the slot and the caller's value. A ReadDirect that fails may leave `out`
+// part written; a caller keeps its last good copy elsewhere.
+template < typename T >
+inline void WriteDirect(Slot< T >& slot, const T& value) {
+  std::atomic_ref< uint32_t > sequence(slot.sequence);
+  const uint32_t start = sequence.load(std::memory_order_relaxed);
+  sequence.store(start + 1, std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_release);
+  const unsigned char* in = reinterpret_cast< const unsigned char* >(&value);
+  uint32_t* out = reinterpret_cast< uint32_t* >(&slot.value);
+  for (size_t i = 0; i < sizeof(T) / 4; ++i) {
+    uint32_t word;
+    std::memcpy(&word, in + 4 * i, sizeof(word));
+    std::atomic_ref< uint32_t >(out[i]).store(word, std::memory_order_relaxed);
+  }
+  sequence.store(start + 2, std::memory_order_release);
+}
+
+template < typename T >
+inline bool ReadDirect(Slot< T >& slot, T& out, int tries = 4) {
+  std::atomic_ref< uint32_t > sequence(slot.sequence);
+  const uint32_t* in = reinterpret_cast< const uint32_t* >(&slot.value);
+  unsigned char* to = reinterpret_cast< unsigned char* >(&out);
+  for (int attempt = 0; attempt < tries; ++attempt) {
+    const uint32_t before = sequence.load(std::memory_order_acquire);
+    if (before == 0) {
+      return false;
+    }
+    if (before & 1u) {
+      continue;
+    }
+    for (size_t i = 0; i < sizeof(T) / 4; ++i) {
+      const uint32_t word =
+          std::atomic_ref< uint32_t >(const_cast< uint32_t& >(in[i])).load(std::memory_order_relaxed);
+      std::memcpy(to + 4 * i, &word, sizeof(word));
+    }
+    std::atomic_thread_fence(std::memory_order_acquire);
+    if (sequence.load(std::memory_order_relaxed) == before) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// A slot's sequence as it is now: a reader compares it with the one it last copied at, to copy a
+// large slot only when it has changed.
+template < typename T >
+inline uint32_t Sequence(Slot< T >& slot) {
+  return std::atomic_ref< uint32_t >(slot.sequence).load(std::memory_order_acquire);
 }
 
 } // namespace Passthrough

@@ -1,9 +1,12 @@
 #include "passthrough_shm.h"
+#include "passthrough_view.h"
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -47,6 +50,57 @@ int main() {
     CHECK(!Read(slot, out, 2));
   }
 
+  // The triangle set, too large for the stack: written and read straight, and its sequence
+  // tells a reader whether there's anything new.
+  {
+    auto slot = std::make_unique< Slot< TriangleSet > >();
+    auto in = std::make_unique< TriangleSet >();
+    auto out = std::make_unique< TriangleSet >();
+    CHECK(Sequence(*slot) == 0 && !ReadDirect(*slot, *out));
+    in->generation = 3;
+    in->count = 2;
+    in->centre = {1.f, 2.f, 3.f};
+    in->radius = 20.f;
+    in->triangles[0] = {{0.f, 0.f, 0.f}, {1.f, 0.f, 0.f}, {0.f, 1.f, 0.f}, 0};
+    in->triangles[kMaxTriangles - 1] = {{5.f, 5.f, 5.f}, {6.f, 5.f, 5.f}, {5.f, 6.f, 5.f},
+                                        kTriangleMoves};
+    WriteDirect(*slot, *in);
+    CHECK(Sequence(*slot) == 2);
+    CHECK(ReadDirect(*slot, *out) && out->generation == 3 && out->count == 2 &&
+          out->centre.z == 3.f && out->radius == 20.f && out->triangles[0].b.x == 1.f &&
+          out->triangles[kMaxTriangles - 1].c.y == 6.f &&
+          out->triangles[kMaxTriangles - 1].flags == kTriangleMoves);
+    slot->sequence = 5;
+    CHECK(!ReadDirect(*slot, *out, 2));
+  }
+
+  // The wireframe's view: the host's world put where Samus is, and onto the screen.
+  {
+    using namespace PassthroughView;
+    const auto same = [](float a, float b) { return std::fabs(a - b) < 1e-3f; };
+    // Headings: facing +Y is 0, facing -X a quarter turn.
+    CHECK(same(Yaw({0.f, 1.f, 0.f}), 0.f) && same(Yaw({-1.f, 0.f, 0.f}), 1.5707963f));
+    // He stands at (10, 0, 5) facing +Y; she at (0, 0, 1) facing -X: a point 2 m ahead of him
+    // and 1 m up is 2 m ahead of her and 1 m up.
+    const Placement place = Place({10.f, 0.f, 5.f}, 0.f, {0.f, 0.f, 1.f}, 1.5707963f);
+    const Vec3 ahead = ToGuest(place, {10.f, 2.f, 6.f});
+    CHECK(same(ahead.x, -2.f) && same(ahead.y, 0.f) && same(ahead.z, 2.f));
+    // A camera at the origin looking along +Y, +Z up, 90 degrees high on a square screen: a point
+    // straight ahead is mid-screen, one up and ahead at 45 degrees the top edge, one to the right
+    // at 45 degrees the right edge.
+    const Camera camera{{0.f, 0.f, 0.f}, {0.f, 1.f, 0.f}, {0.f, 0.f, 1.f}, 90.f, 1.f};
+    float line[4];
+    CHECK(Project(camera, 100.f, 100.f, {0.f, 5.f, 0.f}, {0.f, 5.f, 5.f}, line));
+    CHECK(same(line[0], 50.f) && same(line[1], 50.f) && same(line[2], 50.f) &&
+          same(line[3], 0.f));
+    CHECK(Project(camera, 100.f, 100.f, {0.f, 5.f, 0.f}, {5.f, 5.f, 0.f}, line));
+    CHECK(same(line[2], 100.f) && same(line[3], 50.f));
+    // Behind the camera: nothing; half behind: cut where it passes the near distance.
+    CHECK(!Project(camera, 100.f, 100.f, {0.f, -1.f, 0.f}, {1.f, -2.f, 0.f}, line));
+    CHECK(Project(camera, 100.f, 100.f, {0.f, -1.f, 1.f}, {0.f, 1.f, 1.f}, line, 0.5f));
+    CHECK(same(line[1], -50.f) && same(line[3], 0.f));
+  }
+
 #ifndef __ANDROID__
   const std::string name = TestName();
   Mapping::Unlink(name.c_str());
@@ -76,6 +130,15 @@ int main() {
     Write(host.Block()->host, isaac);
     HostState back{};
     CHECK(Read(guest.Block()->host, back) && back.frame == 42 && back.playerHealth == 100.f);
+
+    auto set = std::make_unique< TriangleSet >();
+    set->generation = 1;
+    set->count = 1;
+    set->triangles[0] = {{1.f, 2.f, 3.f}, {4.f, 5.f, 6.f}, {7.f, 8.f, 9.f}, 0};
+    WriteDirect(host.Block()->triangles, *set);
+    auto got = std::make_unique< TriangleSet >();
+    CHECK(ReadDirect(guest.Block()->triangles, *got) && got->generation == 1 &&
+          got->triangles[0].c.z == 9.f);
 
     // A block made by another version is refused.
     host.Block()->version = kVersion + 1;

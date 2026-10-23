@@ -429,6 +429,9 @@ void DrawFreeCam();
 void DrawRendering();
 void DrawLogSection();
 void DrawDebugTab();
+// Every frame: Dead Space's collision as a wireframe around Samus, while F1 > Debug >
+// Passthrough asks for it.
+void DrawPassthroughWireframe();
 void DrawPerformanceTab();
 void DrawLanguageSection();
 void DrawRemasteredTab();
