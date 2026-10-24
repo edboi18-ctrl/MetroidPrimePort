@@ -22,9 +22,10 @@ namespace Passthrough {
 // "DSPT" read as a little-endian uint32_t.
 constexpr uint32_t kMagic = 0x54505344u;
 // Raised whenever SharedBlock's layout or a field's meaning changes. Each side refuses a block
-// written for another version. 2: the host's collision near its player (TriangleSet). 3: the
-// height of the host's first-person eyes (HostState::playerEyeHeight).
-constexpr uint32_t kVersion = 3;
+// written for another version. 2: the host's collision near its player (TriangleSet). A field
+// taken from `reserved` where 0 means "none" needs no new version, as a side that doesn't know it
+// writes 0 there and ignores it: HostState::playerEyeHeight is one.
+constexpr uint32_t kVersion = 2;
 // The shared memory's name. Windows: in the session's Local\ namespace (CreateFileMappingW).
 // Elsewhere: a POSIX shared memory object (shm_open), for tests and tools.
 constexpr const char* kSharedMemoryName = "DeadSpacePrimePassthrough";

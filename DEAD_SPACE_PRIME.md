@@ -290,8 +290,9 @@ in the Dead Space Prime repository. What the port has so far:
   it prints Samus's state twice a second, and F1 shows it as connected. With
   `--room` it also sends a made-up room (a floor 20 m square, a wall 6 m
   ahead with a doorway, and an orange door in it) for the wireframe.
-- **Bridge version 3:** the host also says how high above its player's feet it
-  puts its first-person camera (Dead Space: 1.65 m above Isaac's feet), and
+- **Eye height (still bridge version 2):** the host also says how high above
+  its player's feet it puts its first-person camera (Dead Space: 1.65 m
+  above Isaac's feet; a host that doesn't say leaves Samus's own), and
   while it's connected with its player in a level, Samus's eyes go there
   instead of her own height (`CPlayer::GetEyeHeight` and
   `GetUnbiasedEyeHeight`), so both games look from the same height above the
