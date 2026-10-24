@@ -29,8 +29,8 @@ void Quad(std::vector< Triangle >& out, Vec3 a, Vec3 b, Vec3 c, Vec3 d, uint32_t
 }
 
 // A room 10 m square and 3 m high from (0, 0, 0), its faces facing in, as a level's do: a floor,
-// four walls, a ceiling; a 1 m crate on the floor at (6..7, 6..7) facing out; a door (moving)
-// and a sliver with no area.
+// four walls, a ceiling; a 1 m crate on the floor at (6..7, 6..7) facing out; a door (on
+// something the host moves) facing in, 0.5 m from the wall at y = 0; and a sliver with no area.
 std::vector< Triangle > Room() {
   std::vector< Triangle > room;
   Quad(room, {0, 0, 0}, {10, 0, 0}, {10, 10, 0}, {0, 10, 0});   // floor, up
@@ -151,16 +151,16 @@ int main() {
   REQUIRE_MSG(tree != nullptr, "a tree from the room");
   const PassthroughCollision::Stats& stats = tree->GetStats();
   CHECK_EQ(stats.offered, uint32_t(room.size()));
-  CHECK_EQ(stats.moving, 2u);
+  CHECK_EQ(stats.moving, 2u); // the door's, taken too
   CHECK_EQ(stats.degenerate, 1u);
-  CHECK_EQ(stats.taken, 16u);
+  CHECK_EQ(stats.taken, 18u);
   CHECK_EQ(stats.floors, 4u); // the floor and the crate's top
   CHECK_EQ(stats.ceilings, 2u);
-  CHECK_EQ(stats.walls, 10u);
-  CHECK_EQ(stats.vertices, 14u); // the room's 8 corners, the crate's 6 used
+  CHECK_EQ(stats.walls, 12u);
+  CHECK_EQ(stats.vertices, 18u); // the room's 8 corners, the crate's 6 used, the door's 4
   CHECK_EQ(stats.overLimits, 0u);
   // Each quad's diagonal lies between two faces in one plane.
-  CHECK_EQ(stats.smoothEdges, 8u);
+  CHECK_EQ(stats.smoothEdges, 9u);
   CHECK_EQ(stats.facingAway, 0u); // all face (3, 3, 1)
   CHECK_EQ(stats.turned, 0u);
   std::printf("room: %u triangles, %u vertices, %u edges, %u leaves, depth %u, %u bytes\n",
@@ -169,11 +169,11 @@ int main() {
   // The tree's triangles wind as the host's did, so face the same ways.
   {
     const CAreaOctTree& t = tree->OctTree();
-    REQUIRE(t.PortTriangleCount() == 16u);
+    REQUIRE(t.PortTriangleCount() == 18u);
     int matched = 0;
     for (const Triangle& in : room) {
-      if ((in.flags & Passthrough::kTriangleMoves) != 0) {
-        continue;
+      if (in.a.x == 1 && in.b.x == 2) {
+        continue; // the sliver
       }
       const Vec3 want = Normal(CVector3f(in.a.x, in.a.y, in.a.z), CVector3f(in.b.x, in.b.y, in.b.z),
                                CVector3f(in.c.x, in.c.y, in.c.z));
@@ -200,7 +200,7 @@ int main() {
         }
       }
     }
-    CHECK_EQ(matched, 16);
+    CHECK_EQ(matched, 18);
   }
 
   // Every triangle is in a leaf, and the leaves lie within the root.
@@ -211,7 +211,7 @@ int main() {
     bool boundsOk = true;
     Walk(CAreaOctTree::Node(t.GetTreeMemory(), t.GetBoundingBox(), t, t.GetTreeType()), seen,
          leaves, boundsOk, t.GetBoundingBox());
-    CHECK_EQ(int(seen.size()), 16);
+    CHECK_EQ(int(seen.size()), 18);
     CHECK_EQ(uint32_t(leaves), stats.leaves);
     CHECK_MSG(boundsOk, "leaf bounds within the root");
   }
@@ -251,9 +251,24 @@ int main() {
     const CAABox inside(CVector3f(6.1f, 6.1f, 0.2f), CVector3f(6.4f, 6.4f, 0.8f));
     const double out = Move(*tree, inside, {-1, 0, 0}, 1.f);
     CHECK_MSG(out > 0.99, "moving out through a face from behind isn't stopped");
-    // The door moves, so it's left out (for now): she walks through where it is.
+    // The door, on something the host moves, stops her too (the host sends it again as it
+    // opens).
     const CAABox atDoor(CVector3f(4.1f, 1.f, 0.1f), CVector3f(4.9f, 1.76f, 1.9f));
-    CHECK_MSG(Move(*tree, atDoor, {0, -1, 0}, 0.4f) > 0.399, "no door to stop her");
+    CHECK_MSG(std::fabs(Move(*tree, atDoor, {0, -1, 0}, 1.f) - 0.5) < 1e-3,
+              "the closed door stops her 0.5 m on");
+    {
+      std::vector< Triangle > opened = room;
+      for (Triangle& t : opened) {
+        if ((t.flags & Passthrough::kTriangleMoves) != 0) {
+          t.a.z += 2.5f; // slid up out of the way
+          t.b.z += 2.5f;
+          t.c.z += 2.5f;
+        }
+      }
+      const std::unique_ptr< Tree > open = Build(opened.data(), opened.size(), options);
+      REQUIRE(open != nullptr);
+      CHECK_MSG(Move(*open, atDoor, {0, -1, 0}, 0.9f) > 0.899, "the open door lets her by");
+    }
     CHECK_MSG(!CMetroidAreaCollider::AABoxCollisionCheckBoolean(tree->OctTree(), box,
                                                                 CMaterialFilter::skPassEverything),
               "standing free, she overlaps nothing");
@@ -342,9 +357,11 @@ int main() {
   // Nothing to take.
   {
     std::vector< Triangle > none;
-    Quad(none, {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, Passthrough::kTriangleMoves);
+    none.push_back({{0, 0, 0}, {1, 1, 1}, {2, 2, 2}, 0});
+    none.push_back({{0, 0, 0}, {NAN, 0, 0}, {0, 1, 0}, 0});
     Options o;
-    CHECK_MSG(Build(none.data(), none.size(), o) == nullptr, "only moving triangles: no tree");
+    CHECK_MSG(Build(none.data(), none.size(), o) == nullptr,
+              "only triangles with no area: no tree");
     CHECK_MSG(Build(nullptr, 0, o) == nullptr, "no triangles: no tree");
   }
 

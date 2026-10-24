@@ -100,7 +100,7 @@ static void DrawPassthrough() {
   }
   ImGui::SetItemTooltip("Samus walks in Dead Space's world: she goes to where Isaac stands,\n"
                         "facing his way and made his size, and collides with Dead Space's\n"
-                        "collision near him (the level; not yet doors, lifts or Necromorphs).\n"
+                        "collision near him (the level, doors and lifts; not Necromorphs yet).\n"
                         "Meanwhile the room's objects are switched off and the room isn't drawn\n"
                         "(F1 > Debug > Rendering > Collision view draws what she collides with).\n"
                         "Turned off, she goes back to where she was and the room comes back.\n"
@@ -123,10 +123,11 @@ static void DrawPassthrough() {
       const PassthroughCollision::Stats& t = info.tree;
       ImGui::TextDisabled("Collision from set %u: %u triangles (%u floors, %u walls, %u ceilings),",
                           info.treeGeneration, t.taken, t.floors, t.walls, t.ceilings);
-      ImGui::TextDisabled("  %u vertices, %u edges, %u leaves; left out: %u past the limits,",
-                          t.vertices, t.edges, t.leaves, t.overLimits);
-      ImGui::TextDisabled("  %u moving, %u with no area; built in %.1f ms (%u builds)", t.moving,
-                          t.degenerate, info.buildMs, info.builds);
+      ImGui::TextDisabled("  %u of them on doors and lifts; %u vertices, %u edges, %u leaves;",
+                          t.moving, t.vertices, t.edges, t.leaves);
+      ImGui::TextDisabled("  left out: %u past the limits, %u with no area; built in %.1f ms (%u "
+                          "builds)",
+                          t.overLimits, t.degenerate, info.buildMs, info.builds);
       ImGui::TextDisabled("  %u of the %u triangles within 3 m of her face away from her",
                           t.facingAway, t.nearby);
     }

@@ -301,8 +301,9 @@ in the Dead Space Prime repository. What the port has so far:
 - **Walk in the host's world** (under the wireframe's switch; off at each
   start): Samus walks in Dead Space's world, colliding with its collision.
   Once the host is in a level and its triangles have come:
-  - the triangles of what doesn't move (the level) are built into a room
-    collision tree, as a room's collision is (`CAreaOctTree`, in the
+  - the triangles (the level's, and those of doors and lifts, which the
+    plugin sends again within a tenth of a second of their moving) are built
+    into a room collision tree, as a room's collision is (`CAreaOctTree`, in the
     big-endian layout the game reads; `platform/passthrough_collision.cpp`,
     on a thread of its own, about 13 ms for a full set), within the limits of
     the lists `CMetroidAreaCollider` marks tested vertices, edges and
@@ -321,8 +322,9 @@ in the Dead Space Prime repository. What the port has so far:
     capsule, 0.38 m in radius and 1.80 m tall in build 45's run, as a box
     0.76 m across), and the bridge tells the host (`kGuestInHostWorld`) so it
     keeps its player where she is;
-  - turned off, or with the host gone, she gets her own size back, the rooms'
-    objects come back on, and she goes back to where she was.
+  - turned off, or with the host gone (out of a level, or quiet for 10 s: a
+    stall of a second or two doesn't count), she gets her own size back, the
+    rooms' objects come back on, and she goes back to where she was.
   A triangle faces as Dead Space winds it, and Prime's collision is one-sided
   (a box moving into a triangle from behind passes through:
   `CollisionUtil::RayTriangleIntersection_Double` needs the move against its
@@ -332,8 +334,8 @@ in the Dead Space Prime repository. What the port has so far:
   Floors are those facing within 45 degrees of up, ceilings of down, the rest
   walls, all solid metal. F1 > Debug > Rendering > Collision view draws the
   tree in the world (floors blue, ceilings red, walls grey).
-- Not yet: doors, lifts and Necromorphs (only the level's fixed triangles are
-  collided with).
+- Not yet: Necromorphs. Doors and lifts are rebuilt into the tree as they
+  move, a tenth of a second or so behind (a lift's floor moves in steps).
 
 The wire format (`platform/include/passthrough_protocol.h`) uses only 4-byte
 fields, so a 32-bit plugin and the 64-bit port lay it out alike, and every
@@ -345,7 +347,8 @@ wireframe's placement and projection (`platform/include/passthrough_view.h`)
 are covered by the same test. `tests/port_passthrough_collision.cpp` builds
 trees from made-up rooms and checks them through the game's own collision
 code: rays onto the floor and walls, a box of Isaac's size falling onto the
-floor, meeting the ceiling and walls, passing a face from behind, the
+floor, meeting the ceiling and walls, a closed door and not an open one,
+passing a face from behind, the
 triangles' winding kept or turned to face her, the limits, and a large floor
 triangle gathering only the leaves near a query.
 

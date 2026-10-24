@@ -82,6 +82,7 @@ struct Candidate {
   GridKey corner[3];
   float reach;
   uint32_t order;
+  bool moves; // on something the host moves (kTriangleMoves)
 };
 
 struct Box {
@@ -266,10 +267,6 @@ std::unique_ptr< Tree > Build(const Passthrough::Triangle* triangles, size_t cou
   candidates.reserve(count);
   for (size_t i = 0; i < count; ++i) {
     const Passthrough::Triangle& t = triangles[i];
-    if ((t.flags & Passthrough::kTriangleMoves) != 0) {
-      ++stats.moving;
-      continue;
-    }
     if (!Finite(t.a) || !Finite(t.b) || !Finite(t.c)) {
       ++stats.degenerate;
       continue;
@@ -289,6 +286,7 @@ std::unique_ptr< Tree > Build(const Passthrough::Triangle* triangles, size_t cou
         (std::max)({Length(Sub(a, middle)), Length(Sub(b, middle)), Length(Sub(p, middle))});
     c.reach = (std::max)(0.f, Length(Sub(middle, options.nearest)) - spread);
     c.order = uint32_t(i);
+    c.moves = (t.flags & Passthrough::kTriangleMoves) != 0;
     candidates.push_back(c);
   }
   std::stable_sort(candidates.begin(), candidates.end(),
@@ -389,6 +387,7 @@ std::unique_ptr< Tree > Build(const Passthrough::Triangle* triangles, size_t cou
       }
     }
     corners.insert(corners.end(), id, id + 3);
+    stats.moving += c.moves ? 1 : 0;
     triangleFlags.push_back(flags);
     if (c.reach < kNearby) {
       ++stats.nearby;

@@ -37,7 +37,8 @@ struct Options {
 
 struct Stats {
   uint32_t offered = 0;    // triangles in the set
-  uint32_t moving = 0;     // left out: on things the host moves (kTriangleMoves)
+  uint32_t moving = 0;     // of those taken, on things the host moves (kTriangleMoves): doors,
+                           // lifts; a host sends them again as they move
   uint32_t degenerate = 0; // left out: no area to speak of, or not finite
   uint32_t overLimits = 0; // left out: past the tree's limits (the furthest go)
   uint32_t taken = 0;      // in the tree
@@ -83,9 +84,9 @@ private:
   Stats mStats;
 };
 
-// A tree from the set's triangles (wire space, which is the guest's world space): those on
-// things the host moves left out, the nearest to `options.nearest` first up to the limits
-// above. Null when none can be taken.
+// A tree from the set's triangles (wire space, which is the guest's world space), those on
+// things the host moves (doors, lifts) with the rest, the nearest to `options.nearest` first up
+// to the limits above. Null when none can be taken.
 std::unique_ptr< Tree > Build(const Passthrough::Triangle* triangles, size_t count,
                               const Options& options);
 

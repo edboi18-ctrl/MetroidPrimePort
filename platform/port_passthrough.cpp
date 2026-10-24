@@ -29,6 +29,9 @@ using Clock = std::chrono::steady_clock;
 // How long a host may go without writing before it counts as gone, and how often a failed
 // open is retried.
 constexpr auto kHostTimeout = std::chrono::seconds(1);
+// Samus stays in the host's world while it's quiet for up to this long: build 48's run had Dead
+// Space stall 1.2 to 2.5 s a frame, which took her back to her own world and out again.
+constexpr auto kWalkGrace = std::chrono::seconds(10);
 constexpr auto kRetryEvery = std::chrono::seconds(2);
 
 // Set from the F1 overlay; the block is opened and closed on the game's thread, in Tick.
@@ -343,6 +346,11 @@ void UpdateTree(const Passthrough::Vec3& at) {
 // Once a tick: walking in the host's world while it's asked for and there's a host in a level
 // with its triangles; back in the rooms once not.
 void UpdateWalk(CStateManager& mgr, const Passthrough::GuestState& samus, bool connected) {
+  // Already there, a host gone quiet for a moment (a stall, or its window in front) doesn't take
+  // her back.
+  if (sWalking && !connected) {
+    connected = sLastHostFrame != 0 && Clock::now() - sHostSeenAt < kWalkGrace;
+  }
   if (sWalking && sWalkGame != &mgr) {
     StopWalking(mgr); // a new game: nothing to give back
   }
