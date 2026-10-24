@@ -1448,7 +1448,19 @@ float CPlayer::GetEyeHeight() const {
 
 #ifdef TARGET_PC
 float CPlayer::GetOwnEyeHeight() const {
-  return x2d8_fpBounds.GetPointD().GetZ() - gpTweakPlayer->GetEyeOffset();
+  // From the tweak's height, not x2d8_fpBounds: a passthrough host may have made her its
+  // player's size (PortSetCollisionSize).
+  return gpTweakPlayer->GetPlayerHeight() - gpTweakPlayer->GetEyeOffset();
+}
+
+void CPlayer::PortSetCollisionSize(float halfWidth, float height) {
+  // As CStateManager::CreateStandardGameObjects makes her box from the tweak: standing on her
+  // feet, centred on them. The same box is her first-person bounds, her base bounding box and
+  // her collision primitive's (the morph ball keeps its own sphere).
+  const CAABox box(CVector3f(-halfWidth, -halfWidth, 0.f), CVector3f(halfWidth, halfWidth, height));
+  x2d8_fpBounds = box;
+  x1c0_collisionPrimitive.Box() = box;
+  SetBoundingBox(box);
 }
 #endif
 

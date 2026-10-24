@@ -118,20 +118,23 @@ int main() {
     GuestState samus{};
     samus.tick = 1;
     samus.position = {10.f, -4.f, 2.5f};
-    samus.flags = kGuestInGame | kGuestOnGround;
+    samus.flags = kGuestInGame | kGuestOnGround | kGuestInHostWorld;
     Write(guest.Block()->guest, samus);
     GuestState seen{};
     CHECK(Read(host.Block()->guest, seen) && seen.position.x == 10.f && seen.position.y == -4.f &&
-          seen.flags == (kGuestInGame | kGuestOnGround));
+          seen.flags == (kGuestInGame | kGuestOnGround | kGuestInHostWorld));
 
     HostState isaac{};
     isaac.frame = 42;
     isaac.playerHealth = 100.f;
     isaac.playerEyeHeight = 1.65f;
+    isaac.playerRadius = 0.38f;
+    isaac.playerHeight = 1.8f;
     Write(host.Block()->host, isaac);
     HostState back{};
     CHECK(Read(guest.Block()->host, back) && back.frame == 42 && back.playerHealth == 100.f &&
-          back.playerEyeHeight == 1.65f);
+          back.playerEyeHeight == 1.65f && back.playerRadius == 0.38f &&
+          back.playerHeight == 1.8f);
 
     auto set = std::make_unique< TriangleSet >();
     set->generation = 1;

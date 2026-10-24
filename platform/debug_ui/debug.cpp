@@ -82,7 +82,8 @@ static void DrawPassthrough() {
   }
   ImGui::SetItemTooltip("Dead Space's collision near Isaac, as the plugin sends it, drawn as a\n"
                         "wireframe around Samus, as if Isaac stood where she does, facing her\n"
-                        "way: blue for the level, orange for what moves (doors, lifts).\n"
+                        "way (where it is, while she walks in Dead Space's world): blue for the\n"
+                        "level, orange for what moves (doors, lifts).\n"
                         "Not saved: off at each start.");
   if (shown && info.status == PortPassthrough::Status::Connected) {
     PortPassthrough::Wireframe wireframe;
@@ -92,6 +93,52 @@ static void DrawPassthrough() {
     } else {
       ImGui::TextDisabled("No triangles from the host yet");
     }
+  }
+  bool walk = PortPassthrough::WalkInHostWorld();
+  if (ImGui::Checkbox("Walk in the host's world", &walk)) {
+    PortPassthrough::SetWalkInHostWorld(walk);
+  }
+  ImGui::SetItemTooltip("Samus walks in Dead Space's world: she goes to where Isaac stands,\n"
+                        "facing his way and made his size, and collides with Dead Space's\n"
+                        "collision near him (the level; not yet doors, lifts or Necromorphs).\n"
+                        "Meanwhile the room's objects are switched off and the room isn't drawn\n"
+                        "(F1 > Debug > Rendering > Collision view draws what she collides with).\n"
+                        "Turned off, she goes back to where she was and the room comes back.\n"
+                        "Not saved: off at each start.");
+  if (walk) {
+    switch (info.walk) {
+    case PortPassthrough::Walk::Off:
+      break;
+    case PortPassthrough::Walk::Waiting:
+      ImGui::TextDisabled("Waiting for %s", info.walkMessage.empty() ? "the bridge" : info.walkMessage.c_str());
+      break;
+    case PortPassthrough::Walk::Walking:
+      ImGui::TextDisabled("Walking in the host's world; %u of the rooms' objects switched off",
+                          info.frozen);
+      break;
+    }
+    ImGui::TextDisabled("Samus %.2f m across and %.2f m tall (her own size: %.2f by %.2f)",
+                        2.f * info.halfWidth, info.height, 2.f * info.ownHalfWidth, info.ownHeight);
+    if (info.treeGeneration != 0) {
+      const PassthroughCollision::Stats& t = info.tree;
+      ImGui::TextDisabled("Collision from set %u: %u triangles (%u floors, %u walls, %u ceilings),",
+                          info.treeGeneration, t.taken, t.floors, t.walls, t.ceilings);
+      ImGui::TextDisabled("  %u vertices, %u edges, %u leaves; left out: %u past the limits,",
+                          t.vertices, t.edges, t.leaves, t.overLimits);
+      ImGui::TextDisabled("  %u moving, %u with no area; built in %.1f ms (%u builds)", t.moving,
+                          t.degenerate, info.buildMs, info.builds);
+      ImGui::TextDisabled("  %u of the %u triangles within 3 m of her face away from her",
+                          t.facingAway, t.nearby);
+    }
+    bool face = PortPassthrough::FaceSamus();
+    if (ImGui::Checkbox("Turn its triangles to face Samus", &face)) {
+      PortPassthrough::SetFaceSamus(face);
+    }
+    ImGui::SetItemTooltip("Prime's collision stops Samus only coming at a triangle's front.\n"
+                          "Off: the triangles face as Dead Space has them. On: each is turned to\n"
+                          "face her as the collision is built (again each metre she goes), for if\n"
+                          "Dead Space's face away from her (she'd fall through a floor, walk\n"
+                          "through a wall). Not saved: off at each start.");
   }
 }
 
@@ -116,7 +163,7 @@ void DrawPassthroughWireframe() {
                                               PassthroughView::ToGuest(place, triangle.c)};
     const PassthroughView::Vec3 centre = PassthroughView::Scale(
         PassthroughView::Add(PassthroughView::Add(corners[0], corners[1]), corners[2]), 1.f / 3.f);
-    const PassthroughView::Vec3 off = PassthroughView::Sub(centre, place.to);
+    const PassthroughView::Vec3 off = PassthroughView::Sub(centre, wireframe.samus);
     if (PassthroughView::Dot(off, off) > kDrawnWithin * kDrawnWithin) {
       continue;
     }

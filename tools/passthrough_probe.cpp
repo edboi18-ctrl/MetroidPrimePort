@@ -4,8 +4,9 @@
 // status reads "connected". With --still it only reads and writes nothing. With --room its
 // player stands at the origin facing +Y, in a made-up room it publishes as the host's collision
 // (a floor 20 m square, a wall 6 m ahead of him with a doorway, and a door in it that moves), for
-// F1 > Debug > Passthrough's "Draw the host's collision", with his eyes 1.65 m up, where Samus's
-// go too.
+// F1 > Debug > Passthrough's "Draw the host's collision" and "Walk in the host's world", with
+// his eyes 1.65 m up, where Samus's go too, and his size Isaac's (a capsule 0.38 m in radius,
+// 1.8 m tall), which Samus's becomes while she walks there.
 //
 //   passthrough_probe [--still] [--room] [--seconds N]
 
@@ -105,6 +106,8 @@ int main(int argc, char** argv) {
       if (room) {
         host.flags = Passthrough::kHostInGame;
         host.playerEyeHeight = 1.65f; // as the Dead Space plugin puts Isaac's
+        host.playerRadius = 0.38f;    // and his size, as Dead Space has it
+        host.playerHeight = 1.8f;
       }
       Passthrough::Write(mapping.Block()->host, host);
     }
@@ -119,11 +122,13 @@ int main(int argc, char** argv) {
       } else {
         lastTick = samus.tick;
         std::printf("tick %u  pos %.2f %.2f %.2f  vel %.2f %.2f %.2f  look %.2f %.2f %.2f  "
-                    "energy %.0f/%.0f  flags 0x%x morph %u\n",
+                    "energy %.0f/%.0f  flags 0x%x morph %u%s\n",
                     samus.tick, samus.position.x, samus.position.y, samus.position.z,
                     samus.velocity.x, samus.velocity.y, samus.velocity.z, samus.forward.x,
                     samus.forward.y, samus.forward.z, samus.energy, samus.maxEnergy, samus.flags,
-                    samus.morph);
+                    samus.morph,
+                    (samus.flags & Passthrough::kGuestInHostWorld) != 0 ? "  (in the host's world)"
+                                                                        : "");
       }
       std::fflush(stdout);
     }

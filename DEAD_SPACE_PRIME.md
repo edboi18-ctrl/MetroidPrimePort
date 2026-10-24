@@ -289,7 +289,8 @@ in the Dead Space Prime repository. What the port has so far:
   for the Dead Space plugin: run it in a console while the bridge is on and
   it prints Samus's state twice a second, and F1 shows it as connected. With
   `--room` it also sends a made-up room (a floor 20 m square, a wall 6 m
-  ahead with a doorway, and an orange door in it) for the wireframe.
+  ahead with a doorway, and an orange door in it) for the wireframe, with its
+  player's size Isaac's, for walking in it.
 - **Eye height (still bridge version 2):** the host also says how high above
   its player's feet it puts its first-person camera (Dead Space: 1.65 m
   above Isaac's feet; a host that doesn't say leaves Samus's own), and
@@ -297,8 +298,42 @@ in the Dead Space Prime repository. What the port has so far:
   instead of her own height (`CPlayer::GetEyeHeight` and
   `GetUnbiasedEyeHeight`), so both games look from the same height above the
   same feet; her gun comes down with them. The F1 line shows both heights.
-  Her collision box is unchanged so far.
-- Nothing else from the host acts on the game yet: the wireframe only draws.
+- **Walk in the host's world** (under the wireframe's switch; off at each
+  start): Samus walks in Dead Space's world, colliding with its collision.
+  Once the host is in a level and its triangles have come:
+  - the triangles of what doesn't move (the level) are built into a room
+    collision tree, as a room's collision is (`CAreaOctTree`, in the
+    big-endian layout the game reads; `platform/passthrough_collision.cpp`,
+    on a thread of its own, about 13 ms for a full set), within the limits of
+    the lists `CMetroidAreaCollider` marks tested vertices, edges and
+    triangles in (10,240, 24,576 and 16,384, unchecked by the game), the
+    nearest first, and again for each new set the host sends;
+  - while she walks there, the room she's in collides through that tree, and
+    the other loaded rooms through an empty one (`CGameArea::GetOctTree`, and
+    `CGameCollision::BuildAreaCollisionCache`, which now goes through it), so
+    walking, the morph ball, the Remastered movers, shots and rays all use it;
+    the collision failsafe searches within the tree's bounds;
+  - the rooms' objects (what their scripts made, and every enemy) are switched
+    off, so they stop thinking, colliding and drawing, and the rooms aren't
+    drawn (as the collision view's "only" mode leaves them);
+  - she goes to where the host's player stands, facing his way, in its space
+    one to one, made his size (`CPlayer::PortSetCollisionSize`: Isaac's
+    capsule, 0.38 m in radius and 1.80 m tall in build 45's run, as a box
+    0.76 m across), and the bridge tells the host (`kGuestInHostWorld`) so it
+    keeps its player where she is;
+  - turned off, or with the host gone, she gets her own size back, the rooms'
+    objects come back on, and she goes back to where she was.
+  A triangle faces as Dead Space winds it, and Prime's collision is one-sided
+  (a box moving into a triangle from behind passes through:
+  `CollisionUtil::RayTriangleIntersection_Double` needs the move against its
+  normal, (b - a) x (c - a)), so F1 counts the triangles within 3 m of her that
+  face away, and **Turn its triangles to face Samus** (off at each start)
+  turns each to face her as the tree is built, again each metre she goes.
+  Floors are those facing within 45 degrees of up, ceilings of down, the rest
+  walls, all solid metal. F1 > Debug > Rendering > Collision view draws the
+  tree in the world (floors blue, ceilings red, walls grey).
+- Not yet: doors, lifts and Necromorphs (only the level's fixed triangles are
+  collided with).
 
 The wire format (`platform/include/passthrough_protocol.h`) uses only 4-byte
 fields, so a 32-bit plugin and the 64-bit port lay it out alike, and every
@@ -307,7 +342,12 @@ other's update (`tests/port_passthrough.cpp` races a writer against a reader
 to check it). The triangle set, at 640 KiB, is copied word by word straight
 between the block and the reader's copy, and only when it has changed; the
 wireframe's placement and projection (`platform/include/passthrough_view.h`)
-are covered by the same test.
+are covered by the same test. `tests/port_passthrough_collision.cpp` builds
+trees from made-up rooms and checks them through the game's own collision
+code: rays onto the floor and walls, a box of Isaac's size falling onto the
+floor, meeting the ceiling and walls, passing a face from behind, the
+triangles' winding kept or turned to face her, the limits, and a large floor
+triangle gathering only the leaves near a query.
 
 ## Fixes
 
@@ -369,7 +409,9 @@ and the times retail's buckets would have dropped a water surface.
 | `platform/include/port_passthrough.h`, `platform/port_passthrough.cpp`, `src/MetroidPrime/CStateManager.cpp`, `platform/debug_ui/debug.cpp` | Publishes Samus's state once a tick, reads the host's and its triangle set, the F1 > Debug > Passthrough switches, and the wireframe drawn each frame (called from `platform/debug_ui/window.cpp`). |
 | `src/MetroidPrime/Player/CPlayerDynamics.cpp` (`GetEyeHeight`, `GetUnbiasedEyeHeight`, `GetOwnEyeHeight`) | Samus's eyes at the host player's height while the bridge is linked. |
 | `platform/include/passthrough_view.h` | The wireframe's math: the host's world put where Samus is, and projected as the port's camera has it. |
-| `tools/passthrough_probe.cpp` | The stand-in host (`--room`: a made-up room for the wireframe). |
+| `platform/include/passthrough_collision.h`, `platform/passthrough_collision.cpp` | The host's triangles built into a room's collision tree (covered by `tests/port_passthrough_collision.cpp`). |
+| `include/MetroidPrime/CGameArea.hpp` (`GetOctTree`), `src/MetroidPrime/CGameCollision.cpp` (`BuildAreaCollisionCache`, the failsafe's bounds), `src/MetroidPrime/CStateManager.cpp` (`DrawWorld`, the destructor), `src/MetroidPrime/Player/CPlayerDynamics.cpp` (`PortSetCollisionSize`) | Samus walking in the host's world: its collision for the rooms', the rooms undrawn, her size. |
+| `tools/passthrough_probe.cpp` | The stand-in host (`--room`: a made-up room for the wireframe and for walking in). |
 | `src/MetroidPrime/Player/CPlayerGun.cpp` | Draws the throwing hand, and keeps the suit's right arm drawn while it throws; under manual aim, has missiles, Super Missiles and the Wave Beam seek the target nearest the crosshair; gives lock-on the faster Power Beam's speed. |
 | `src/MetroidPrime/Enemies/CPatterned.cpp` | The glow, in `PreRender`. |
 | `src/GuiSys/CAuiEnergyBarT01.cpp`, `include/GuiSys/CAuiEnergyBarT01.hpp` | Draws the meter and its label along the energy bar, inside the bar's own draw. |

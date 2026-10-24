@@ -86,6 +86,14 @@ public:
 };
 
 class CPFArea;
+#ifdef TARGET_PC
+class CAreaOctTree;
+class CGameArea;
+namespace PortPassthrough {
+const CAreaOctTree& AreaCollision(const CGameArea& area, const CAreaOctTree& own);
+}
+#endif
+
 class CGameArea : public IGameArea {
 public:
   class CAreaFog {
@@ -320,7 +328,15 @@ public:
   bool IsPostConstructed() const { return xf0_24_postConstructed; }                         // name?
   CPostConstructed* GetPostConstructed() { return x12c_postConstructed.get(); }             // name?
   const CPostConstructed* GetPostConstructed() const { return x12c_postConstructed.get(); } // name?
+#ifdef TARGET_PC
+  // Dead Space Prime's passthrough bridge: while Samus walks in a host game's world, the host's
+  // collision stands in for the rooms' (port_passthrough.h).
+  const CAreaOctTree& GetOctTree() const {
+    return PortPassthrough::AreaCollision(*this, *GetPostConstructed()->x0_collision);
+  }
+#else
   const CAreaOctTree& GetOctTree() const { return *GetPostConstructed()->x0_collision; }
+#endif
   CGameArea* GetNext() { return x130_next; }                                                // name?
   CGameArea* GetPrev() { return x134_prev; }                                                // name?
   int GetCurChain() const { return x138_curChain; }                                         // name?

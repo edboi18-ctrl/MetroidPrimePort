@@ -738,6 +738,8 @@ CStateManager::~CStateManager() {
   if (PortDebug::StateManager() == this) {
     PortDebug::SetStateManager(nullptr);
   }
+  // Samus walking in a passthrough host's world belonged to this game.
+  PortPassthrough::GameEnded(*this);
   if (gpGameState != nullptr) {
     PortLiveSplit::GameSessionEnd(gpGameState->GetTotalPlayTime());
   }
@@ -3334,7 +3336,9 @@ void CStateManager::DrawWorld() const {
 #ifdef TARGET_PC
   bool portRoomGeo[10] = {};
   // Collision view "only": the world draws nothing but Samus (port_collision_view.h).
-  const bool portCollisionOnly = !thermal && PortCollisionView::Only();
+  // Walking in a passthrough host's world, the rooms aren't drawn either (port_passthrough.h).
+  const bool portCollisionOnly =
+      !thermal && (PortCollisionView::Only() || PortPassthrough::HidesRoom());
   const CGameArea* portVisArea = nullptr;
   for (int i = 0; i < areas.size(); ++i) {
     if (areas[i]->GetId() == visAreaId) {

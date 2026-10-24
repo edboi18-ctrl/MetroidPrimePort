@@ -21,6 +21,9 @@
 #include "MetroidPrime/TCastTo.hpp"
 #include "MetroidPrime/UserNames.hpp"
 #include "WorldFormat/CAreaOctTree.hpp"
+#ifdef TARGET_PC
+#include "port_passthrough.h"
+#endif
 #include "WorldFormat/CMetroidAreaCollider.hpp"
 
 #include "rstl/math.hpp"
@@ -84,8 +87,15 @@ void CGameCollision::BuildAreaCollisionCache(const CStateManager& mgr, CAreaColl
 
   for (CGameArea::CConstChainIterator it = mgr.GetWorld()->GetChainHead(CWorld::kC_Alive);
        it != CWorld::skGlobalEnd; ++it) {
+#ifdef TARGET_PC
+    // Through GetOctTree, as the other static queries: a passthrough host's collision may stand
+    // in for the room's (port_passthrough.h).
+    const CAreaOctTree& collision = (*it).GetOctTree();
+    CMetroidAreaCollider::COctreeLeafCache leafCache(collision);
+#else
     CMetroidAreaCollider::COctreeLeafCache leafCache(*(*it).GetPostConstructed()->x0_collision);
     const CAreaOctTree& collision = *(*it).GetPostConstructed()->x0_collision;
+#endif
     CAreaOctTree::Node node(collision.GetTreeMemory(), collision.GetBoundingBox(), collision,
                             collision.GetTreeType());
     CMetroidAreaCollider::BuildOctreeLeafCache(node, cache.GetCacheBounds(), leafCache);
@@ -1203,10 +1213,20 @@ CGameCollision::FindNonIntersectingVector(const CStateManager& mgr, CAreaCollisi
       wx = origin.GetX() + vec.GetX();
       wy = origin.GetY() + vec.GetY();
       wz = origin.GetZ() + vec.GetZ();
+#ifdef TARGET_PC
+      // Walking in a passthrough host's world, she's outside the room's bounds; the host's
+      // collision has its own.
+      const CAreaOctTree* portHost = PortPassthrough::HostCollision();
+      const CAABox& portBounds = portHost != nullptr
+                                     ? portHost->GetBoundingBox()
+                                     : mgr.GetWorld()->GetAreaAlways(mgr.GetNextAreaId()).GetAABB();
+      if (portBounds.PointInside(CVector3f(wx, wy, wz))) {
+#else
       if (mgr.GetWorld()
               ->GetAreaAlways(mgr.GetNextAreaId())
               .GetAABB()
               .PointInside(CVector3f(wx, wy, wz))) {
+#endif
         if (mgr.RayCollideWorld(center2, center2 + vec, nearList, CMaterialFilter::skPassEverything,
                                 &actor)) {
           xf.SetTranslation(CVector3f(wx, wy, wz));

@@ -311,6 +311,8 @@
 {"Debug", "", "Rendering", "Frame statistics", "frame statistics fps timing debug"},
 {"Debug", "", "Passthrough", "Passthrough bridge", "passthrough dead space bridge host shared memory probe"},
 {"Debug", "", "Passthrough", "Draw the host's collision", "passthrough dead space collision wireframe triangles isaac host"},
+{"Debug", "", "Passthrough", "Walk in the host's world", "passthrough dead space collision walk isaac host world size"},
+{"Debug", "", "Passthrough", "Turn its triangles to face Samus", "passthrough dead space collision winding facing triangles"},
 {"Debug", "", "Audio backends", "Streamed audio (music/movies)", "audio stream music movies backend"},
 {"Debug", "", "Audio backends", "MusyX audio (effects/streams)", "musyx audio effects backend"},
 {"Debug", "", "Sounds playing", "Freeze list", "sounds playing list freeze"},

@@ -271,6 +271,7 @@ set(MP_PORT_SOURCES
     platform/port_double_tap.cpp
     platform/port_gun_sway.cpp
     platform/passthrough_shm.cpp
+    platform/passthrough_collision.cpp
     platform/port_passthrough.cpp
     platform/port_remastered_font.cpp
     platform/port_remastered_hud.cpp
@@ -1001,6 +1002,21 @@ if(MP_BUILD_TESTS)
         SOURCES tests/port_passthrough.cpp platform/passthrough_shm.cpp
         INCLUDES platform/include
         LIBRARIES ${CMAKE_THREAD_LIBS_INIT})
+    # Trees of a passthrough host's collision, checked through the game's own collision code.
+    mp_port_test(port_passthrough_collision_tests
+        SOURCES tests/port_passthrough_collision.cpp platform/passthrough_collision.cpp
+            src/WorldFormat/CAreaOctTree_Tests.cpp src/WorldFormat/CAreaOctTree.cpp
+            src/WorldFormat/CCollisionSurface.cpp src/WorldFormat/CMetroidAreaCollider.cpp
+            src/Collision/CMaterialFilter.cpp src/Collision/CollisionUtil.cpp
+            src/Collision/CCollisionInfo.cpp src/Collision/CMRay.cpp
+            src/Kyoto/Math/CSphere.cpp src/Kyoto/Math/CVector3d.cpp
+            src/Kyoto/Math/CAABox.cpp src/Kyoto/Math/CVector3i.cpp src/Kyoto/Math/CVector3f.cpp
+            src/Kyoto/Streams/CInputStream.cpp src/Kyoto/Streams/CMemoryInStream.cpp
+            src/Kyoto/Streams/COutputStream.cpp src/Kyoto/Math/CVector2f.cpp
+            src/Kyoto/Math/CTransform4f.cpp src/Kyoto/Math/CUnitVector3f.cpp src/Kyoto/Math/CPlane.cpp
+            src/Kyoto/Math/RMathUtils.cpp
+        INCLUDES platform/include include extern/aurora/include extern/sdk/include
+        DEFINITIONS TARGET_PC VERSION=0)
     mp_port_test(port_dead_space_sound_tests
         SOURCES tests/port_dead_space_sound.cpp platform/port_dead_space_sound.cpp
         INCLUDES platform/include extern/aurora/include

@@ -23,8 +23,9 @@ namespace Passthrough {
 constexpr uint32_t kMagic = 0x54505344u;
 // Raised whenever SharedBlock's layout or a field's meaning changes. Each side refuses a block
 // written for another version. 2: the host's collision near its player (TriangleSet). A field
-// taken from `reserved` where 0 means "none" needs no new version, as a side that doesn't know it
-// writes 0 there and ignores it: HostState::playerEyeHeight is one.
+// taken from `reserved` where 0 means "none", or a flag a side that doesn't know it leaves clear,
+// needs no new version, as such a side writes 0 there and ignores it: HostState's
+// playerEyeHeight, playerRadius and playerHeight, and kGuestInHostWorld, are such.
 constexpr uint32_t kVersion = 2;
 // The shared memory's name. Windows: in the session's Local\ namespace (CreateFileMappingW).
 // Elsewhere: a POSIX shared memory object (shm_open), for tests and tools.
@@ -44,6 +45,9 @@ enum GuestFlags : uint32_t {
   kGuestOnGround = 1u << 2,  // Samus stands on something
   kGuestCinematic = 1u << 3, // a cutscene camera is in control
   kGuestDead = 1u << 4,      // Samus has died
+  // Samus walks in the host's world: she collides with its triangles (TriangleSet), and her
+  // position is in its wire space one to one, so the host keeps its player where she is.
+  kGuestInHostWorld = 1u << 5,
 };
 
 enum GuestMorph : uint32_t {
@@ -89,7 +93,9 @@ struct HostState {
   float playerMaxHealth; // and its most
   float playerEyeHeight; // where the host puts its camera in first person, above his feet; the
                          // guest puts Samus's eyes there too, so the two views match (0: none)
-  uint32_t reserved[15];
+  float playerRadius;    // his own collision, a capsule standing on his feet: its radius and its
+  float playerHeight;    // height end to end; the guest makes Samus's that size (0: unknown)
+  uint32_t reserved[13];
 };
 
 // The host's collision near its player (milestone 4 in docs/PASSTHROUGH.md): its world's
@@ -143,7 +149,8 @@ static_assert(offsetof(GuestState, position) == 16 && offsetof(GuestState, fovY)
 static_assert(sizeof(HostState) == 96, "HostState layout");
 static_assert(offsetof(HostState, playerPosition) == 8 &&
                   offsetof(HostState, playerMaxHealth) == 28 &&
-                  offsetof(HostState, playerEyeHeight) == 32,
+                  offsetof(HostState, playerEyeHeight) == 32 &&
+                  offsetof(HostState, playerRadius) == 36 && offsetof(HostState, playerHeight) == 40,
               "HostState offsets");
 static_assert(sizeof(Triangle) == 40 && sizeof(TriangleSet) == 64 + 40 * kMaxTriangles &&
                   offsetof(TriangleSet, triangles) == 64,
