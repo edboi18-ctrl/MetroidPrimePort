@@ -70,6 +70,10 @@ static void DrawPassthrough() {
     ImGui::TextDisabled("Host connected: frame %u; its player at %.2f %.2f %.2f", info.host.frame,
                         info.host.playerPosition.x, info.host.playerPosition.y,
                         info.host.playerPosition.z);
+    if (const float eyes = PortPassthrough::EyeHeight(); eyes > 0.f) {
+      ImGui::TextDisabled("Samus's eyes %.2f m above her feet, as its player's (hers are %.2f m)",
+                          eyes, info.ownEyeHeight);
+    }
     break;
   }
   bool shown = PortPassthrough::WireframeShown();

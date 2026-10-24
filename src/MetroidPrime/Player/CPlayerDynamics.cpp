@@ -1,6 +1,7 @@
 #include "MetroidPrime/Player/CPlayer.hpp"
 #include "port_debug.h"
 #include "port_mouse.h"
+#include "port_passthrough.h"
 
 #include "MetroidPrime/Player/CGameState.hpp"
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
@@ -1426,12 +1427,30 @@ float CPlayer::GetStepUpHeight() const {
 }
 
 float CPlayer::GetUnbiasedEyeHeight() const {
+#ifdef TARGET_PC
+  // Dead Space Prime's passthrough bridge: while a host is linked, her eyes are at the height its
+  // player's are, so both games look from the same place (port_passthrough.h).
+  if (const float host = PortPassthrough::EyeHeight(); host > 0.f) {
+    return host;
+  }
+#endif
   return x2d8_fpBounds.GetPointD().GetZ() - gpTweakPlayer->GetEyeOffset();
 }
 
 float CPlayer::GetEyeHeight() const {
+#ifdef TARGET_PC
+  if (const float host = PortPassthrough::EyeHeight(); host > 0.f) {
+    return x9c8_eyeZBias + host;
+  }
+#endif
   return x9c8_eyeZBias + (x2d8_fpBounds.GetPointD().GetZ() - gpTweakPlayer->GetEyeOffset());
 }
+
+#ifdef TARGET_PC
+float CPlayer::GetOwnEyeHeight() const {
+  return x2d8_fpBounds.GetPointD().GetZ() - gpTweakPlayer->GetEyeOffset();
+}
+#endif
 
 CVector3f CPlayer::GetEyePosition() const {
   return GetTranslation() + CVector3f(0.f, 0.f, GetEyeHeight());

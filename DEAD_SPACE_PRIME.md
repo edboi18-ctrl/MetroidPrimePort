@@ -290,7 +290,14 @@ in the Dead Space Prime repository. What the port has so far:
   it prints Samus's state twice a second, and F1 shows it as connected. With
   `--room` it also sends a made-up room (a floor 20 m square, a wall 6 m
   ahead with a doorway, and an orange door in it) for the wireframe.
-- Nothing from the host acts on the game yet: the wireframe only draws.
+- **Bridge version 3:** the host also says how high above its player's feet it
+  puts its first-person camera (Dead Space: 1.65 m above Isaac's feet), and
+  while it's connected with its player in a level, Samus's eyes go there
+  instead of her own height (`CPlayer::GetEyeHeight` and
+  `GetUnbiasedEyeHeight`), so both games look from the same height above the
+  same feet; her gun comes down with them. The F1 line shows both heights.
+  Her collision box is unchanged so far.
+- Nothing else from the host acts on the game yet: the wireframe only draws.
 
 The wire format (`platform/include/passthrough_protocol.h`) uses only 4-byte
 fields, so a 32-bit plugin and the 64-bit port lay it out alike, and every
@@ -359,6 +366,7 @@ and the times retail's buckets would have dropped a water surface.
 | `src/MetaRender/CCubeRenderer.cpp`, `include/MetaRender/CCubeRenderer.hpp` | Bigger sorted-draw buckets, and their counters for F1 > Debug > Rendering. |
 | `platform/include/passthrough_protocol.h`, `platform/include/passthrough_shm.h`, `platform/passthrough_shm.cpp` | The passthrough bridge's wire format, sequence lock and shared memory, plain C++ for the Dead Space plugin too (covered by `tests/port_passthrough.cpp`). |
 | `platform/include/port_passthrough.h`, `platform/port_passthrough.cpp`, `src/MetroidPrime/CStateManager.cpp`, `platform/debug_ui/debug.cpp` | Publishes Samus's state once a tick, reads the host's and its triangle set, the F1 > Debug > Passthrough switches, and the wireframe drawn each frame (called from `platform/debug_ui/window.cpp`). |
+| `src/MetroidPrime/Player/CPlayerDynamics.cpp` (`GetEyeHeight`, `GetUnbiasedEyeHeight`, `GetOwnEyeHeight`) | Samus's eyes at the host player's height while the bridge is linked. |
 | `platform/include/passthrough_view.h` | The wireframe's math: the host's world put where Samus is, and projected as the port's camera has it. |
 | `tools/passthrough_probe.cpp` | The stand-in host (`--room`: a made-up room for the wireframe). |
 | `src/MetroidPrime/Player/CPlayerGun.cpp` | Draws the throwing hand, and keeps the suit's right arm drawn while it throws; under manual aim, has missiles, Super Missiles and the Wave Beam seek the target nearest the crosshair; gives lock-on the faster Power Beam's speed. |

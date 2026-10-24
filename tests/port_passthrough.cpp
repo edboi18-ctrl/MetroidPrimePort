@@ -127,9 +127,11 @@ int main() {
     HostState isaac{};
     isaac.frame = 42;
     isaac.playerHealth = 100.f;
+    isaac.playerEyeHeight = 1.65f;
     Write(host.Block()->host, isaac);
     HostState back{};
-    CHECK(Read(guest.Block()->host, back) && back.frame == 42 && back.playerHealth == 100.f);
+    CHECK(Read(guest.Block()->host, back) && back.frame == 42 && back.playerHealth == 100.f &&
+          back.playerEyeHeight == 1.65f);
 
     auto set = std::make_unique< TriangleSet >();
     set->generation = 1;

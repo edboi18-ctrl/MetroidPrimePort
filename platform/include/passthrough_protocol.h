@@ -22,8 +22,9 @@ namespace Passthrough {
 // "DSPT" read as a little-endian uint32_t.
 constexpr uint32_t kMagic = 0x54505344u;
 // Raised whenever SharedBlock's layout or a field's meaning changes. Each side refuses a block
-// written for another version. 2: the host's collision near its player (TriangleSet).
-constexpr uint32_t kVersion = 2;
+// written for another version. 2: the host's collision near its player (TriangleSet). 3: the
+// height of the host's first-person eyes (HostState::playerEyeHeight).
+constexpr uint32_t kVersion = 3;
 // The shared memory's name. Windows: in the session's Local\ namespace (CreateFileMappingW).
 // Elsewhere: a POSIX shared memory object (shm_open), for tests and tools.
 constexpr const char* kSharedMemoryName = "DeadSpacePrimePassthrough";
@@ -85,7 +86,9 @@ struct HostState {
   float playerYaw;       // his heading, in radians about +Z, 0 facing +Y
   float playerHealth;    // his health
   float playerMaxHealth; // and its most
-  uint32_t reserved[16];
+  float playerEyeHeight; // where the host puts its camera in first person, above his feet; the
+                         // guest puts Samus's eyes there too, so the two views match (0: none)
+  uint32_t reserved[15];
 };
 
 // The host's collision near its player (milestone 4 in docs/PASSTHROUGH.md): its world's
@@ -138,7 +141,8 @@ static_assert(offsetof(GuestState, position) == 16 && offsetof(GuestState, fovY)
               "GuestState offsets");
 static_assert(sizeof(HostState) == 96, "HostState layout");
 static_assert(offsetof(HostState, playerPosition) == 8 &&
-                  offsetof(HostState, playerMaxHealth) == 28,
+                  offsetof(HostState, playerMaxHealth) == 28 &&
+                  offsetof(HostState, playerEyeHeight) == 32,
               "HostState offsets");
 static_assert(sizeof(Triangle) == 40 && sizeof(TriangleSet) == 64 + 40 * kMaxTriangles &&
                   offsetof(TriangleSet, triangles) == 64,

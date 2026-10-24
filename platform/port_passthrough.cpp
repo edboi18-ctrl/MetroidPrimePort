@@ -36,6 +36,10 @@ Passthrough::HostState sHost{};
 std::unique_ptr< Passthrough::TriangleSet > sSetBuffer;
 uint32_t sSetSequence = 0;
 std::atomic< bool > sWireframeShown{false};
+// The host's eye height while it applies (EyeHeight); heights outside this aren't taken.
+std::atomic< float > sEyeHeight{0.f};
+constexpr float kLowestEyes = 0.5f;
+constexpr float kHighestEyes = 3.f;
 
 // GetInfo reads from the F1 overlay, which may draw on another thread than the game ticks.
 std::mutex sInfoMutex;
@@ -43,7 +47,8 @@ Info sInfo;
 Wireframe sWireframe; // under sInfoMutex
 bool sHaveWireframe = false;
 
-void SetInfo(Status status, std::string message, const Passthrough::HostState* host) {
+void SetInfo(Status status, std::string message, const Passthrough::HostState* host,
+             float ownEyeHeight = 0.f) {
   std::lock_guard lock(sInfoMutex);
   sInfo.status = status;
   sInfo.message = std::move(message);
@@ -51,6 +56,7 @@ void SetInfo(Status status, std::string message, const Passthrough::HostState* h
   if (host != nullptr) {
     sInfo.host = *host;
   }
+  sInfo.ownEyeHeight = ownEyeHeight;
 }
 
 Passthrough::Vec3 ToVec(const CVector3f& v) { return {v.GetX(), v.GetY(), v.GetZ()}; }
@@ -138,6 +144,7 @@ void SetEnabled(bool enabled) { sEnabled.store(enabled, std::memory_order_relaxe
 
 void Tick(const CStateManager& mgr, float dt) {
   if (!Enabled()) {
+    sEyeHeight.store(0.f, std::memory_order_relaxed);
     if (sMapping.IsOpen()) {
       Shutdown();
     }
@@ -188,7 +195,14 @@ void Tick(const CStateManager& mgr, float dt) {
     }
   }
   const bool connected = sLastHostFrame != 0 && now - sHostSeenAt < kHostTimeout;
-  SetInfo(connected ? Status::Connected : Status::Waiting, {}, &sHost);
+  const float eyes = sHost.playerEyeHeight;
+  sEyeHeight.store(connected && (sHost.flags & Passthrough::kHostInGame) != 0 &&
+                           eyes >= kLowestEyes && eyes <= kHighestEyes
+                       ? eyes
+                       : 0.f,
+                   std::memory_order_relaxed);
+  SetInfo(connected ? Status::Connected : Status::Waiting, {}, &sHost,
+          mgr.GetPlayer()->GetOwnEyeHeight());
   UpdateWireframe(block, samus, *mgr.GetPlayer(), connected);
 }
 
@@ -211,11 +225,14 @@ bool GetWireframe(Wireframe& out) {
   return true;
 }
 
+float EyeHeight() { return sEyeHeight.load(std::memory_order_relaxed); }
+
 bool WireframeShown() { return sWireframeShown.load(std::memory_order_relaxed); }
 
 void SetWireframeShown(bool shown) { sWireframeShown.store(shown, std::memory_order_relaxed); }
 
 void Shutdown() {
+  sEyeHeight.store(0.f, std::memory_order_relaxed);
   sMapping.Close();
   sTick = 0;
   sLastHostFrame = 0;

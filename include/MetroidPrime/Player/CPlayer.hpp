@@ -233,6 +233,11 @@ public:
   CVector3f GetEyePosition() const;
   float GetEyeHeight() const;
   float GetUnbiasedEyeHeight() const;
+#ifdef TARGET_PC
+  // Her own eye height, as the game has it, also while the passthrough bridge puts her eyes at
+  // the host player's (port_passthrough.h).
+  float GetOwnEyeHeight() const;
+#endif
   const CCollidableSphere* GetCollidableSphere() const;
   CTransform4f CreateTransformFromMovementDirection() const;
   float GetOrbitMaxTargetDistance(const CStateManager& mgr) const;

@@ -4,7 +4,8 @@
 // status reads "connected". With --still it only reads and writes nothing. With --room its
 // player stands at the origin facing +Y, in a made-up room it publishes as the host's collision
 // (a floor 20 m square, a wall 6 m ahead of him with a doorway, and a door in it that moves), for
-// F1 > Debug > Passthrough's "Draw the host's collision".
+// F1 > Debug > Passthrough's "Draw the host's collision", with his eyes 1.65 m up, where Samus's
+// go too.
 //
 //   passthrough_probe [--still] [--room] [--seconds N]
 
@@ -103,6 +104,7 @@ int main(int argc, char** argv) {
       host.frame = frame;
       if (room) {
         host.flags = Passthrough::kHostInGame;
+        host.playerEyeHeight = 1.65f; // as the Dead Space plugin puts Isaac's
       }
       Passthrough::Write(mapping.Block()->host, host);
     }

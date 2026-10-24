@@ -37,8 +37,15 @@ struct Info {
   std::string message;
   uint32_t guestTick = 0;
   Passthrough::HostState host{};
+  float ownEyeHeight = 0.f; // Samus's own eyes above her feet, as the game has them
 };
 Info GetInfo();
+
+// While a host is connected with its player in a level, the height above his feet where it puts
+// its first-person camera (HostState::playerEyeHeight); else 0. CPlayer::GetEyeHeight puts
+// Samus's eyes there instead of her own, so both games look from the same height above the same
+// feet. On the game's thread.
+float EyeHeight();
 
 // The host's collision near its player, for the overlay's wireframe: the latest triangle set (in
 // wire space), where to put it so the host's player stands where Samus does
