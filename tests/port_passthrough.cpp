@@ -167,7 +167,8 @@ int main() {
         s.tick = n;
         s.dt = static_cast< float >(n);
         s.position = {s.dt, s.dt, s.dt};
-        s.reserved[15] = n;
+        s.touching = n;
+        s.reserved[14] = n;
         Write(writer.Block()->guest, s);
       }
       done = true;
@@ -177,7 +178,8 @@ int main() {
     while (!done) {
       GuestState s{};
       if (Read(reader.Block()->guest, s)) {
-        CHECK(s.reserved[15] == s.tick && s.dt == static_cast< float >(s.tick) &&
+        CHECK(s.reserved[14] == s.tick && s.touching == s.tick &&
+              s.dt == static_cast< float >(s.tick) &&
               s.position.z == s.dt);
         CHECK(s.tick >= last);
         last = s.tick;
