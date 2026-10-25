@@ -82,7 +82,8 @@ struct Candidate {
   GridKey corner[3];
   float reach;
   uint32_t order;
-  bool moves; // on something the host moves (kTriangleMoves)
+  bool moves;    // on something the host moves (kTriangleMoves)
+  uint32_t body; // the host's number for the body it's on
 };
 
 struct Box {
@@ -256,6 +257,48 @@ bool TriangleTouchesBox(const float centre[3], const float half[3], const float 
 Tree::Tree() = default;
 Tree::~Tree() = default;
 
+uint32_t Tree::Touching(const float centre[3], const float half[3]) const {
+  uint32_t body = 0;
+  float nearest = INFINITY;
+  for (size_t t = 0; t < mBodies.size(); ++t) {
+    if (mFloors[t]) {
+      continue;
+    }
+    float corner[3][3];
+    float lo[3] = {INFINITY, INFINITY, INFINITY};
+    float hi[3] = {-INFINITY, -INFINITY, -INFINITY};
+    for (int k = 0; k < 3; ++k) {
+      const CVector3f& v = mVertices[mCorners[3 * t + k]];
+      corner[k][0] = v.GetX();
+      corner[k][1] = v.GetY();
+      corner[k][2] = v.GetZ();
+      for (int i = 0; i < 3; ++i) {
+        lo[i] = (std::min)(lo[i], corner[k][i]);
+        hi[i] = (std::max)(hi[i], corner[k][i]);
+      }
+    }
+    bool apart = false;
+    for (int i = 0; i < 3; ++i) {
+      apart = apart || lo[i] > centre[i] + half[i] || hi[i] < centre[i] - half[i];
+    }
+    if (apart || !TriangleTouchesBox(centre, half, corner[0], corner[1], corner[2])) {
+      continue;
+    }
+    // How far its plane is from the box's middle.
+    const Vec3 a = {corner[0][0], corner[0][1], corner[0][2]};
+    const Vec3 n = Cross(Sub({corner[1][0], corner[1][1], corner[1][2]}, a),
+                         Sub({corner[2][0], corner[2][1], corner[2][2]}, a));
+    const float length = Length(n);
+    const float away =
+        length > 0.f ? std::fabs(Dot(Sub({centre[0], centre[1], centre[2]}, a), n)) / length : 0.f;
+    if (away < nearest) {
+      nearest = away;
+      body = mBodies[t];
+    }
+  }
+  return body;
+}
+
 std::unique_ptr< Tree > Build(const Passthrough::Triangle* triangles, size_t count,
                               const Options& options) {
   std::unique_ptr< Tree > tree(new Tree());
@@ -287,6 +330,7 @@ std::unique_ptr< Tree > Build(const Passthrough::Triangle* triangles, size_t cou
     c.reach = (std::max)(0.f, Length(Sub(middle, options.nearest)) - spread);
     c.order = uint32_t(i);
     c.moves = (t.flags & Passthrough::kTriangleMoves) != 0;
+    c.body = t.flags >> Passthrough::kTriangleBodyShift;
     candidates.push_back(c);
   }
   std::stable_sort(candidates.begin(), candidates.end(),
@@ -387,6 +431,8 @@ std::unique_ptr< Tree > Build(const Passthrough::Triangle* triangles, size_t cou
       }
     }
     corners.insert(corners.end(), id, id + 3);
+    tree->mBodies.push_back(c.body);
+    tree->mFloors.push_back((flags & Bit(kMT_Floor)) != 0);
     stats.moving += c.moves ? 1 : 0;
     triangleFlags.push_back(flags);
     if (c.reach < kNearby) {
@@ -453,6 +499,7 @@ std::unique_ptr< Tree > Build(const Passthrough::Triangle* triangles, size_t cou
     all[i] = ushort(i);
   }
   Layout(tree->mVertices, corners, tree->mNodes, stats).Node(root, all, 0);
+  tree->mCorners = std::move(corners);
   stats.treeBytes = uint32_t(tree->mNodes.size());
 
   tree->mOctTree = std::make_unique< CAreaOctTree >(

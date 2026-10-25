@@ -95,6 +95,9 @@ constexpr float kLeastRadius = 0.15f;
 constexpr float kMostRadius = 1.f;
 constexpr float kLeastHeight = 0.8f;
 constexpr float kMostHeight = 3.f;
+// A wall within this of her collision counts as one she's up against (GuestState::touching).
+constexpr float kTouchReach = 0.03f;
+uint32_t sTouching = 0;
 
 void SetInfo(Status status, std::string message, const Passthrough::HostState* host,
              float ownEyeHeight = 0.f) {
@@ -134,6 +137,7 @@ Passthrough::GuestState Gather(const CStateManager& mgr, float dt) {
   }
   if (sWalking) {
     state.flags |= Passthrough::kGuestInHostWorld;
+    state.touching = sTouching;
   }
   // CPlayer::EPlayerMorphBallState and GuestMorph count the same way.
   state.morph = static_cast< uint32_t >(player.GetMorphballTransitionState());
@@ -214,18 +218,42 @@ float Distance(const Passthrough::Vec3& a, const Passthrough::Vec3& b) {
   return std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
 }
 
-// The size she's made: the host's player's, if it has said and it's believable, else her own.
-void SizeFor(float& halfWidth, float& height) {
+// The size she's made, the host's player's if it has said and it's believable: her box the
+// square inside his capsule's circle, so it fits wherever he does whichever way a passage runs
+// (her box keeps to the world's axes: build 49's, as wide as his capsule, was held back from a
+// passage he walked), and her morph ball his capsule's radius. Else her own (a ball of 0: the
+// tweak's).
+void SizeFor(float& halfWidth, float& height, float& ballRadius) {
   const float radius = sHost.playerRadius;
   const float tall = sHost.playerHeight;
   if (sWalking && radius >= kLeastRadius && radius <= kMostRadius && tall >= kLeastHeight &&
       tall <= kMostHeight && tall >= 2.f * radius) {
-    halfWidth = radius;
+    halfWidth = radius * 0.70710677f;
     height = tall;
+    ballRadius = radius;
   } else {
     halfWidth = gpTweakPlayer->GetPlayerXYHalfExtent();
     height = gpTweakPlayer->GetPlayerHeight();
+    ballRadius = 0.f;
   }
+}
+
+// The host's body of the wall she's up against: what her collision touches, grown a little
+// along the ground (Tree::Touching).
+uint32_t Touching(const CPlayer& player) {
+  if (!sWalking || !sTree) {
+    return 0;
+  }
+  const CAABox box =
+      player.GetCollisionPrimitive()->CalculateAABox(player.GetPrimitiveTransform());
+  const CVector3f centre = box.GetCenterPoint();
+  const CVector3f half = box.GetHalfExtent();
+  const float c[3] = {centre.GetX(), centre.GetY(), centre.GetZ()};
+  // Lifted a little off the floor, so the floor's edges and steps don't count.
+  const float h[3] = {half.GetX() + kTouchReach, half.GetY() + kTouchReach,
+                      (std::max)(half.GetZ() - 0.1f, 0.05f)};
+  const float lifted[3] = {c[0], c[1], c[2] + 0.1f};
+  return sTree->Touching(lifted, h);
 }
 
 // Switches off the objects the rooms' scripts made (by their editor ids) and every enemy, in the
@@ -277,9 +305,9 @@ void StartWalking(CStateManager& mgr) {
   Freeze(mgr);
   sWalking = true;
   sHidesRoom.store(true, std::memory_order_relaxed);
-  float halfWidth, height;
-  SizeFor(halfWidth, height);
-  player.PortSetCollisionSize(halfWidth, height);
+  float halfWidth, height, ballRadius;
+  SizeFor(halfWidth, height, ballRadius);
+  player.PortSetCollisionSize(halfWidth, height, ballRadius);
   // Where the host's player stands, facing his way (HostState::playerYaw: about +Z, 0 facing
   // +Y).
   const Passthrough::Vec3& at = sHost.playerPosition;
@@ -299,7 +327,7 @@ void StopWalking(CStateManager& mgr) {
   if (sWalkGame == &mgr && mgr.GetPlayer() != nullptr) {
     CPlayer& player = *mgr.Player();
     player.PortSetCollisionSize(gpTweakPlayer->GetPlayerXYHalfExtent(),
-                                gpTweakPlayer->GetPlayerHeight());
+                                gpTweakPlayer->GetPlayerHeight(), 0.f);
     Thaw(mgr);
     player.Teleport(sReturnTo, mgr, true);
   }
@@ -372,9 +400,11 @@ void UpdateWalk(CStateManager& mgr, const Passthrough::GuestState& samus, bool c
   }
   UpdateTree(sWalking ? samus.position : sHost.playerPosition);
   if (sWalking) {
+    sTouching = Touching(*mgr.GetPlayer());
     sWalkMessage.clear();
     return;
   }
+  sTouching = 0;
   if (!sSet) {
     sWalkMessage = "the host's triangles";
   } else if (!sTree || sTreeGeneration != sSetGeneration) {
@@ -469,6 +499,9 @@ void Tick(CStateManager& mgr, float dt) {
   info.halfWidth = 0.5f * (box.GetMaxPoint().GetX() - box.GetMinPoint().GetX());
   info.height = box.GetMaxPoint().GetZ() - box.GetMinPoint().GetZ();
   info.frozen = uint32_t(sFrozen.size());
+  info.ownBallRadius = gpTweakPlayer->GetOwnPlayerBallHalfExtent();
+  info.ballRadius = gpTweakPlayer->GetPlayerBallHalfExtent();
+  info.touching = sTouching;
   info.treeGeneration = sTree ? sTreeGeneration : 0;
   info.builds = sBuilds;
   info.buildMs = sBuildMs;

@@ -462,6 +462,23 @@ CMorphBall::CMorphBall(CPlayer& player, float radius)
 CMorphBall::~CMorphBall() {}
 
 float CMorphBall::GetBallRadius() const { return gpTweakPlayer->GetPlayerBallHalfExtent(); }
+
+#ifdef TARGET_PC
+void CMorphBall::PortSetRadius(float radius) {
+  xc_radius = radius;
+  x38_collisionSphere = CCollidableSphere(CSphere(CVector3f(0.f, 0.f, radius), radius),
+                                          x38_collisionSphere.GetMaterial());
+  // Its models as GetMorphBallModel scales them when they're loaded: 2r across.
+  const CVector3f scale(2.f * radius, 2.f * radius, 2.f * radius);
+  CModelData* const models[] = {x58_ballModel.get(), x60_spiderBallGlassModel.get(),
+                                x68_lowPolyBallModel.get(), x70_frozenBallModel.get()};
+  for (CModelData* model : models) {
+    if (model != nullptr) {
+      model->SetScale(scale);
+    }
+  }
+}
+#endif
 float CMorphBall::GetBallTouchRadius() const { return gpTweakBall->GetBallTouchRadius(); }
 
 float CMorphBall::ForwardInput(const CFinalInput& input) const {

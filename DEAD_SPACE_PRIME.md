@@ -318,10 +318,25 @@ in the Dead Space Prime repository. What the port has so far:
     off, so they stop thinking, colliding and drawing, and the rooms aren't
     drawn (as the collision view's "only" mode leaves them);
   - she goes to where the host's player stands, facing his way, in its space
-    one to one, made his size (`CPlayer::PortSetCollisionSize`: Isaac's
-    capsule, 0.38 m in radius and 1.80 m tall in build 45's run, as a box
-    0.76 m across), and the bridge tells the host (`kGuestInHostWorld`) so it
-    keeps its player where she is;
+    one to one, made his size (`CPlayer::PortSetCollisionSize`; Isaac's
+    capsule is 0.38 m in radius and 1.80 m tall in build 45's run), and the
+    bridge tells the host (`kGuestInHostWorld`) so it keeps its player where
+    she is. Standing, her collision is a box that doesn't turn with her
+    (`CCollidableAABox`), so it's the square that fits inside his circle,
+    0.54 m across (radius times the square root of 2): build 49's box, as
+    wide as his capsule, was 1.07 m from corner to corner and stuck in a
+    passage he walks through. It touches nothing his capsule doesn't, and
+    face on it lets her 0.11 m nearer a wall than he gets, which Dead Space
+    keeps him back from. Her morph ball is his radius too, 0.76 m across
+    (`CTweakPlayer::GetPlayerBallHalfExtent`, which everything that sizes the
+    ball reads, gives his while she walks there, and `CMorphBall::PortSetRadius`
+    remakes its sphere and scales its models);
+  - each tick she walks there, the port finds the wall or ceiling her box
+    touches (grown 3 cm along the ground, lifted 10 cm off the floor) whose
+    plane is nearest her, and sends the host's number for its body
+    (`GuestState::touching`: the host numbers its bodies in each triangle's
+    flags, above `kTriangleBodyShift`); F1 shows it, and the plugin logs
+    which of Dead Space's bodies it is, for a wall she meets that he doesn't;
   - turned off, or with the host gone (out of a level, or quiet for 10 s: a
     stall of a second or two doesn't count), she gets her own size back, the
     rooms' objects come back on, and she goes back to where she was.
@@ -348,7 +363,7 @@ are covered by the same test. `tests/port_passthrough_collision.cpp` builds
 trees from made-up rooms and checks them through the game's own collision
 code: rays onto the floor and walls, a box of Isaac's size falling onto the
 floor, meeting the ceiling and walls, a closed door and not an open one,
-passing a face from behind, the
+which body's wall a box is up against, passing a face from behind, the
 triangles' winding kept or turned to face her, the limits, and a large floor
 triangle gathering only the leaves near a query.
 
@@ -413,7 +428,7 @@ and the times retail's buckets would have dropped a water surface.
 | `src/MetroidPrime/Player/CPlayerDynamics.cpp` (`GetEyeHeight`, `GetUnbiasedEyeHeight`, `GetOwnEyeHeight`) | Samus's eyes at the host player's height while the bridge is linked. |
 | `platform/include/passthrough_view.h` | The wireframe's math: the host's world put where Samus is, and projected as the port's camera has it. |
 | `platform/include/passthrough_collision.h`, `platform/passthrough_collision.cpp` | The host's triangles built into a room's collision tree (covered by `tests/port_passthrough_collision.cpp`). |
-| `include/MetroidPrime/CGameArea.hpp` (`GetOctTree`), `src/MetroidPrime/CGameCollision.cpp` (`BuildAreaCollisionCache`, the failsafe's bounds), `src/MetroidPrime/CStateManager.cpp` (`DrawWorld`, the destructor), `src/MetroidPrime/Player/CPlayerDynamics.cpp` (`PortSetCollisionSize`) | Samus walking in the host's world: its collision for the rooms', the rooms undrawn, her size. |
+| `include/MetroidPrime/CGameArea.hpp` (`GetOctTree`), `src/MetroidPrime/CGameCollision.cpp` (`BuildAreaCollisionCache`, the failsafe's bounds), `src/MetroidPrime/CStateManager.cpp` (`DrawWorld`, the destructor), `src/MetroidPrime/Player/CPlayerDynamics.cpp` (`PortSetCollisionSize`), `include/MetroidPrime/Tweaks/CTweakPlayer.hpp` (`GetPlayerBallHalfExtent`), `src/MetroidPrime/Player/CMorphBall.cpp` (`PortSetRadius`) | Samus walking in the host's world: its collision for the rooms', the rooms undrawn, her size and her morph ball's. |
 | `tools/passthrough_probe.cpp` | The stand-in host (`--room`: a made-up room for the wireframe and for walking in). |
 | `src/MetroidPrime/Player/CPlayerGun.cpp` | Draws the throwing hand, and keeps the suit's right arm drawn while it throws; under manual aim, has missiles, Super Missiles and the Wave Beam seek the target nearest the crosshair; gives lock-on the faster Power Beam's speed. |
 | `src/MetroidPrime/Enemies/CPatterned.cpp` | The glow, in `PreRender`. |

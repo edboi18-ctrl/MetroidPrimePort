@@ -137,7 +137,17 @@ public:
   float GetPlayerXYHalfExtent() const { return mPlayerXYHalfExtent; }
   float GetStepUpHeight() const { return mStepUpHeight; }
   float GetStepDownHeight() const { return mStepDownHeight; }
+#ifdef TARGET_PC
+  // Dead Space Prime's passthrough bridge: while Samus walks in a host's world, her morph ball is
+  // its player's size (CPlayer::PortSetCollisionSize); 0 keeps the tweak's.
+  static float sPortBallHalfExtent;
+  float GetPlayerBallHalfExtent() const {
+    return sPortBallHalfExtent > 0.f ? sPortBallHalfExtent : mPlayerBallHalfExtent;
+  }
+  float GetOwnPlayerBallHalfExtent() const { return mPlayerBallHalfExtent; }
+#else
   float GetPlayerBallHalfExtent() const { return mPlayerBallHalfExtent; }
+#endif
   float GetOrbitDistanceMax() const { return mOrbitDistanceMax; }
   float GetGrappleSwingLength() const { return mGrappleSwingLength; }
   float GetGrappleSwingPeriod() const { return mGrappleSwingPeriod; }

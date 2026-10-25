@@ -93,6 +93,11 @@ public:
   bool IsClimbable(const CCollisionInfo&) const;
   void FluidFXThink(CActor::EFluidState state, CScriptWater& water, CStateManager& mgr);
   const CCollidableSphere& GetCollidableSphere() const { return x38_collisionSphere; }
+#ifdef TARGET_PC
+  // Its collision sphere and model made `radius` (a passthrough host's player's size, or back to
+  // the tweak's); GetBallRadius follows CTweakPlayer's override.
+  void PortSetRadius(float radius);
+#endif
   // DrawCollisionPrimitive__10CMorphBallCFv global
   // GetPrimitiveTransform__10CMorphBallCFv global
   void TouchModel(const CStateManager&) const;

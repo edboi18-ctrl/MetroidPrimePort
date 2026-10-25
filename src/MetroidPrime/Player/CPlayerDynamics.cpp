@@ -1453,14 +1453,20 @@ float CPlayer::GetOwnEyeHeight() const {
   return gpTweakPlayer->GetPlayerHeight() - gpTweakPlayer->GetEyeOffset();
 }
 
-void CPlayer::PortSetCollisionSize(float halfWidth, float height) {
+void CPlayer::PortSetCollisionSize(float halfWidth, float height, float ballRadius) {
   // As CStateManager::CreateStandardGameObjects makes her box from the tweak: standing on her
   // feet, centred on them. The same box is her first-person bounds, her base bounding box and
-  // her collision primitive's (the morph ball keeps its own sphere).
+  // her collision primitive's.
   const CAABox box(CVector3f(-halfWidth, -halfWidth, 0.f), CVector3f(halfWidth, halfWidth, height));
   x2d8_fpBounds = box;
   x1c0_collisionPrimitive.Box() = box;
   SetBoundingBox(box);
+  // The morph ball: what reads its size reads the tweak's (GetPlayerBallHalfExtent), so the
+  // tweak gives this one while it's set.
+  CTweakPlayer::sPortBallHalfExtent = ballRadius;
+  if (x768_morphball.get() != nullptr) {
+    x768_morphball->PortSetRadius(gpTweakPlayer->GetPlayerBallHalfExtent());
+  }
 }
 #endif
 

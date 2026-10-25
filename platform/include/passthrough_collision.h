@@ -64,6 +64,11 @@ public:
   const CAreaOctTree& OctTree() const { return *mOctTree; }
   const Stats& GetStats() const { return mStats; }
 
+  // The host's number for the body (Triangle::flags >> kTriangleBodyShift) of the wall or ceiling
+  // nearest the middle of a box that touches it (floors left out: she always stands on one); 0
+  // when none does.
+  uint32_t Touching(const float centre[3], const float half[3]) const;
+
   Tree(const Tree&) = delete;
   Tree& operator=(const Tree&) = delete;
   ~Tree();
@@ -80,6 +85,9 @@ private:
   std::vector< uchar > mEdgeMaterials;
   std::vector< uchar > mTriangleMaterials;
   std::vector< uchar > mNodes; // big-endian, as in a room's collision resource
+  std::vector< ushort > mCorners;  // three vertex indices a triangle, as wound
+  std::vector< uint32_t > mBodies; // the host's body number, a triangle
+  std::vector< bool > mFloors;     // a triangle is a floor
   std::unique_ptr< CAreaOctTree > mOctTree;
   Stats mStats;
 };

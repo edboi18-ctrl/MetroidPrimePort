@@ -7,6 +7,10 @@
 #include "port_disc.h"
 #endif
 
+#ifdef TARGET_PC
+float CTweakPlayer::sPortBallHalfExtent = 0.f;
+#endif
+
 CTweakPlayer::CTweakPlayer(CInputStream& in)
 : mGrappleBeamSpeed(0.0)
 , mGrappleBeamXWaveAmplitude(0.0)

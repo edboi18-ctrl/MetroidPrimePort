@@ -25,7 +25,8 @@ constexpr uint32_t kMagic = 0x54505344u;
 // written for another version. 2: the host's collision near its player (TriangleSet). A field
 // taken from `reserved` where 0 means "none", or a flag a side that doesn't know it leaves clear,
 // needs no new version, as such a side writes 0 there and ignores it: HostState's
-// playerEyeHeight, playerRadius and playerHeight, and kGuestInHostWorld, are such.
+// playerEyeHeight, playerRadius and playerHeight, GuestState's touching, and kGuestInHostWorld
+// and the triangles' body numbers, are such.
 constexpr uint32_t kVersion = 2;
 // The shared memory's name. Windows: in the session's Local\ namespace (CreateFileMappingW).
 // Elsewhere: a POSIX shared memory object (shm_open), for tests and tools.
@@ -74,7 +75,9 @@ struct GuestState {
   float maxEnergy; // and its most with her energy tanks
   uint32_t visor;  // Metroid Prime's CPlayerState::EPlayerVisor
   uint32_t beam;   // Metroid Prime's CPlayerState::EBeamId
-  uint32_t reserved[16];
+  uint32_t touching; // walking in the host's world: the host's number for the body of the wall
+                     // she's up against (Triangle::flags >> kTriangleBodyShift), 0 for none
+  uint32_t reserved[15];
 };
 
 enum HostFlags : uint32_t {
@@ -106,6 +109,9 @@ constexpr uint32_t kMaxTriangles = 16384;
 enum TriangleFlags : uint32_t {
   kTriangleMoves = 1u << 0, // on something the host moves itself (a door, a lift): may go stale
 };
+// A triangle's flags from this bit up: the host's number for the body it's on (0: none), which
+// the guest gives back as GuestState::touching.
+constexpr uint32_t kTriangleBodyShift = 8;
 
 struct Triangle {
   Vec3 a, b, c;   // its corners, wire space
@@ -144,7 +150,7 @@ struct SharedBlock {
 static_assert(sizeof(Vec3) == 12, "Vec3 layout");
 static_assert(sizeof(GuestState) == 164, "GuestState layout");
 static_assert(offsetof(GuestState, position) == 16 && offsetof(GuestState, fovY) == 76 &&
-                  offsetof(GuestState, beam) == 96,
+                  offsetof(GuestState, beam) == 96 && offsetof(GuestState, touching) == 100,
               "GuestState offsets");
 static_assert(sizeof(HostState) == 96, "HostState layout");
 static_assert(offsetof(HostState, playerPosition) == 8 &&

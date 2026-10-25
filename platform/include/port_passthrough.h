@@ -55,6 +55,9 @@ struct Info {
   float ownHeight = 0.f;
   float halfWidth = 0.f;     // and as it is now
   float height = 0.f;
+  float ownBallRadius = 0.f; // her morph ball's radius, her own and as it is now
+  float ballRadius = 0.f;
+  uint32_t touching = 0;     // the host's body of the wall she's up against (0: none)
   uint32_t frozen = 0;       // the rooms' objects switched off while she walks there
   uint32_t treeGeneration = 0; // the triangle set the collision was last built from
   uint32_t builds = 0;

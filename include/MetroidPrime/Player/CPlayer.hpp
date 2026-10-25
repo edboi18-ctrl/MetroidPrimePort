@@ -237,9 +237,10 @@ public:
   // Her own eye height, as the game has it, also while the passthrough bridge puts her eyes at
   // the host player's (port_passthrough.h).
   float GetOwnEyeHeight() const;
-  // Her standing collision box, `halfWidth` either side of her feet and `height` tall: a
-  // passthrough host's player's size while she walks in its world, else the tweak's.
-  void PortSetCollisionSize(float halfWidth, float height);
+  // Her standing collision box, `halfWidth` either side of her feet and `height` tall, and her
+  // morph ball's radius: a passthrough host's player's size while she walks in its world, else
+  // the tweak's (a radius of 0).
+  void PortSetCollisionSize(float halfWidth, float height, float ballRadius);
 #endif
   const CCollidableSphere* GetCollidableSphere() const;
   CTransform4f CreateTransformFromMovementDirection() const;

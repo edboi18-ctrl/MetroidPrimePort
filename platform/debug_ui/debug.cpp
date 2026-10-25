@@ -119,6 +119,15 @@ static void DrawPassthrough() {
     }
     ImGui::TextDisabled("Samus %.2f m across and %.2f m tall (her own size: %.2f by %.2f)",
                         2.f * info.halfWidth, info.height, 2.f * info.ownHalfWidth, info.ownHeight);
+    ImGui::TextDisabled("Her morph ball %.2f m across (her own: %.2f)", 2.f * info.ballRadius,
+                        2.f * info.ownBallRadius);
+    if (info.walk == PortPassthrough::Walk::Walking) {
+      if (info.touching != 0) {
+        ImGui::TextDisabled("Up against the host's body #%u (its log names it)", info.touching);
+      } else {
+        ImGui::TextDisabled("Up against nothing of the host's");
+      }
+    }
     if (info.treeGeneration != 0) {
       const PassthroughCollision::Stats& t = info.tree;
       ImGui::TextDisabled("Collision from set %u: %u triangles (%u floors, %u walls, %u ceilings),",

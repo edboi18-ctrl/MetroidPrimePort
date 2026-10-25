@@ -23,6 +23,9 @@ using PassthroughCollision::Tree;
 
 namespace {
 
+// The host's number for a body, in a triangle's flags.
+uint32_t Body(uint32_t number) { return number << Passthrough::kTriangleBodyShift; }
+
 void Quad(std::vector< Triangle >& out, Vec3 a, Vec3 b, Vec3 c, Vec3 d, uint32_t flags = 0) {
   out.push_back({a, b, c, flags});
   out.push_back({a, c, d, flags});
@@ -33,15 +36,15 @@ void Quad(std::vector< Triangle >& out, Vec3 a, Vec3 b, Vec3 c, Vec3 d, uint32_t
 // something the host moves) facing in, 0.5 m from the wall at y = 0; and a sliver with no area.
 std::vector< Triangle > Room() {
   std::vector< Triangle > room;
-  Quad(room, {0, 0, 0}, {10, 0, 0}, {10, 10, 0}, {0, 10, 0});   // floor, up
-  Quad(room, {0, 0, 3}, {0, 10, 3}, {10, 10, 3}, {10, 0, 3});   // ceiling, down
-  Quad(room, {0, 0, 0}, {0, 10, 0}, {0, 10, 3}, {0, 0, 3});     // x = 0, facing +x
-  Quad(room, {10, 0, 0}, {10, 0, 3}, {10, 10, 3}, {10, 10, 0}); // x = 10, facing -x
-  Quad(room, {0, 0, 0}, {0, 0, 3}, {10, 0, 3}, {10, 0, 0});     // y = 0, facing +y
-  Quad(room, {0, 10, 0}, {10, 10, 0}, {10, 10, 3}, {0, 10, 3}); // y = 10, facing -y
-  Quad(room, {6, 6, 1}, {7, 6, 1}, {7, 7, 1}, {6, 7, 1});       // crate top, up
-  Quad(room, {6, 6, 0}, {6, 6, 1}, {6, 7, 1}, {6, 7, 0});       // crate x = 6, facing -x
-  Quad(room, {4, 0.5f, 0}, {4, 0.5f, 2}, {5, 0.5f, 2}, {5, 0.5f, 0}, Passthrough::kTriangleMoves);
+  Quad(room, {0, 0, 0}, {10, 0, 0}, {10, 10, 0}, {0, 10, 0}, Body(1));   // floor, up
+  Quad(room, {0, 0, 3}, {0, 10, 3}, {10, 10, 3}, {10, 0, 3}, Body(2));   // ceiling, down
+  Quad(room, {0, 0, 0}, {0, 10, 0}, {0, 10, 3}, {0, 0, 3}, Body(3));     // x = 0, facing +x
+  Quad(room, {10, 0, 0}, {10, 0, 3}, {10, 10, 3}, {10, 10, 0}, Body(4)); // x = 10, facing -x
+  Quad(room, {0, 0, 0}, {0, 0, 3}, {10, 0, 3}, {10, 0, 0}, Body(5));     // y = 0, facing +y
+  Quad(room, {0, 10, 0}, {10, 10, 0}, {10, 10, 3}, {0, 10, 3}, Body(6)); // y = 10, facing -y
+  Quad(room, {6, 6, 1}, {7, 6, 1}, {7, 7, 1}, {6, 7, 1}, Body(7));       // crate top, up
+  Quad(room, {6, 6, 0}, {6, 6, 1}, {6, 7, 1}, {6, 7, 0}, Body(8));       // crate x = 6, facing -x
+  Quad(room, {4, 0.5f, 0}, {4, 0.5f, 2}, {5, 0.5f, 2}, {5, 0.5f, 0}, Passthrough::kTriangleMoves | Body(9));
   room.push_back({{1, 1, 0}, {2, 2, 0}, {3, 3, 0}, 0}); // no area
   return room;
 }
@@ -276,6 +279,17 @@ int main() {
     CHECK_MSG(CMetroidAreaCollider::AABoxCollisionCheckBoolean(tree->OctTree(), sunk,
                                                                CMaterialFilter::skPassEverything),
               "sunk into the floor, she overlaps it");
+    // What she's up against: the wall at x = 0 (body 3), the crate's side (body 8), or nothing
+    // but the floor she stands on.
+    const float half[3] = {0.4f, 0.4f, 0.8f};
+    const float byWall[3] = {0.39f, 5.f, 1.f};
+    CHECK_EQ(tree->Touching(byWall, half), 3u);
+    const float byCrate[3] = {5.61f, 6.5f, 0.9f};
+    CHECK_EQ(tree->Touching(byCrate, half), 8u);
+    const float free[3] = {3.f, 3.f, 1.f};
+    CHECK_EQ(tree->Touching(free, half), 0u);
+    const float onFloor[3] = {3.f, 3.f, 0.75f};
+    CHECK_EQ(tree->Touching(onFloor, half), 0u);
   }
 
   // Wound away from her, as a host may have a face: TowardSamus turns it to face her.
