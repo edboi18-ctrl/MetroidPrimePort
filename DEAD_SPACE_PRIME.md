@@ -350,7 +350,12 @@ in the Dead Space Prime repository. What the port has so far:
   face away, and **Turn its triangles to face Samus** (off at each start)
   turns each to face her as the tree is built, again each metre she goes.
   Floors are those facing within 45 degrees of up, ceilings of down, the rest
-  walls, all solid metal. F1 > Debug > Rendering > Collision view draws the
+  walls, all solid metal. Walls within 10 m of where a build is centred are
+  also taken wound the other way (sharing the wall's corners and edges, and
+  its smooth edges), so they stop her from both sides: a host may have a wall
+  of one layer that its own collision stops its player at from either side
+  (build 55's run: a doorway she could walk through one way and not back, but
+  could roll under). F1 counts them; floors and ceilings keep their winding. F1 > Debug > Rendering > Collision view draws the
   tree in the world (floors blue, ceilings red, walls grey).
 - Not yet: Necromorphs. Doors and lifts are rebuilt into the tree as they
   move, a tenth of a second or so behind (a lift's floor moves in steps).
@@ -366,7 +371,8 @@ are covered by the same test. `tests/port_passthrough_collision.cpp` builds
 trees from made-up rooms and checks them through the game's own collision
 code: rays onto the floor and walls, a box of Isaac's size falling onto the
 floor, meeting the ceiling and walls, a closed door and not an open one,
-which body's wall a box is up against, passing a face from behind, the
+which body's wall a box is up against, passing a face from behind (and not
+a wall made two-sided, near her), the
 triangles' winding kept or turned to face her, the limits, and a large floor
 triangle gathering only the leaves near a query.
 

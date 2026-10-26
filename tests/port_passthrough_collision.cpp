@@ -292,6 +292,45 @@ int main() {
     CHECK_EQ(tree->Touching(onFloor, half), 0u);
   }
 
+  // Walls near her taken the other way round too (twoSidedReach): from inside the crate its side
+  // stops her now, as a host's own collision may from either side; floors and ceilings, the
+  // walls' smooth edges, her walk into a wall and what she's up against are as before. Beyond
+  // the reach, a wall stays one-sided.
+  {
+    Options both = options;
+    both.twoSidedReach = 10.f;
+    const std::unique_ptr< Tree > two = Build(room.data(), room.size(), both);
+    REQUIRE(two != nullptr);
+    const PassthroughCollision::Stats& s = two->GetStats();
+    CHECK_EQ(s.walls, 12u);
+    CHECK_EQ(s.twoSided, 12u);
+    CHECK_EQ(s.taken, 30u);
+    CHECK_EQ(s.floors, 4u);
+    CHECK_EQ(s.ceilings, 2u);
+    CHECK_EQ(s.vertices, 18u); // its other sides share its corners
+    CHECK_EQ(s.edges, stats.edges);
+    CHECK_EQ(s.smoothEdges, 9u);
+    CHECK_EQ(s.facingAway, 0u);
+    const CAABox inside(CVector3f(6.1f, 6.1f, 0.2f), CVector3f(6.4f, 6.4f, 0.8f));
+    CHECK_MSG(std::fabs(Move(*two, inside, {-1, 0, 0}, 1.f) - 0.1) < 1e-3,
+              "two-sided, the crate's side stops her from inside 0.1 m on");
+    const CAABox box(CVector3f(2.62f, 2.62f, 1.f), CVector3f(3.38f, 3.38f, 2.8f));
+    CHECK_MSG(std::fabs(Move(*two, box, {-1, 0, 0}, 5.f) - 2.62) < 1e-3,
+              "two-sided, the wall at x = 0 stops her as before");
+    CHECK_MSG(std::fabs(Move(*two, box, {0, 0, -1}, 3.f) - 1.0) < 1e-3,
+              "two-sided, she lands on the floor as before");
+    const float half[3] = {0.4f, 0.4f, 0.8f};
+    const float byWall[3] = {0.39f, 5.f, 1.f};
+    CHECK_EQ(two->Touching(byWall, half), 3u);
+    Options far = both;
+    far.nearest = {60, 60, 1};
+    const std::unique_ptr< Tree > distant = Build(room.data(), room.size(), far);
+    REQUIRE(distant != nullptr);
+    CHECK_EQ(distant->GetStats().twoSided, 0u);
+    CHECK_MSG(Move(*distant, inside, {-1, 0, 0}, 1.f) > 0.99,
+              "beyond the reach, the crate's side lets her out from behind");
+  }
+
   // Wound away from her, as a host may have a face: TowardSamus turns it to face her.
   {
     std::vector< Triangle > backwards;

@@ -84,6 +84,7 @@ struct Candidate {
   uint32_t order;
   bool moves;    // on something the host moves (kTriangleMoves)
   uint32_t body; // the host's number for the body it's on
+  bool twin = false; // a wall's other side (Options::twoSidedReach)
 };
 
 struct Box {
@@ -332,6 +333,17 @@ std::unique_ptr< Tree > Build(const Passthrough::Triangle* triangles, size_t cou
     c.moves = (t.flags & Passthrough::kTriangleMoves) != 0;
     c.body = t.flags >> Passthrough::kTriangleBodyShift;
     candidates.push_back(c);
+    // A wall near her, the other way round as well (after it, at the same reach), so it stops
+    // her from behind too.
+    const Vec3 n = Cross(Sub(b, a), Sub(p, a));
+    if (options.facing == Facing::AsHost && options.twoSidedReach > 0.f &&
+        c.reach <= options.twoSidedReach &&
+        std::fabs(n.z) <= kFloorSlope * Length(n)) {
+      Candidate twin = c;
+      std::swap(twin.corner[1], twin.corner[2]);
+      twin.twin = true;
+      candidates.push_back(twin);
+    }
   }
   std::stable_sort(candidates.begin(), candidates.end(),
                    [](const Candidate& l, const Candidate& r) { return l.reach < r.reach; });
@@ -403,7 +415,7 @@ std::unique_ptr< Tree > Build(const Passthrough::Triangle* triangles, size_t cou
       ++stats.ceilings;
     } else {
       flags |= Bit(kMT_Wall);
-      ++stats.walls;
+      ++(c.twin ? stats.twoSided : stats.walls);
     }
     for (int i = 0; i < 3; ++i) {
       const ushort from = id[i], to = id[(i + 1) % 3];
@@ -412,9 +424,13 @@ std::unique_ptr< Tree > Build(const Passthrough::Triangle* triangles, size_t cou
       ushort edge;
       if (found != edgeIds.end()) {
         edge = found->second;
-        // Two faces in one plane, facing the same way: no edge to collide with between them.
-        edgeUses[edge] = uint8_t((std::min)(edgeUses[edge] + 1, 3));
-        edgeSmooth[edge] = edgeUses[edge] == 2 && Dot(edgeNormal[edge], unit) > kSamePlane;
+        // Two faces in one plane, facing the same way: no edge to collide with between them. A
+        // wall's other side shares its edges, and they're as smooth for it (its neighbour in the
+        // plane has one too), so it isn't counted.
+        if (!c.twin) {
+          edgeUses[edge] = uint8_t((std::min)(edgeUses[edge] + 1, 3));
+          edgeSmooth[edge] = edgeUses[edge] == 2 && Dot(edgeNormal[edge], unit) > kSamePlane;
+        }
       } else {
         edge = ushort(tree->mEdges.size());
         edgeIds.emplace(key, edge);
@@ -435,7 +451,7 @@ std::unique_ptr< Tree > Build(const Passthrough::Triangle* triangles, size_t cou
     tree->mFloors.push_back((flags & Bit(kMT_Floor)) != 0);
     stats.moving += c.moves ? 1 : 0;
     triangleFlags.push_back(flags);
-    if (c.reach < kNearby) {
+    if (c.reach < kNearby && !c.twin) {
       ++stats.nearby;
       if (Dot(unit, Sub(options.nearest, p[0])) < 0.f) {
         ++stats.facingAway;

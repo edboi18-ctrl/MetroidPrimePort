@@ -33,6 +33,10 @@ enum class Facing { AsHost, TowardSamus };
 struct Options {
   Passthrough::Vec3 nearest{}; // the triangles nearest this go first, up to the limits
   Facing facing = Facing::AsHost;
+  // Walls (neither floors nor ceilings) reaching within this of `nearest` are also taken wound
+  // the other way, so they stop Samus from both sides, as a host's own may (Havok's triangles
+  // collide from either side); 0 for none. Not with Facing::TowardSamus, which has no need.
+  float twoSidedReach = 0.f;
 };
 
 struct Stats {
@@ -45,6 +49,8 @@ struct Stats {
   uint32_t vertices = 0;
   uint32_t edges = 0;
   uint32_t smoothEdges = 0; // between two faces in one plane, so not collided with as edges
+  uint32_t twoSided = 0;    // walls taken the other way round too (Options::twoSidedReach), not
+                            // counted among the walls
   uint32_t floors = 0;      // by which way they face, as the game's materials say
   uint32_t walls = 0;
   uint32_t ceilings = 0;

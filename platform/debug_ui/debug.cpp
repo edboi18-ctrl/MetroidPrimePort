@@ -132,8 +132,9 @@ static void DrawPassthrough() {
       const PassthroughCollision::Stats& t = info.tree;
       ImGui::TextDisabled("Collision from set %u: %u triangles (%u floors, %u walls, %u ceilings),",
                           info.treeGeneration, t.taken, t.floors, t.walls, t.ceilings);
-      ImGui::TextDisabled("  %u of them on doors and lifts; %u vertices, %u edges, %u leaves;",
-                          t.moving, t.vertices, t.edges, t.leaves);
+      ImGui::TextDisabled("  %u of them on doors and lifts; %u walls near her two-sided;", t.moving,
+                          t.twoSided);
+      ImGui::TextDisabled("  %u vertices, %u edges, %u leaves;", t.vertices, t.edges, t.leaves);
       ImGui::TextDisabled("  left out: %u past the limits, %u with no area; built in %.1f ms (%u "
                           "builds)",
                           t.overLimits, t.degenerate, info.buildMs, info.builds);

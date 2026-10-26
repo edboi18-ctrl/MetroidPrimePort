@@ -88,6 +88,12 @@ uint32_t sBuilds = 0;
 float sBuildMs = 0.f;
 // A build facing Samus is made again once she's this far from where the last was centred.
 constexpr float kRebuildFacing = 1.f;
+// Walls within this of where a build is centred stop her from both sides (Options::
+// twoSidedReach). A host may have a wall of one layer, which its own collision stops its player at
+// from either side, and Prime's only from its front: build 55's run had a doorway she could walk
+// through one way and not back (but roll under). The host sends a new set each 3 m he goes, so she
+// stays well inside it.
+constexpr float kTwoSidedReach = 10.f;
 // Put where the host's player stands, she goes this far above his feet and drops onto them.
 constexpr float kAboveFeet = 0.05f;
 // The host's player's size is taken within these (HostState::playerRadius, playerHeight).
@@ -362,6 +368,7 @@ void UpdateTree(const Passthrough::Vec3& at) {
   options.nearest = at;
   options.facing = facing ? PassthroughCollision::Facing::TowardSamus
                           : PassthroughCollision::Facing::AsHost;
+  options.twoSidedReach = kTwoSidedReach;
   sBuilding = std::async(std::launch::async, [set = sSet, options] {
     const Clock::time_point start = Clock::now();
     Built built;
