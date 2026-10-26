@@ -330,13 +330,16 @@ in the Dead Space Prime repository. What the port has so far:
     keeps him back from. Her morph ball is his radius too, 0.76 m across
     (`CTweakPlayer::GetPlayerBallHalfExtent`, which everything that sizes the
     ball reads, gives his while she walks there, and `CMorphBall::PortSetRadius`
-    remakes its sphere and scales its models);
+    remakes its sphere and scales its models, the glow inside it, and how far
+    out its speed trails run);
   - each tick she walks there, the port finds the wall or ceiling her box
     touches (grown 3 cm along the ground, lifted 10 cm off the floor) whose
     plane is nearest her, and sends the host's number for its body
     (`GuestState::touching`: the host numbers its bodies in each triangle's
     flags, above `kTriangleBodyShift`); F1 shows it, and the plugin logs
-    which of Dead Space's bodies it is, for a wall she meets that he doesn't;
+    which of Dead Space's bodies it is, for a wall she meets that he doesn't
+    (build 50's run: a fixed box filling an open doorway; the plugin now
+    leaves out of what it sends a body Isaac's own collision leaves out);
   - turned off, or with the host gone (out of a level, or quiet for 10 s: a
     stall of a second or two doesn't count), she gets her own size back, the
     rooms' objects come back on, and she goes back to where she was.

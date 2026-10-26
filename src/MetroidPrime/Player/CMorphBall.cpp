@@ -477,6 +477,19 @@ void CMorphBall::PortSetRadius(float radius) {
       model->SetScale(scale);
     }
   }
+  // And the glow inside it (the two lit spheres), made for a ball of the tweak's radius: scaled
+  // by how much bigger or smaller this one is. The trails keep to its edge (UpdateEffects).
+  const float factor = radius / gpTweakPlayer->GetOwnPlayerBallHalfExtent();
+  const CVector3f glowScale(factor, factor, factor);
+  CElementGen* const glows[] = {x19d0_ballInnerGlowGen.get(), x19d8_boostBallGlowGen.get(),
+                                xPortGlowSet[0].get(), xPortGlowSet[1].get(),
+                                xPortGlowSet[2].get(), xPortGlowSet[3].get(),
+                                xPortGlowSet[4].get()};
+  for (CElementGen* glow : glows) {
+    if (glow != nullptr) {
+      glow->SetGlobalScale(glowScale);
+    }
+  }
 }
 #endif
 float CMorphBall::GetBallTouchRadius() const { return gpTweakBall->GetBallTouchRadius(); }
@@ -1515,6 +1528,10 @@ void CMorphBall::UpdateEffects(float dt, CStateManager& mgr) {
     swooshOffsetX = 0.03f;
     swooshOffsetZ = 0.6f;
   }
+  // A ball made another size (PortSetRadius): its trails as far out for its size.
+  const float portSize = GetBallRadius() / gpTweakPlayer->GetOwnPlayerBallHalfExtent();
+  swooshOffsetX *= portSize;
+  swooshOffsetZ *= portSize;
 #endif
 
   const CVector3f slowBlueOffset1 = swooshToWorld.Rotate(CVector3f(swooshOffsetX, 0.f, 0.f));
