@@ -23,6 +23,9 @@ constexpr char kRoomMagic[4] = {'R', 'M', 'S', 'T'};
 // loaded the same room script data the state was taken with.
 constexpr uint32_t kRoomVersionLegacy = 1;
 constexpr uint32_t kRoomVersion = 2;
+constexpr uint32_t kRoomVersionLayers = 3;  // version 2 plus the spawn layer section
+// Version 3 with 16-bit block lengths (an enemy's kTagFields block runs to kilobytes).
+constexpr uint32_t kRoomVersionWide = 4;
 constexpr uint32_t kMaxRoomBytes = 8u << 20;
 constexpr uint32_t kMaxRoomCount = 1u << 16;
 constexpr uint32_t kMaxBlocks = 64;
@@ -131,6 +134,16 @@ bool FingerprintsLineUp(const RoomState& room) {
   return true;
 }
 
+bool SpawnLayersLineUp(const RoomState& room) {
+  if (room.spawnLayers.size() != room.areas.size())
+    return false;
+  for (size_t i = 0; i < room.areas.size(); ++i) {
+    if (room.spawnLayers[i].area != room.areas[i])
+      return false;
+  }
+  return true;
+}
+
 std::string EncodeRoom(const RoomState& room) {
   // Fingerprints belong to what this writer produces, so a state whose section
   // does not line up is not written at all rather than as a body whose sections
@@ -140,6 +153,10 @@ std::string EncodeRoom(const RoomState& room) {
   // writes the legacy body.
   const bool recorded = room.fingerprintsRecorded;
   if (recorded && !FingerprintsLineUp(room))
+    return {};
+  // The spawn layer section rides on version 3, which also carries fingerprints.
+  const bool layers = recorded && room.spawnLayersRecorded;
+  if (layers && !SpawnLayersLineUp(room))
     return {};
   std::string body;
   AppendLE32(body, static_cast< uint32_t >(room.areas.size()));
@@ -157,13 +174,24 @@ std::string EncodeRoom(const RoomState& room) {
       AppendLE64(body, fp.known ? fp.hash : 0);
     }
   }
+  if (layers) {
+    // One entry per area in `areas` order: the known bit, then the layer mask.
+    AppendLE32(body, static_cast< uint32_t >(room.spawnLayers.size()));
+    for (const AreaSpawnLayers& sl : room.spawnLayers) {
+      AppendLE32(body, static_cast< uint32_t >(sl.area));
+      body += sl.known ? static_cast< char >(1) : static_cast< char >(0);
+      AppendLE64(body, sl.known ? sl.mask : 0);
+    }
+  }
   AppendLE32(body, static_cast< uint32_t >(room.objects.size()));
   uint32_t last = 0;
   for (const RoomObject& obj : room.objects) {
     // The present set is the objects' ids; a block count byte carries the active flag.
     AppendDelta(body, last, obj.editorId);
     // At most kMaxBlocks, the most DecodeRoom accepts (the count byte has 7 bits).
-    auto fits = [](const RoomBlock& block) { return block.tag < 256 && block.data.size() < 256; };
+    auto fits = [layers](const RoomBlock& block) {
+      return block.tag < 256 && block.data.size() < (layers ? kMaxBlockBytes : 256u);
+    };
     size_t count = 0;
     for (const RoomBlock& block : obj.blocks)
       count += fits(block) ? 1 : 0;
@@ -177,11 +205,13 @@ std::string EncodeRoom(const RoomState& room) {
         break;
       body += static_cast< char >(block.tag);
       body += static_cast< char >(block.data.size());
+      if (layers)
+        body += static_cast< char >(block.data.size() >> 8);
       body += block.data;
     }
   }
   std::string out(kRoomMagic, 4);
-  AppendLE32(out, recorded ? kRoomVersion : kRoomVersionLegacy);
+  AppendLE32(out, layers ? kRoomVersionWide : (recorded ? kRoomVersion : kRoomVersionLegacy));
   AppendLE32(out, static_cast< uint32_t >(body.size()));
   return out + body;
 }
@@ -199,8 +229,10 @@ bool DecodeRoom(Reader& in, RoomState& room) {
   const uint32_t size = in.U32();
   if (size > kMaxRoomBytes || !in.Need(size) || in.pos + size != in.data.size())
     return false;
-  if (version != kRoomVersionLegacy && version != kRoomVersion)
+  if (version != kRoomVersionLegacy && version != kRoomVersion && version != kRoomVersionLayers &&
+      version != kRoomVersionWide)
     return true;
+  const bool wide = version >= kRoomVersionWide;
   RoomState r;
   const uint32_t areaCount = in.U32();
   if (areaCount > kMaxRoomCount)
@@ -247,6 +279,27 @@ bool DecodeRoom(Reader& in, RoomState& room) {
         return false;
     }
   }
+  if (version >= kRoomVersionLayers) {
+    // Same shape rules as the fingerprints: one entry per area, same order.
+    const uint32_t count = in.U32();
+    if (count > kMaxRoomCount || count != areaCount)
+      return false;
+    r.spawnLayersRecorded = true;
+    for (uint32_t i = 0; i < count && in.ok; ++i) {
+      AreaSpawnLayers sl;
+      sl.area = static_cast< int32_t >(in.U32());
+      const uint32_t flags = in.Need(1) ? static_cast< uint8_t >(in.data[in.pos++]) : 0;
+      if (flags > 1)
+        return false;
+      sl.known = flags != 0;
+      sl.mask = in.U64();
+      if (!in.ok || sl.area != r.areas[i] || (!sl.known && sl.mask != 0))
+        return false;
+      r.spawnLayers.push_back(sl);
+    }
+    if (!in.ok)
+      return false;
+  }
   const uint32_t objectCount = in.U32();
   if (objectCount > kMaxRoomCount)
     return false;
@@ -262,10 +315,12 @@ bool DecodeRoom(Reader& in, RoomState& room) {
       return false;
     for (uint32_t b = 0; b < blockCount && in.ok; ++b) {
       RoomBlock block;
-      if (!in.Need(2))
+      if (!in.Need(wide ? 3 : 2))
         return false;
       block.tag = static_cast< uint8_t >(in.data[in.pos++]);
-      const uint32_t len = static_cast< uint8_t >(in.data[in.pos++]);
+      uint32_t len = static_cast< uint8_t >(in.data[in.pos++]);
+      if (wide)
+        len |= static_cast< uint32_t >(static_cast< uint8_t >(in.data[in.pos++])) << 8;
       if (!in.Need(len))
         return false;
       block.data = in.data.substr(in.pos, len);
@@ -332,6 +387,7 @@ std::string EncodeDoorSaveState(const DoorSaveState& state) {
     flags |= 0x2;
   if (state.doClose)
     flags |= 0x4;
+  flags |= static_cast< uint8_t >(state.partner << kDoorSavePartnerShift);
   std::string out;
   out.push_back(static_cast< char >(state.open ? 1 : 0));
   out.push_back(static_cast< char >(flags));
@@ -356,13 +412,85 @@ bool DecodeDoorSaveState(const std::string& data, DoorSaveState& out) {
     parsed.pendingClose = (flags & 0x1) != 0;
     parsed.refusedClosePending = (flags & 0x2) != 0;
     parsed.doClose = (flags & 0x4) != 0;
-    // A door that is open has no close in flight, and the two close paths are
-    // different branches of Think that cannot both be owed.
+    parsed.partner = static_cast< DoorSaveState::Partner >((flags >> kDoorSavePartnerShift) & 0x3);
+    // A door that is open has no close in flight, the two close paths are
+    // different branches of Think that cannot both be owed, and only an open door
+    // has a side of a door pair.
     if ((parsed.open && (parsed.pendingClose || parsed.refusedClosePending)) ||
-        (parsed.pendingClose && parsed.refusedClosePending))
+        (parsed.pendingClose && parsed.refusedClosePending) ||
+        (!parsed.open && parsed.partner != DoorSaveState::kPartnerUnknown))
       return false;
   }
   out = parsed;
+  return true;
+}
+
+bool JournalsScriptMsg(int msg) {
+  // EScriptObjectMessage values (CEntityInfo.hpp); this file stays free of game headers.
+  switch (msg) {
+  case 3:   // Close
+  case 5:   // Decrement
+  case 6:   // Follow
+  case 7:   // Increment
+  case 9:   // Open
+  case 10:  // Reset
+  case 11:  // ResetAndStart
+  case 12:  // SetToMax
+  case 13:  // SetToZero
+  case 14:  // Start
+  case 15:  // Stop
+  case 16:  // StopAndReset
+  case 18:  // UNKM18
+  case 19:  // Action
+  case 20:  // Play
+  case 21:  // Alert
+    return true;
+  default:
+    // Activate, Deactivate, ToggleActive: the saved active flag. Arrived, Next:
+    // waypoint traffic. 22 and up: engine notifications, not script commands.
+    return false;
+  }
+}
+
+bool AppendScriptMsg(std::vector< ScriptMsgEntry >& journal, const ScriptMsgEntry& entry) {
+  if (!journal.empty() && journal.back().msg == entry.msg && journal.back().sender == entry.sender)
+    return false;
+  if (journal.size() >= kMaxScriptMsgs)
+    return false;
+  journal.push_back(entry);
+  return true;
+}
+
+std::string EncodeScriptMsgs(const std::vector< ScriptMsgEntry >& journal) {
+  const size_t count = std::min(journal.size(), kMaxScriptMsgs);
+  std::string out;
+  out.push_back(static_cast< char >(count));
+  for (size_t i = 0; i < count; ++i) {
+    out.push_back(static_cast< char >(journal[i].msg));
+    AppendLE32(out, journal[i].sender);
+  }
+  return out;
+}
+
+bool DecodeScriptMsgs(const std::string& data, std::vector< ScriptMsgEntry >& out) {
+  if (data.empty())
+    return false;
+  const size_t count = static_cast< uint8_t >(data[0]);
+  if (count > kMaxScriptMsgs || data.size() != 1 + 5 * count)
+    return false;
+  std::vector< ScriptMsgEntry > parsed;
+  for (size_t i = 0; i < count; ++i) {
+    const size_t at = 1 + 5 * i;
+    ScriptMsgEntry e;
+    e.msg = static_cast< uint8_t >(data[at]);
+    if (!JournalsScriptMsg(e.msg))
+      return false;
+    e.sender = 0;
+    for (int b = 0; b < 4; ++b)
+      e.sender |= static_cast< uint32_t >(static_cast< uint8_t >(data[at + 1 + b])) << (8 * b);
+    parsed.push_back(e);
+  }
+  out = std::move(parsed);
   return true;
 }
 
@@ -398,6 +526,34 @@ RoomAreaRestore DecideAreaRestore(const RoomState& room, int32_t area, const uin
     return RoomAreaRestore::kSkipUnreadable;
   return found->hash == FingerprintScriptData(data, size) ? RoomAreaRestore::kRestore
                                                          : RoomAreaRestore::kSkipChanged;
+}
+
+bool PlatformRestoreOrder(const std::vector< std::vector< size_t > >& parents,
+                          std::vector< size_t >& order) {
+  order.clear();
+  // 0 unvisited, 1 on the current path, 2 placed.
+  std::vector< uint8_t > mark(parents.size(), 0);
+  const auto visit = [&](const auto& self, size_t i) -> bool {
+    if (mark[i] == 2)
+      return true;
+    if (mark[i] == 1)
+      return false;
+    mark[i] = 1;
+    for (size_t parent : parents[i]) {
+      if (parent >= parents.size() || !self(self, parent))
+        return false;
+    }
+    mark[i] = 2;
+    order.push_back(i);
+    return true;
+  };
+  for (size_t i = 0; i < parents.size(); ++i) {
+    if (!visit(visit, i)) {
+      order.clear();
+      return false;
+    }
+  }
+  return true;
 }
 
 const char* RoomAreaRestoreReason(RoomAreaRestore decision) {
@@ -507,7 +663,8 @@ bool DecodeResume(const std::string& data, ResumeMeta& meta, std::string& stateF
 }
 
 bool ResumeMatches(const ResumeMeta& stored, const ResumeMeta& current) {
-  return stored.cardSerial == current.cardSerial && stored.identity == current.identity &&
+  // Serial 0 is no card: a resume written without one is never offered.
+  return stored.cardSerial != 0 && stored.cardSerial == current.cardSerial && stored.identity == current.identity &&
          stored.fileIdx <= 2;
 }
 

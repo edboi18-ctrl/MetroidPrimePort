@@ -7,6 +7,7 @@
 #include "MetroidPrime/CHealthInfo.hpp"
 #include "MetroidPrime/Player/CPlayerCameraBob.hpp"
 #include "MetroidPrime/Player/CPlayerGun.hpp"
+#include "MetroidPrime/Player/CPlayerVisor.hpp"
 #include "MetroidPrime/Player/CGrappleArm.hpp"
 #include "MetroidPrime/CAxisAngle.hpp"
 #include "MetroidPrime/CGameCollision.hpp"
@@ -34,6 +35,11 @@
 #include "math.h"
 #include "port_dead_space.h"
 #include "port_debug.h"
+#include "port_third_person.h"
+#ifdef TARGET_PC
+#include "port_disc.h"
+#include "port_tri_orbit.h"
+#endif
 
 static const CMaterialList kLineOfSightIncludeList = CMaterialList(kMT_Solid);
 static const CMaterialList kLineOfSightExcludeList =
@@ -528,7 +534,25 @@ void CPlayer::UpdateOrbitZone(CStateManager& mgr) {
   }
 }
 
+#ifdef TARGET_PC
+// @ fn_8019BDFC
+float CPlayer::PortTriOrbitFade() const {
+  if (!PortDisc::IsTrilogy(PortDisc::Current())) {
+    return 0.f;
+  }
+  return PortTriOrbit::FadeRatio(m_triOrbitFadeTimer, x304_orbitState != kOS_NoOrbit,
+                                 gpTweakPlayer->GetOrbitModeTimer());
+}
+#endif
+
 void CPlayer::UpdateOrbitModeTimer(float dt) {
+#ifdef TARGET_PC
+  m_triOrbitFadeTimer = PortDisc::IsTrilogy(PortDisc::Current())
+                            ? PortTriOrbit::FadeTimerStep(m_triOrbitFadeTimer,
+                                                          x304_orbitState != kOS_NoOrbit, dt,
+                                                          gpTweakPlayer->GetOrbitModeTimer())
+                            : 0.f;
+#endif
   if (x304_orbitState == kOS_NoOrbit && x32c_orbitModeTimer > 0.f) {
     x32c_orbitModeTimer -= dt;
     return;
@@ -605,10 +629,70 @@ static float OrbitZoneIdealNdcY(CPlayer::EPlayerZoneInfo zone) {
          1.f;
 }
 
+#ifdef TARGET_PC
+// Port: pointer aim in the Scan Visor picks scan points through the pointer, as Trilogy does: the
+// scan window follows the pointer (CPlayerVisor::DrawScanEffect), the scan zone moves with it and
+// candidates rank by their distance from it. The pointer
+// is in [-1, 1] of the half view, +y down; returns it in [-1, 1] screen space, +y up. A lock
+// re-centres the pointer, so a held scan lock is unaffected; a point orbit holds it still, so
+// an analog L's click picks through it (CPlayer::UpdateMouseAim).
+static bool PortScanPointerNdc(CPlayer::EPlayerZoneInfo zone, float& x, float& y) {
+  if (zone != CPlayer::kZI_Scan || !PortDebug::PointerAimPosition(x, y)) {
+    return false;
+  }
+  y = -y;
+  return true;
+}
+#endif
+
+#ifdef TARGET_PC
+// Trilogy's zone: pointer-centred half extents (fn_80254104/fn_80254158), truncated in the port's
+// 640x448 coordinate basis (kOrbitZoneAuthored*; that height is the port's convention, not
+// verified against the Wii viewport), then scaled to the live viewport. The pointer sits at the viewport centre when it is not steering.
+struct PortTriZone {
+  float cx, cy, halfX, halfY;
+  bool pointer;
+};
+static PortTriZone PortTriOrbitZone(CPlayer::EPlayerZoneInfo zone) {
+  const float vpW = CCast::LtoF(CGraphics::GetViewportWidth());
+  const float vpH = CCast::LtoF(CGraphics::GetViewportHeight());
+  float px = 0.f;
+  float py = 0.f;
+  PortTriZone z;
+  z.pointer = PortDebug::PointerAimPosition(px, py);
+  if (!z.pointer) {
+    px = 0.f;
+    py = 0.f;
+  }
+  py = -py; // the pointer is +y down; screen coordinates are +y up
+  z.cx = static_cast< float >(PortTriOrbit::PointerCentre(px, vpW));
+  z.cy = static_cast< float >(PortTriOrbit::PointerCentre(py, vpH));
+  const float k = PortTriOrbit::AspectK(vpH > 0.f ? vpW / vpH : 4.f / 3.f);
+  z.halfX = static_cast< float >(PortTriOrbit::HalfWidth(
+                CCast::LtoF(gpTweakPlayer->GetOrbitZoneWidth(zone)), k)) *
+            OrbitZoneScaleX();
+  z.halfY = static_cast< float >(PortTriOrbit::HalfHeight(
+                CCast::LtoF(gpTweakPlayer->GetOrbitZoneHeight(zone)))) *
+            OrbitZoneScaleY();
+  return z;
+}
+#endif
+
 bool CPlayer::WithinOrbitScreenEllipse(const CVector3f& screenCoords, EPlayerZoneInfo zone) const {
   if (screenCoords.GetZ() >= 1.f) {
     return false;
   }
+#ifdef TARGET_PC
+  if (PortDisc::IsTrilogy(PortDisc::Current())) {
+    const PortTriZone z = PortTriOrbitZone(zone);
+    const float x = CMath::AbsF(screenCoords.GetX() - z.cx);
+    const float y = CMath::AbsF(screenCoords.GetY() - z.cy);
+    if (!(z.halfX > 0.f) || !(z.halfY > 0.f)) {
+      return false; // degenerate zone: nothing is inside
+    }
+    return x * x <= (1.f - y * y / (z.halfY * z.halfY)) * (z.halfX * z.halfX);
+  }
+#endif
   const float sx = OrbitZoneScaleX();
   const float sy = OrbitZoneScaleY();
   const float cx = CCast::LtoF(gpTweakPlayer->GetOrbitZoneCentreX(zone)) * sx;
@@ -631,6 +715,48 @@ bool CPlayer::WithinOrbitScreenBox(const CVector3f& screenCoords, EPlayerZoneInf
   case kZT_Box: {
     const float sx = OrbitZoneScaleX();
     const float sy = OrbitZoneScaleY();
+#ifdef TARGET_PC
+    if (PortDisc::IsTrilogy(PortDisc::Current())) {
+      const PortTriZone z = PortTriOrbitZone(zone);
+      if (z.pointer && zone == kZI_Scan) {
+        // Only what is on screen can be picked through the pointer.
+        const float width = CCast::LtoF(CGraphics::GetViewportWidth());
+        const float height = CCast::LtoF(CGraphics::GetViewportHeight());
+        if (screenCoords.GetX() < 0.f || screenCoords.GetX() > width || screenCoords.GetY() < 0.f ||
+            screenCoords.GetY() > height) {
+          return false;
+        }
+      }
+      return CMath::AbsF(screenCoords.GetX() - z.cx) <= z.halfX &&
+             CMath::AbsF(screenCoords.GetY() - z.cy) <= z.halfY;
+    }
+    float cx = CCast::LtoF(gpTweakPlayer->GetOrbitZoneCentreX(zone)) * sx;
+    float cy = CCast::LtoF(gpTweakPlayer->GetOrbitZoneCentreY(zone)) * sy;
+    float pointerX = 0.f;
+    float pointerY = 0.f;
+    if (PortScanPointerNdc(zone, pointerX, pointerY)) {
+      // The zone moves with the pointer, but only what is on screen can be picked.
+      const float width = CCast::LtoF(CGraphics::GetViewportWidth());
+      const float height = CCast::LtoF(CGraphics::GetViewportHeight());
+      if (screenCoords.GetX() < 0.f || screenCoords.GetX() > width || screenCoords.GetY() < 0.f ||
+          screenCoords.GetY() > height) {
+        return false;
+      }
+      cx += pointerX * width / 2.f;
+      cy += pointerY * height / 2.f;
+    }
+    float halfWidth = CCast::LtoF(gpTweakPlayer->GetOrbitZoneWidth(zone)) * sx;
+    float halfHeight = CCast::LtoF(gpTweakPlayer->GetOrbitZoneHeight(zone)) * sy;
+    if (zone == kZI_Scan) {
+      // The zone takes the window's shape (CPlayerVisor::PortWindowShapeX).
+      halfWidth *= CPlayerVisor::PortWindowShapeX();
+      halfHeight *= CPlayerVisor::PortWindowShapeY();
+    }
+    if (CMath::AbsF(screenCoords.GetX() - cx) <= halfWidth &&
+        CMath::AbsF(screenCoords.GetY() - cy) <= halfHeight && screenCoords.GetZ() < 1.f) {
+      return true;
+    }
+#else
     const float cx = CCast::LtoF(gpTweakPlayer->GetOrbitZoneCentreX(zone)) * sx;
     const float cy = CCast::LtoF(gpTweakPlayer->GetOrbitZoneCentreY(zone)) * sy;
     if (CMath::AbsF(screenCoords.GetX() - cx) <=
@@ -640,6 +766,7 @@ bool CPlayer::WithinOrbitScreenBox(const CVector3f& screenCoords, EPlayerZoneInf
         screenCoords.GetZ() < 1.f) {
       return true;
     }
+#endif
     break;
   }
   case kZT_Ellipse:
@@ -650,7 +777,7 @@ bool CPlayer::WithinOrbitScreenBox(const CVector3f& screenCoords, EPlayerZoneInf
   return false;
 }
 
-void CPlayer::FindOrbitableObjects(const rstl::reserved_vector< TUniqueId, 1024 >& nearObjects,
+void CPlayer::FindOrbitableObjects(const rstl::reserved_vector< TUniqueId, kMaxObjects >& nearObjects,
                                    rstl::vector< TUniqueId >& listOut, EPlayerZoneInfo zone,
                                    EPlayerZoneType type, CStateManager& mgr,
                                    bool onScreenTest) const {
@@ -701,8 +828,19 @@ TUniqueId CPlayer::FindBestOrbitableObject(const rstl::vector< TUniqueId >& ids,
   float minDistance = 10000.f;
   float minScreenDistanceSq = 10000.f;
   TUniqueId bestId = kInvalidUniqueId;
+#ifdef TARGET_PC
+  float boxLeft = OrbitZoneIdealNdcX(zone);
+  float boxTop = OrbitZoneIdealNdcY(zone);
+  float pointerX = 0.f;
+  float pointerY = 0.f;
+  if (PortScanPointerNdc(zone, pointerX, pointerY)) {
+    boxLeft += pointerX;
+    boxTop += pointerY;
+  }
+#else
   const float boxLeft = OrbitZoneIdealNdcX(zone);
   const float boxTop = OrbitZoneIdealNdcY(zone);
+#endif
   const CFirstPersonCamera* const fpCamera = mgr.GetCameraManager()->GetFirstPersonCamera();
   for (AUTO(it, ids.begin()); it != ids.end(); ++it) {
     const CActor* const act = TCastToConstPtr< CActor >(mgr.GetObjectById(*it));
@@ -830,7 +968,12 @@ void CPlayer::UpdateOrbitableObjects(CStateManager& mgr) {
   if (CheckOrbitDisableSourceList(mgr)) {
     return;
   }
+  #ifdef TARGET_PC
+  // Third person: the search volume is the view the reticle is aimed in.
+  const CTransform4f cameraXf = PortThirdPerson::TickView(GetFirstPersonCameraTransform(mgr));
+#else
   const CTransform4f& cameraXf = GetFirstPersonCameraTransform(mgr);
+#endif
   float distance = GetOrbitMaxTargetDistance(mgr);
   if (x9c6_24_extendTargetDistance) {
     distance *= 5.f;
@@ -856,7 +999,7 @@ TUniqueId CPlayer::FindOrbitTargetId(CStateManager& mgr) {
   return FindBestOrbitableObject(x354_onScreenOrbitObjects, x330_orbitZoneMode, mgr);
 }
 
-TUniqueId CPlayer::CheckEnemiesAgainstOrbitZone(const rstl::reserved_vector< TUniqueId, 1024 >& ids,
+TUniqueId CPlayer::CheckEnemiesAgainstOrbitZone(const rstl::reserved_vector< TUniqueId, kMaxObjects >& ids,
                                                 EPlayerZoneInfo zone, EPlayerZoneType type,
                                                 CStateManager& mgr) const {
   const CVector3f eyePosition = GetEyePosition();
@@ -929,7 +1072,12 @@ TUniqueId CPlayer::CheckEnemiesAgainstOrbitZone(const rstl::reserved_vector< TUn
 }
 
 TUniqueId CPlayer::FindAimTargetId(CStateManager& mgr) {
+  #ifdef TARGET_PC
+  // Third person: the search volume is the view the reticle is aimed in.
+  const CTransform4f cameraXf = PortThirdPerson::TickView(GetFirstPersonCameraTransform(mgr));
+#else
   const CTransform4f& cameraXf = GetFirstPersonCameraTransform(mgr);
+#endif
   float distance = gpTweakPlayer->GetAimMaxDistance();
   if (x9c6_24_extendTargetDistance) {
     distance *= 5.f;
@@ -1112,12 +1260,25 @@ void CPlayer::UpdateAimTarget(CStateManager& mgr) {
 }
 
 void CPlayer::SetOrbitPosition(float distance, CStateManager& mgr) {
+  // port: from the eye even in third person (issue #224): a point ahead of the shoulder
+  // camera sits off to its right, and Samus turning toward it drags the view right.
   CTransform4f cameraXf = GetFirstPersonCameraTransform(mgr);
   if (x304_orbitState == kOS_OrbitPoint && x30c_orbitBrokenType == kOB_BadVerticalAngle) {
     cameraXf = GetTransform();
   }
   CVector3f flatForward = cameraXf.GetForward();
   flatForward.SetZ(0.f);
+  if (PortEmptyLockKeepsPitch(mgr)) {
+    // port: an empty lock keeps the camera pitch: the point sits on the flat forward at eye
+    // height, so the view neither levels nor breaks the lock for a steep angle.
+    CVector3f dir = flatForward;
+    if (!dir.CanBeNormalized()) {
+      dir = GetTransform().GetForward();
+    }
+    x314_orbitPoint = cameraXf.GetTranslation() + dir.AsNormalized() * distance;
+    x320_orbitVector = CVector3f(0.f, distance, 0.f);
+    return;
+  }
   float dot = CVector3f::Dot(flatForward.AsNormalized(), cameraXf.GetForward());
   dot = CMath::Limit(dot, 1.f);
   const CVector3f orbitVector(0.f, distance / dot, 0.f);

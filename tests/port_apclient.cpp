@@ -1057,6 +1057,16 @@ int main() {
       CHECK_MSG(Contains(session.ArtifactHint(elder), "has not been collected."),
                 "an unknown artifact keeps the AP world's fallback text");
       CHECK_MSG(session.ArtifactHint(10).empty(), "only this game's items get a totem hint");
+      int64_t scanned = 0;
+      CHECK_MSG(!session.TakeArtifactScanHint(truth, scanned),
+                "an artifact in another world is not scouted as a hint");
+      CHECK_MSG(!session.TakeArtifactScanHint(elder, scanned), "an unknown artifact is not scouted as a hint");
+      CHECK_MSG(session.TakeArtifactScanHint(strength, scanned) && scanned == 5031102,
+                "scanning an own-world artifact scouts its location");
+      CHECK_MSG(!session.TakeArtifactScanHint(strength, scanned), "the hint is asked for once per location");
+      CHECK_MSG(Session::BuildLocationScouts({scanned}, 2) ==
+                    "{\"cmd\":\"LocationScouts\",\"locations\":[5031102],\"create_as_hint\":2}",
+                "the scan hint announces only new hints");
     }
     {
       using namespace PortAp::MetroidPrime;
@@ -1495,6 +1505,23 @@ int main() {
                 "the Elite Quarters item unlocks the room, the Omega Pirate no longer does");
       CHECK_MSG(PortApWorld::RoomOps(plain, 0x49175472, {object(0x3A, 0x0035013A, 70)}).size() == 5,
                 "Gravity Chamber keeps its stalactite");
+
+      // A checked pickup goes when it only plays sounds and music and shows its
+      // memo, through relays (one of them back to itself); one that reaches
+      // anything else stays.
+      std::vector< PortSkipCutscenes::ScriptObject > expansion = {
+          object(0x11, 0x0402012E, 1), object(0x13, 0x0002012D, 1), object(0x15, 0x00020130, 1),
+          object(0x09, 0x0002012F, 1), object(0x17, 0x00020131, 1), object(0x61, 0x00020132, 1),
+          object(0x11, 0x00020140, 1), object(0x15, 0x00020141, 1), object(0x04, 0x00020142, 1)};
+      expansion[0].connections = {{1, 1, 0x0002012D}, {1, 13, 0x00020130}, {1, 20, 0x0002012F}};
+      expansion[1].connections = {{1, 4, 0x0002012E}};
+      expansion[2].connections = {{9, 1, 0x00020131}, {9, 20, 0x00020132}, {9, 4, 0x00029999}};
+      expansion[6].connections = {{1, 13, 0x00020141}};
+      expansion[7].connections = {{9, 1, 0x00020142}};
+      const std::vector< uint8_t > leftOut =
+          PortApWorld::TakenPickupOps(expansion, {0x0002012E, 0x00020140, 0x00020150});
+      CHECK_MSG(leftOut == std::vector< uint8_t >({6, 0x04, 0x02, 0x01, 0x2E}),
+                "only the self-contained checked pickup is left out, by its full id");
     }
     std::vector< PortSkipCutscenes::ScriptObject > hatch = objects;
     if (!hatch.empty()) {
@@ -1593,6 +1620,136 @@ int main() {
     }
     CHECK_MSG(!recoloured, "no Chozo Ruins door keeps a recoloured lock");
     CHECK_MSG(!shielded, "a seed with blast shields has only its own");
+  }
+
+  {
+    // The official AP world numbers items from 41 differently than the
+    // built-in table (issue #136); the session translates them by name.
+    const std::string officialPackage = R"json({"cmd":"DataPackage","data":{"games":{"Metroid Prime":{
+        "item_name_to_id":{"Power Beam":5031000,"Missile Expansion":5031004,"Energy Tank":5031024,
+          "Missile Launcher":5031041,"Power Bomb (Main)":5031042,
+          "Progressive Power Beam":5031043,"Progressive Ice Beam":5031044,
+          "Progressive Wave Beam":5031045,"Progressive Plasma Beam":5031046,
+          "Charge Beam (Power)":5031047,"Charge Beam (Wave)":5031048},
+        "location_name_to_id":{}}}}})json";
+    const auto receive = [](Session& session, const std::string& items, std::vector<ItemGrant>& grants) {
+      std::vector<std::string> outgoing;
+      session.HandlePacket(Packet(R"({"cmd":"ReceivedItems","index":0,"items":[)" + items + "]}"), outgoing,
+                           grants);
+    };
+    for (const bool requireLauncher : {true, false}) {
+      Session session(builtin, State());
+      std::vector<std::string> outgoing;
+      std::vector<ItemGrant> grants;
+      session.HandlePacket(Packet(officialPackage), outgoing, grants);
+      session.HandlePacket(Packet(std::string(R"({"cmd":"Connected","slot":1,"team":0,"players":[],)") +
+                                  R"("checked_locations":[],"slot_data":{"missile_launcher":)" +
+                                  (requireLauncher ? "1" : "0") + "}}"),
+                           outgoing, grants);
+      receive(session, "[5031041,1,1,0],[5031043,2,1,0],[5031047,3,1,0],[5031042,4,1,0]", grants);
+      CHECK_MSG(grants.size() == 4 && grants[0].itemType == 4 && grants[0].capacity == 5 &&
+                    grants[0].amount == 5 && grants[0].itemId == 5031043,
+                "the official world's Missile Launcher grants missiles, not Unlimited Missiles");
+      CHECK_MSG(grants[1].itemType == 0 && grants[1].itemId == 5031049,
+                "the official world's first Progressive Power Beam is the Power Beam");
+      CHECK_MSG(grants[2].itemType == 10 && grants[3].itemType == 7 && grants[3].capacity == 4,
+                "the official world's Charge Beam and main Power Bomb are translated");
+      CHECK_MSG(session.ReceivedCount(5031043) == 1 && session.ReceivedCount(5031041) == 0 &&
+                    session.GetState().canonicalIds && session.InventoryReceived(),
+                "the counts are kept under the built-in ids");
+      CHECK_MSG(session.ItemName(5031043, 1) == "Missile Launcher",
+                "a translated item is named from the built-in table");
+      session.HandlePacket(Packet(R"({"cmd":"LocationInfo","locations":[
+          {"item":5031041,"location":5031100,"player":1,"flags":1}]})"),
+                           outgoing, grants);
+      int64_t scouted = 0;
+      bool sameGame = false;
+      CHECK_MSG(session.ScoutedAt(5031100, scouted, sameGame) && scouted == 5031043 && sameGame &&
+                    session.ScanText(5031100) == "Missile Launcher\nfor you",
+                "a scouted own item is translated and named");
+    }
+    {
+      // The fork's numbering is the built-in one: nothing changes.
+      Session session(builtin, State());
+      std::vector<std::string> outgoing;
+      std::vector<ItemGrant> grants;
+      session.HandlePacket(Packet(R"json({"cmd":"DataPackage","data":{"games":{"Metroid Prime":{
+          "item_name_to_id":{"Unlimited Missiles":5031041,"Missile Launcher":5031043,
+            "Progressive Power Beam":5031049,"Charge Beam (Power)":5031055}}}}})json"),
+                           outgoing, grants);
+      receive(session, "[5031043,1,1,0],[5031049,2,1,0],[5031041,3,1,0]", grants);
+      CHECK_MSG(grants.size() == 3 && grants[0].itemType == 4 && grants[0].capacity == 5 &&
+                    grants[1].itemType == 0 && grants[2].itemType == -1 &&
+                    session.ReceivedCount(5031041) == 1,
+                "the fork's numbering is read as it always was");
+    }
+    {
+      Session session(builtin, State());
+      std::vector<std::string> outgoing;
+      std::vector<ItemGrant> grants;
+      receive(session, "[5031043,1,1,0],[5031049,2,1,0]", grants);
+      CHECK_MSG(grants.size() == 2 && grants[0].itemType == 4 && grants[1].itemType == 0,
+                "without a DataPackage the ids are taken as they are");
+    }
+    {
+      // The names are asked for ahead of Connect, since the server sends the
+      // inventory right behind Connected; Connected does not ask again.
+      Session session(builtin, State());
+      std::vector<std::string> outgoing;
+      std::vector<ItemGrant> grants;
+      session.HandlePacket(Packet(R"({"cmd":"RoomInfo","seed_name":"S"})"), outgoing, grants);
+      CHECK_MSG(outgoing.size() == 1 && Contains(outgoing[0], "\"cmd\":\"GetDataPackage\"") &&
+                    Contains(outgoing[0], "Metroid Prime"),
+                "RoomInfo asks for Metroid Prime's names before the Connect goes out");
+      outgoing.clear();
+      session.HandlePacket(Packet(R"({"cmd":"Connected","slot":1,"team":0,"players":[],
+          "slot_info":{"1":{"name":"Samus","game":"Metroid Prime"}},
+          "checked_locations":[],"slot_data":{}})"),
+                           outgoing, grants);
+      bool askedAgain = false;
+      for (const std::string& packet : outgoing)
+        askedAgain = askedAgain || Contains(packet, "\"cmd\":\"GetDataPackage\"");
+      CHECK_MSG(!askedAgain, "Connected does not ask for names already asked for");
+      Session known(builtin, State());
+      known.HandlePacket(Packet(officialPackage), outgoing, grants);
+      outgoing.clear();
+      known.HandlePacket(Packet(R"({"cmd":"RoomInfo","seed_name":"S"})"), outgoing, grants);
+      CHECK_MSG(outgoing.empty(), "RoomInfo does not ask again once the names are known");
+    }
+    {
+      // A state from before the ids were translated counts the official ids.
+      // It is recounted under the built-in ones without granting anything the
+      // game holds already.
+      State old;
+      old.seed = "S";
+      old.nextItemIndex = 2;
+      old.progressive[5031041] = 1;
+      old.progressive[5031004] = 1;
+      Session session(builtin, old);
+      std::vector<std::string> outgoing;
+      std::vector<ItemGrant> grants;
+      session.HandlePacket(Packet(officialPackage), outgoing, grants);
+      receive(session, "[5031041,1,1,0],[5031004,2,1,0],[5031043,3,1,0]", grants);
+      CHECK_MSG(grants.size() == 1 && grants[0].index == 2 && grants[0].itemType == 0 &&
+                    grants[0].itemId == 5031049,
+                "an old state is recounted and only the new item is granted");
+      CHECK_MSG(session.ReceivedCount(5031041) == 0 && session.ReceivedCount(5031043) == 1 &&
+                    session.ReceivedCount(5031004) == 1 && session.GetState().nextItemIndex == 3,
+                "the old raw counts are replaced by the built-in ones");
+      const std::filesystem::path migratedPath = testDir / "migrated.json";
+      CHECK_MSG(SaveStateFile(migratedPath.string(), session.GetState()) &&
+                    Contains(Read(migratedPath), "\"item_ids\":\"canonical\"") &&
+                    LoadStateFile(migratedPath.string()).canonicalIds,
+                "the state file records the built-in numbering");
+      // A state with the marker is not recounted.
+      State current = session.GetState();
+      Session again(builtin, current);
+      again.HandlePacket(Packet(officialPackage), outgoing, grants);
+      grants.clear();
+      receive(again, "[5031041,1,1,0],[5031004,2,1,0],[5031041,3,1,0]", grants);
+      CHECK_MSG(grants.empty() && again.ReceivedCount(5031043) == 1,
+                "a state in the built-in numbering resumes without regranting");
+    }
   }
 
   std::filesystem::remove_all(testDir);

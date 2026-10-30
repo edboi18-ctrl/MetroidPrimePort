@@ -71,6 +71,84 @@ void TestRoundTrip() {
   }
 }
 
+void TestAlphaModulate() {
+  using namespace PortRoomGeo;
+  // Shipped Dynamo transition: opaque endpoint, depth-backed sorted fade,
+  // then ShouldRender=false. No endpoint may leave an unmodulated colour pass.
+  auto plan = PlanAlphaRender(1.f, false);
+  CHECK(plan.visible && plan.unsorted && !plan.sortedOpaque && !plan.depthOpaque);
+  plan = PlanAlphaRender(0.5f, true);
+  CHECK(plan.visible && !plan.unsorted && plan.sortedOpaque && plan.depthOpaque);
+  plan = PlanAlphaRender(0.f, true);
+  CHECK(!plan.visible && !plan.unsorted && !plan.sortedOpaque && !plan.depthOpaque);
+  plan = PlanAlphaRender(0.5f, false);
+  CHECK(plan.visible && !plan.unsorted && plan.sortedOpaque && !plan.depthOpaque);
+  AlphaModulateConfig c{1.f, 0.f, 1.2f, 0.f, 12 | 512};
+  AlphaModulateState s;
+  CHECK(!s.Registered(c, true) && !s.enabled);
+  c.flags |= 0x1000;
+  CHECK(!s.Registered(c, false) && !s.enabled);
+  CHECK(s.Registered(c, true) && s.enabled && !s.toA && s.alpha == c.a);
+  CHECK(!s.Tick(c, 0.6f) && std::fabs(s.alpha - 0.5f) < 1e-6f);
+  s = {};
+  c.flags &= ~0x1000u;
+  CHECK(s.Message(c, false) && s.alpha == 1.f && !s.toA);
+  CHECK(!s.Tick(c, 0.6f) && std::fabs(s.alpha - 0.5f) < 1e-6f);
+  CHECK(!s.Tick(c, 0.6f) && s.alpha == 0.f && s.enabled);
+  CHECK(s.Tick(c, 0.01f) && !s.enabled && !s.restore && s.alpha == 0.f);
+  CHECK(s.Message(c, true) && s.alpha == 0.f && s.toA);
+  CHECK(!s.Tick(c, 0.f) && s.alpha == 1.f && s.enabled);
+  CHECK(s.Tick(c, 0.01f) && !s.enabled && s.alpha == 1.f);
+  c.flags |= 2;
+  s.Message(c, false);
+  CHECK(s.Tick(c, 2.f) && s.restore); // restore INITIAL flags, not a clamped endpoint
+  c = {1.f, 0.f, 4.f, 2.f, 13};
+  s = {};
+  s.Message(c, true);
+  s.Tick(c, 0.5f);
+  CHECK(!s.Message(c, false) && s.time == 3.f && !s.toA); // shipped interruption formula
+  s.Tick(c, 1.1f);
+  CHECK(s.enabled && s.reversing && s.toA && s.time == 0.f);
+  CHECK(!s.Message(c, true) && !s.reversing && !s.toA);
+
+  Script script;
+  ScriptNode node;
+  node.kind = kAlphaModulate;
+  node.max = 12 | 512 | 0x1000;
+  node.centre[0] = 1.f;
+  node.centre[1] = 0.f;
+  node.half[0] = 1.2f;
+  script.nodes.push_back(node);
+  script.edges.push_back({false, 3, kGroupModulate, 0, 0});
+  auto instance = MakeInstance(0x12345678, 0.f);
+  instance.group = 0;
+  auto file = Write({instance}, &script);
+  Script parsed;
+  std::vector<Instance> instances;
+  std::string error;
+  CHECK(Parse(file, instances, error, &parsed) && parsed.nodes.size() == 1 &&
+        parsed.nodes[0].AlphaConfig().timeA2B == 1.2f && parsed.nodes[0].max == node.max &&
+        parsed.edges[0].action == kGroupModulate);
+  file[4] = 14;
+  CHECK(!Parse(file, instances, error, &parsed));
+}
+
+void TestActorTransform() {
+  auto instance = MakeInstance(0x12345678, 2.f);
+  instance.links.push_back({0x000600B9, 0, PortRoomGeo::kActorTransform});
+  std::vector<PortRoomGeo::Instance> out;
+  std::string error;
+  auto file = PortRoomGeo::Write({instance});
+  CHECK_MSG(PortRoomGeo::Parse(file, out, error) && out.size() == 1 && out[0].links.size() == 1 &&
+                out[0].links[0].action == PortRoomGeo::kActorTransform &&
+                out[0].links[0].sender == 0x000600B9 && out[0].transform[3] == 2.f,
+            "actor-local attachment and full-transform binding survive the file");
+  file[4] = 13;
+  CHECK_MSG(!PortRoomGeo::Parse(file, out, error), "legacy files cannot reinterpret an actor-local transform");
+  instance.links[0].sender = 0;
+  CHECK_MSG(!PortRoomGeo::Parse(PortRoomGeo::Write({instance}), out, error), "attachment requires a source actor");
+}
+
 void TestVersion1() {
   std::vector<uint8_t> file;
   Put32(file, 0x4752504D);
@@ -187,7 +265,7 @@ void TestClips() {
   std::vector<PortRoomGeo::Instance> out;
   std::string error;
   const std::vector<uint8_t> file = PortRoomGeo::Write(in);
-  CHECK_MSG(file.size() > 8 && file[4] == 12, "version 12 written");
+  CHECK_MSG(file.size() > 8 && file[4] == 15, "version 15 written");
   CHECK_MSG(PortRoomGeo::Parse(file, out, error), "clips file parses");
   CHECK_MSG(out.size() == 2 && out[0].anim.empty() && !out[0].animOnShow && out[1].animOnShow &&
                 out[1].anim.size() == 2 && out[1].anim[0].fps == 24.f && !out[1].anim[0].loop &&
@@ -337,14 +415,29 @@ void TestSky() {
   CHECK_MSG(out.size() == 2 && out[1].skyRadiance[0] == 0.5f && out[1].skyRadiance[1] == 2.f &&
                 out[1].skyRadiance[2] == 0.f,
             "sky radiance");
+  CHECK_MSG(out.size() == 2 && !out[1].worldSky, "not a world sky");
+  // Version 13's flags: bit 0, the world's sky.
+  std::vector<uint8_t> world = file;
+  world[file.size() - 4] = 1;
+  CHECK_MSG(PortRoomGeo::Parse(world, out, error, &back) && out.size() == 2 && out[1].sky && out[1].worldSky,
+            "world sky flag");
+  in[1].worldSky = true;
+  CHECK_MSG(PortRoomGeo::Write(in) == world, "world sky written");
+  in[1].worldSky = false;
+  // Version 12: radiance and no flags.
+  std::vector<uint8_t> v12(file.begin(), file.end() - 4);
+  v12[4] = 12;
+  CHECK_MSG(PortRoomGeo::Parse(v12, out, error, &back) && out.size() == 2 && out[1].sky && !out[1].worldSky &&
+                out[1].skyRadiance[1] == 2.f,
+            "version 12 sky parses");
   // Version 6: the index alone, and no radiance.
   // Its animation entry is the version 5 one: no flags or loop, a single clip.
-  const size_t animAt = file.size() - 24 - 84; // the sky section is 8 + 16 bytes, the animation's 8 + 76
+  const size_t animAt = file.size() - 28 - 84; // the sky section is 8 + 20 bytes, the animation's 8 + 76
   std::vector<uint8_t> old(file.begin(), file.begin() + animAt + 8);
   old.insert(old.end(), file.begin() + animAt + 8, file.begin() + animAt + 12);
   old.insert(old.end(), file.begin() + animAt + 16, file.begin() + animAt + 24);
   old.insert(old.end(), file.begin() + animAt + 28, file.begin() + animAt + 84);
-  old.insert(old.end(), file.end() - 24, file.end() - 12);
+  old.insert(old.end(), file.end() - 28, file.end() - 16);
   old[4] = 6;
   CHECK_MSG(PortRoomGeo::Parse(old, out, error, &back) && out.size() == 2 && out[1].sky &&
                 out[1].skyRadiance[0] == 0.f && out[1].skyRadiance[1] == 0.f,
@@ -353,12 +446,12 @@ void TestSky() {
   std::vector<uint8_t> odd = file;
   const float nan = std::nanf("");
   const float negative = -1.f;
-  std::memcpy(odd.data() + file.size() - 12, &negative, 4);
-  std::memcpy(odd.data() + file.size() - 8, &nan, 4);
+  std::memcpy(odd.data() + file.size() - 16, &negative, 4);
+  std::memcpy(odd.data() + file.size() - 12, &nan, 4);
   CHECK_MSG(PortRoomGeo::Parse(odd, out, error, &back) && out.size() == 2 && out[1].skyRadiance[0] == 0.f &&
                 out[1].skyRadiance[1] == 0.f,
             "odd sky radiance reads as 0");
-  for (size_t cut = file.size() - 23; cut < file.size(); ++cut) {
+  for (size_t cut = file.size() - 27; cut < file.size(); ++cut) {
     const std::vector<uint8_t> part(file.begin(), file.begin() + cut);
     if (PortRoomGeo::Parse(part, out, error, &back)) {
       std::fprintf(stderr, "FAIL: sky truncated at %zu parses\n", cut);
@@ -366,15 +459,15 @@ void TestSky() {
     }
   }
   std::vector<uint8_t> bad = file;
-  bad[file.size() - 16] = 2; // no such instance
+  bad[file.size() - 20] = 2; // no such instance
   CHECK_MSG(!PortRoomGeo::Parse(bad, out, error, &back), "sky of a missing instance rejected");
   bad = file;
   bad[4] = 5;
   CHECK_MSG(!PortRoomGeo::Parse(bad, out, error, &back), "sky in a version 5 file rejected");
   bad = file;
-  bad[file.size() - 20] = 2; // count 2
+  bad[file.size() - 24] = 2; // count 2
   Put32(bad, 1);
-  for (int i = 0; i < 3; ++i) {
+  for (int i = 0; i < 4; ++i) {
     Put32(bad, 0);
   }
   CHECK_MSG(!PortRoomGeo::Parse(bad, out, error, &back), "duplicate sky instance rejected");
@@ -645,6 +738,8 @@ void TestDrivers() {
 
 int main() {
   TestRoundTrip();
+  TestActorTransform();
+  TestAlphaModulate();
   TestVersion1();
   TestVersion2();
   TestScript();

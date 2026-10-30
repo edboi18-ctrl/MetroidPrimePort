@@ -156,7 +156,7 @@ private:
   void CalculateSnowForces(const CVectorFixed8_8& zVec,
                            rstl::reserved_vector< CVectorFixed8_8, 256 >& snowForces,
                            EEnvFxType type, const CVector3f& oopbtws, float dt);
-  static void BuildBlockObjectList(rstl::reserved_vector< TUniqueId, 1024 >& list,
+  static void BuildBlockObjectList(rstl::reserved_vector< TUniqueId, kMaxObjects >& list,
                                    CStateManager& mgr);
   void UpdateBlockedGrids(CStateManager& mgr, EEnvFxType type, const CTransform4f& camXf,
                           const CTransform4f& xf, const CTransform4f& invXf);
@@ -169,6 +169,10 @@ private:
   void SetupUnderwaterTevs(const CTransform4f& invXf, CStateManager& mgr);
   void SetupDefaultTevSwapMode();
   void BlankFirstSnowflakeMip(CTexture& tex);
+#ifdef TARGET_PC
+  bool PortRenderEnvFx(const CStateManager& mgr, EEnvFxType type, const CTransform4f& xf,
+                       const CTransform4f& invXf, const CTransform4f& camXf);
+#endif
 
   CAABox x0_particleBounds;
   CVector3f x18_focusCellPosition;

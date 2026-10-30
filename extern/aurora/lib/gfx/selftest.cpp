@@ -408,7 +408,9 @@ void expect_converted(Image& e) {
     }
   }
   const u32 red = rgb(255, 0, 0), blue = rgb(0, 0, 255);
-  const u32 mid0 = rgb(159, 0, 95), mid1 = rgb(95, 0, 159);  // GX blends DXT1 at 5/8 + 3/8, not 2/3 + 1/3
+  // GX blends DXT1 at 5/8 + 3/8; an opaque CMPR texture goes to BC1 where supported, which blends at 2/3 + 1/3.
+  const bool bc1 = webgpu::g_bcTexturesSupported;
+  const u32 mid0 = bc1 ? rgb(170, 0, 85) : rgb(159, 0, 95), mid1 = bc1 ? rgb(85, 0, 170) : rgb(95, 0, 159);
   const u32 row[4] = {red, blue, mid0, mid1};
   for (u32 ty = 0; ty < 8; ++ty) {
     for (u32 tx = 0; tx < 8; ++tx) {
@@ -496,6 +498,7 @@ void expect_clear_copy(Image& e) {
 }
 
 constexpr Case Cases[] = {
+    {"order-lead", draw_konst_reg, expect_konst_reg},
     {"direct-vertices", draw_direct, expect_direct},
     {"indexed8-pos-color", draw_indexed8, expect_indexed8},
     {"indexed16-pos", draw_indexed16, expect_indexed16},
@@ -507,9 +510,18 @@ constexpr Case Cases[] = {
     {"depth-both-orders", draw_depth, expect_depth},
     {"efb-copy-sampled", draw_efb_copy, expect_efb_copy},
     {"efb-clear-copy", draw_clear_copy, expect_clear_copy},
+    {"direct-vertices-late", draw_direct, expect_direct},
+    {"indexed8-pos-color-late", draw_indexed8, expect_indexed8},
+    {"indexed16-pos-late", draw_indexed16, expect_indexed16},
 };
-constexpr size_t ClearCopyCase = 10;
+constexpr size_t LeadCase = 0;
+constexpr size_t EarlyVertexCase = 1; // three cases, repeated from LateVertexCase on
+constexpr size_t ClearCopyCase = 11;
+constexpr size_t LateVertexCase = 12;
+static_assert(std::string_view{Cases[LeadCase].name} == "order-lead");
+static_assert(std::string_view{Cases[EarlyVertexCase].name} == "direct-vertices");
 static_assert(std::string_view{Cases[ClearCopyCase].name} == "efb-clear-copy");
+static_assert(std::string_view{Cases[LateVertexCase].name} == "direct-vertices-late");
 constexpr size_t CaseCount = std::size(Cases);
 static char g_keys[CaseCount];
 
@@ -554,6 +566,32 @@ const char* diagnosis() {
   return anyDrawPassed ? "" : "draws do not reach the framebuffer (readback and EFB copies work)";
 }
 
+// Whether the result depends on draw order (issue #143): the lead case repeats a draw known to work, so it
+// failing means a run's first offscreen pass draws nothing; otherwise the vertex cases are compared with their
+// repeats at the end of the run. Only early failures with a late repeat passing count as order dependent.
+const char* order_verdict() {
+  if (!g.results[LeadCase].pass) {
+    return "order-lead fails (first pass of a run draws nothing)";
+  }
+  bool earlyFail = false;
+  bool lateFail = false;
+  bool lateRecovers = false;
+  for (size_t i = 0; i < 3; ++i) {
+    const bool early = g.results[EarlyVertexCase + i].pass;
+    const bool late = g.results[LateVertexCase + i].pass;
+    earlyFail |= !early;
+    lateFail |= !late;
+    lateRecovers |= !early && late;
+  }
+  if (lateRecovers) {
+    return "early vertex cases fail, late repeats pass (draw-order dependent)";
+  }
+  if (earlyFail && lateFail) {
+    return "vertex cases fail early and late (not order dependent)";
+  }
+  return lateFail ? "early vertex cases pass, late repeats fail (draw-order dependent)" : "consistent";
+}
+
 void finish_locked(const char* note) {
   if (g.warmup) {
     g.readback = {};
@@ -573,6 +611,9 @@ void finish_locked(const char* note) {
   log_result(g.readbackResult);
   for (const auto& r : g.results) {
     log_result(r);
+  }
+  if (g.evaluated) {
+    Log.info("gpu selftest: order check: {}", order_verdict());
   }
   const char* const cause = diagnosis();
   if (cause == AllPassed) {

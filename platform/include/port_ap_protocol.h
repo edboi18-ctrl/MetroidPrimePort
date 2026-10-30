@@ -146,6 +146,11 @@ struct State {
   // below nextItemIndex are skipped on reconnect, so the counts cannot be
   // rebuilt from what the server resends. Absent in older files: all zero.
   std::map< int64_t, int64_t > progressive;
+  // Whether the item ids in `progressive` are the built-in table's own numbering
+  // ("item_ids":"canonical" in the file). Files from before the session
+  // translated the server's ids hold the server's raw ids, which differ from
+  // the built-in ones on the official AP world; see Session::MigrateItemIds.
+  bool canonicalIds = false;
   // The seed's options that decide which checks are in logic ("logic", under
   // their slot_data names), kept so the tracker also works before the server
   // answers. hasLogic is false until a Metroid Prime slot has sent them.
@@ -168,6 +173,7 @@ struct SlotData {
   bool requireMissileLauncher = false;
   bool requireMainPowerBomb = false;
   int requiredArtifacts = 12;
+  bool progressiveBeamUpgrades = false;
   // Only the Varia Suit keeps out heat (retail: any suit past the Power Suit).
   bool variaOnlyHeat = false;
   // spring_ball: 0 none, 1 with the Morph Ball Bombs, 2 its own item (Spring
@@ -201,6 +207,13 @@ public:
   using DataPackageNames = std::map< std::string, GameNames >;
   static DataPackageNames ParseDataPackage(const PortJson::Value& packet);
   void MergeDataPackage(DataPackageNames&& names);
+  // A server item id of this game's as the built-in table numbers it.
+  int64_t CanonicalItem(int64_t serverId) const;
+  // Whether `slot` plays this session's game, whose item ids CanonicalItem maps.
+  bool PlaysOwnGame(int64_t slot) const;
+  // Takes a loaded state without the canonical-ids marker over to the built-in
+  // numbering once the server's numbering is known; see the definition.
+  void MigrateItemIds();
 
   // Human-readable notifications for the HUD and overlay, oldest first: item
   // receipts ("Energy Tank from Bob") and PrintJSON text. Drained by whoever
@@ -227,8 +240,9 @@ public:
   static std::string BuildGoal();
   // Say: chat text, or a server command such as "!hint Missile Launcher".
   static std::string BuildSay(const std::string& text);
-  // LocationScouts for `ids`, without creating hints.
-  static std::string BuildLocationScouts(const std::vector< int64_t >& ids);
+  // LocationScouts for `ids`. createAsHint is the AP value: 0 creates no hints,
+  // 2 announces only the hints that are new.
+  static std::string BuildLocationScouts(const std::vector< int64_t >& ids, int createAsHint = 0);
 
   // Name of an item id in the game of the slot that receives it: the server's
   // DataPackage, else the configured or built-in names for this game, else
@@ -257,6 +271,11 @@ public:
   // with the base), in the AP world's words: where it is when a hint or a
   // scout says, else that it has not been collected.
   std::string ArtifactHint(int64_t itemId) const;
+  // The player scanned this artifact's totem. Gives true once per location,
+  // with the location to scout as a server hint, when the artifact is in this
+  // slot's own world (LocationScouts only covers a slot's own locations; a
+  // hint for another world's location is the AP world's to make).
+  bool TakeArtifactScanHint(int64_t itemId, int64_t& location);
 
   // slot_data from Connected, for built-in tables; defaults before it arrives.
   const SlotData& GetSlotData() const { return mSlotData; }
@@ -309,6 +328,9 @@ public:
   // replayed from the start, granting only the items from `heldCount` on and
   // rebuilding the progressive counts from the ones before it.
   void RewindTo(int64_t heldCount);
+  // True once the server's full inventory (ReceivedItems from index 0) has been
+  // processed, so ReceivedCount is complete rather than a partial replay.
+  bool InventoryReceived() const { return mInventoryReceived; }
   // Swaps in another game's progress (a seed's own state file); no item it
   // replays counts as already held.
   void SetState(const State& state) {
@@ -340,6 +362,14 @@ private:
   State mState;
   bool mHandshakeComplete = false;
   bool mDesynced = false;
+  bool mInventoryReceived = false;
+  // Server item id -> the built-in table's id, for the ids of this game's items
+  // that the server numbers differently (empty when the numbering matches or
+  // the names have not arrived). Built from Metroid Prime's DataPackage names.
+  std::map< int64_t, int64_t > mItemIds;
+  // Games a GetDataPackage was sent for on this connection, so the one sent
+  // before Connect is not asked for again from Connected.
+  std::set< std::string > mPackageAsked;
   // Received items below this index are in the loaded game already; see RewindTo.
   int64_t mGrantFrom = 0;
   std::string mSlotDescription;
@@ -371,6 +401,8 @@ private:
     int64_t player = 0;
   };
   std::map< int64_t, HintedLocation > mArtifactHints;
+  // Locations already scouted as hints after a totem scan.
+  std::set< int64_t > mScanHinted;
   int64_t mTeam = 0;
   void ReadHints(const PortJson::Value& hints);
   // Locations whose text the HUD showed when they were collected, so the

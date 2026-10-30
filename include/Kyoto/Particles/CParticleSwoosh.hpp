@@ -54,6 +54,9 @@ public:
     CColor mColor;             // Updated by COLR
     int mStartFrame;
     CVector3f mVelocity;
+#ifdef TARGET_PC
+    SPortKeep mPortKeep{}; // KPIN values latched at the point's birth (CREPortKeep)
+#endif
   };
   CParticleSwoosh(TToken< CSwooshDescription > desc, int i);
   ~CParticleSwoosh();
@@ -91,6 +94,9 @@ public:
   void DestroyParticles() override;
   uint Get4CharId() const override;
 #ifdef TARGET_PC
+  void ShutdownEffect() override;
+  void PortDoShutdownBehavior(u32 mode) override;
+  void PortSetSpawnSpread(const CVector3f& spread, const CVector3f& origin) override;
   uint PortFxAsset() const override;
   bool PortIsRemastered() const;
   void PortFxDescribe(PortFxInfo& out) const override;
@@ -188,6 +194,8 @@ private:
 
 #ifdef TARGET_PC
   CPortVarMemory xPortVars; // PVRT variables, initialised from the description's defaults
+  CVector3f xPortSpawnSpread{1.f, 1.f, 1.f}; // PortSetSpawnSpread
+  CVector3f xPortSpawnOrigin{0.f, 0.f, 0.f};
   // Presentation smoothing (particle_interpolation): what the last two ticks
   // drew, recorded at draw time, since grapple and Wave Beam swooshes are
   // written directly by their owners rather than stepped by Update.
@@ -216,8 +224,13 @@ private:
     float vpmt[4][4] = {};
   };
   std::vector< SPortVfxPoint > xPortVfxPts;
+  // Remastered's EMRV (CVEVelocityCalc 0x2a288c): the translation one step back, for PRAZ.
+  CVector3f xPortRazyPrev = CVector3f(0.f, 0.f, 0.f);
+  CTransform4f PortRazyOrientation(const CVector3f& motion) const;
+  CTransform4f PortRotZOrientation() const;
   bool PortVfxSwoosh() const;
   void PortRenderVfx();
+  int PortSplineRef(int curIdx, int j);
 #endif
 
   static uint mSwooshAliveCount;

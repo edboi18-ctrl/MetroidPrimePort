@@ -436,6 +436,15 @@ void WorkerLoop(Runtime& runtime) {
         }
       }
 
+      // What the session queued goes first: RoomInfo asks for this game's
+      // DataPackage, which has to arrive before Connected and its ReceivedItems
+      // so the server's item ids can be read by name.
+      for (const std::string& packet : outgoing) {
+        if (!SendPacket(client, packet, connectionError)) {
+          connectionFailed = true;
+          return false;
+        }
+      }
       if (!connectPacket.empty() && !SendPacket(client, connectPacket, connectionError)) {
         connectionFailed = true;
         return false;
@@ -457,12 +466,6 @@ void WorkerLoop(Runtime& runtime) {
         }
         if (!sendAllChecks.empty())
           CountChecks(runtime, sendAllChecks.size());
-      }
-      for (const std::string& packet : outgoing) {
-        if (!SendPacket(client, packet, connectionError)) {
-          connectionFailed = true;
-          return false;
-        }
       }
       if (refused) {
         connectionFailed = true;
@@ -593,6 +596,7 @@ void WorkerLoop(Runtime& runtime) {
         bool syncWanted = false;
         bool goalWanted = false;
         std::vector<std::string> pendingSay;
+        std::vector<int64_t> pendingHints;
         if (apConnected && !holding) {
           std::lock_guard<std::mutex> lock(runtime.mutex);
           goalWanted = runtime.goalWanted && !runtime.goalSent;
@@ -605,6 +609,8 @@ void WorkerLoop(Runtime& runtime) {
           runtime.syncWanted = false;
           pendingSay.assign(runtime.pendingSay.begin(), runtime.pendingSay.end());
           runtime.pendingSay.clear();
+          pendingHints.assign(runtime.pendingHintScouts.begin(), runtime.pendingHintScouts.end());
+          runtime.pendingHintScouts.clear();
           // DeathLink: a death the game thread noticed, announced once. The
           // pending flag is *cleared* rather than moved-from, because this block
           // runs on every loop iteration and a moved-from-but-not-cleared
@@ -644,6 +650,11 @@ void WorkerLoop(Runtime& runtime) {
             break;
           }
           PortLog::Write("archipelago: goal complete\n");
+        }
+        if (!pendingHints.empty() &&
+            !SendPacket(client, Session::BuildLocationScouts(pendingHints, 2), connectionError)) {
+          connectionFailed = true;
+          break;
         }
         for (const std::string& text : pendingSay) {
           if (!SendPacket(client, Session::BuildSay(text), connectionError)) {

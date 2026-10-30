@@ -10,6 +10,7 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <string>
 #include <system_error>
 
 #if defined(_WIN32)
@@ -17,7 +18,6 @@
 #include <condition_variable>
 #include <io.h>
 #include <mutex>
-#include <string>
 #include <thread>
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -31,6 +31,7 @@
 #if !defined(_WIN32)
 #include <cerrno>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <unistd.h>
 #endif
 #if defined(__ANDROID__)
@@ -45,11 +46,42 @@
 #include <pwd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#if defined(__linux__)
+#include <sys/prctl.h>
+#endif
 #endif
 
 namespace PortLogFile {
 namespace {
 bool sActive = false;
+// Whether this process holds the log's instance lock (TakeInstanceLock).
+bool sInstanceLock = false;
+
+// Holds an advisory lock on "<log>.lock" for the life of the process; false when
+// another live instance already holds it (two instances on one user folder). A
+// lock that cannot be made at all counts as free, so a read-only folder keeps
+// the old behaviour.
+bool TakeInstanceLock(const std::filesystem::path& file) {
+  std::filesystem::path lock = file;
+  lock += ".lock";
+#if defined(_WIN32)
+  // Share mode 0: a second open fails with a sharing violation while the first
+  // is alive.
+  const HANDLE handle = CreateFileW(lock.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS,
+                                    FILE_ATTRIBUTE_NORMAL, nullptr);
+  return handle != INVALID_HANDLE_VALUE || GetLastError() != ERROR_SHARING_VIOLATION;
+#else
+  const int fd = open(lock.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+  if (fd < 0) {
+    return true;
+  }
+  if (flock(fd, LOCK_EX | LOCK_NB) != 0 && errno == EWOULDBLOCK) {
+    close(fd);
+    return false;
+  }
+  return true; // fd stays open: the lock lasts until the process exits
+#endif
+}
 
 #if !defined(__ANDROID__)
 // What the file copy takes out of the log (port_log_redact.h). Android's paths
@@ -216,9 +248,18 @@ void ToFile(void* context, const char* data, size_t size) {
     }
   }
   // Ctrl+C in the terminal reaches this process too; it must keep draining until
-  // the game has printed its last line.
+  // the game has printed its last line. Aurora renames the game's main thread
+  // "Main thread", which left this process the only one named after the
+  // executable: a kill by name (pkill metroid_prime_port) hit it instead of the
+  // game, which then died of SIGPIPE on its next line. It has its own name and
+  // shrugs off SIGTERM/SIGHUP; it still exits when the game closes the pipe.
+#if defined(__linux__)
+  prctl(PR_SET_NAME, "mp-log-copier", 0, 0, 0);
+#endif
   signal(SIGINT, SIG_IGN);
   signal(SIGQUIT, SIG_IGN);
+  signal(SIGTERM, SIG_IGN);
+  signal(SIGHUP, SIG_IGN);
   signal(SIGPIPE, SIG_IGN);
   sFileLines.rules = &sRules;
   sFileLines.sink = ToFile;
@@ -296,13 +337,18 @@ int OpenShared(const std::string& path, std::string& opened) {
   std::error_code ec;
   const std::filesystem::path file(path);
   std::filesystem::create_directories(file.parent_path(), ec);
-  if (std::filesystem::exists(file, ec)) {
-    std::filesystem::path old = file;
-    old.replace_extension(".old.log");
-    std::filesystem::rename(file, old, ec);
+  // Only the instance that owns the main log rotates this copy and truncates it;
+  // a second instance takes one of the numbered names below instead.
+  int fd = -1;
+  if (sInstanceLock) {
+    if (std::filesystem::exists(file, ec)) {
+      std::filesystem::path old = file;
+      old.replace_extension(".old.log");
+      std::filesystem::rename(file, old, ec);
+    }
+    fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_APPEND | O_CLOEXEC, 0644);
+    opened = path;
   }
-  int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_APPEND | O_CLOEXEC, 0644);
-  opened = path;
   for (int n = 2; fd < 0 && n <= 5; ++n) {
     std::filesystem::path other = file;
     other.replace_filename(file.stem().string() + " (" + std::to_string(n) + ").log");
@@ -522,15 +568,32 @@ bool Start() {
   if (sActive) {
     return true;
   }
-  const std::string path = Path();
+  std::string path = Path();
   if (path.empty()) {
     return false;
   }
   std::error_code ec;
-  const std::filesystem::path file(path);
+  // UTF-8, as Path() is: a narrow path is the ANSI code page on Windows.
+  std::filesystem::path file(std::u8string(path.begin(), path.end()));
   // On a first start the user folder may not exist yet, and that run is the one
   // most likely to need a log.
   std::filesystem::create_directories(file.parent_path(), ec);
+  sInstanceLock = TakeInstanceLock(file);
+  if (!sInstanceLock) {
+    // A second live instance on the same user folder must not rotate the first
+    // one's log away: it writes to a log named after its pid instead.
+    std::filesystem::path other = file;
+    other.replace_extension("." + std::to_string(
+#if defined(_WIN32)
+                                           GetCurrentProcessId()
+#else
+                                           getpid()
+#endif
+                                               ) + ".log");
+    file = other;
+    const std::u8string text = other.u8string();
+    path.assign(text.begin(), text.end());
+  }
   if (std::filesystem::exists(file, ec)) {
     std::filesystem::path old = file;
     old.replace_extension(".old.log");
@@ -678,6 +741,8 @@ bool Start() {
   dup2(fds[1], STDOUT_FILENO);
   dup2(fds[1], STDERR_FILENO);
   close(fds[1]);
+  // Should the copier die anyway, a print must fail with EPIPE, not kill the game.
+  signal(SIGPIPE, SIG_IGN);
   // stdout to a pipe is fully buffered, and abort() flushes nothing: one line at a
   // time keeps the last messages before a crash.
   std::setvbuf(stdout, nullptr, _IOLBF, 0);

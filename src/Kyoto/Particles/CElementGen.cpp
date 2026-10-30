@@ -16,16 +16,22 @@
 #include "Kyoto/Math/CVector3f.hpp"
 #include "Kyoto/Math/CloseEnough.hpp"
 #include "Kyoto/Particles/CGenDescription.hpp"
+#include "Kyoto/Particles/CParticleDepthBias.hpp"
 #include "Kyoto/Particles/CParticleElectric.hpp"
 #include "Kyoto/Particles/CParticleGlobals.hpp"
 #include "Kyoto/Particles/CParticleSwoosh.hpp"
 #include "Kyoto/Particles/CSpawnSystemKeyframeData.hpp"
 #include "Kyoto/Particles/CWarp.hpp"
+#ifdef TARGET_PC
+#include "Kyoto/Particles/PortParticleMath.hpp"
+#endif
 #include "Kyoto/Particles/IElement.hpp"
 #include "Kyoto/TToken.hpp"
 
 #include "rstl/algorithm.hpp"
 #include "rstl/math.hpp"
+
+#include <cstring>
 
 #include "alloca.h"
 #include "math.h"
@@ -64,6 +70,17 @@ static uint PortNextParticleSeed() {
   h ^= h >> 16;
   return h;
 }
+
+// The factors of Remastered's PBDM row (CParticleStaticRenderState ctor 0x28bfc4 copies the row
+// the table at 0x28a600 fills) where retail draws its alpha blend: row 1 premultiplied
+// (One, InvSrcAlpha), row 3 opaque (One, Zero); any other keeps retail's (SrcAlpha, InvSrcAlpha).
+static ERglBlendFactor PortBlendSrc(const CGenDescription* desc) {
+  return desc->xPortBlend == 1 || desc->xPortBlend == 3 ? kBF_One : kBF_SrcAlpha;
+}
+
+static ERglBlendFactor PortBlendDst(const CGenDescription* desc) {
+  return desc->xPortBlend == 3 ? kBF_Zero : kBF_InvSrcAlpha;
+}
 #endif
 
 #pragma inline_max_size(250)
@@ -88,9 +105,16 @@ bool CElementGen::sSubtractBlend;
 
 int CElementGen::mParticleAliveCount;
 int CElementGen::mParticleSystemAliveCount;
+// Live systems of converted Remastered effects (PIRN): with any, the scene runs Remastered's
+// particle engine, which has no 0xa00 global cap (CreateNewParticles).
+static int sPortIrndSystems;
 
 double CElementGen::kTickTime = 1 / 60.0;
 ushort CElementGen::sSeed = 99;
+#ifdef TARGET_PC
+uint CElementGen::sPortChildSeed = 0;
+bool CElementGen::sPortChildSeedSet = false;
+#endif
 static bool sStaticListInitialized;
 
 struct CParticleListItemViewPointComp {
@@ -187,11 +211,26 @@ CElementGen::CElementGen(TToken< CGenDescription > gen, EModelOrientationType or
 , xPortNestedHdrInnerRadius(0.f)
 , xPortNestedHdrOuterRadius(0.f)
 , xPortNestedHdrRadiiValid(false)
+, xPortSeed(sSeed)
 #endif
 {
 #ifdef TARGET_PC
+  xPortIntFrame = (x28_loadedGenDesc->xPortIntRotation != nullptr ||
+                   x28_loadedGenDesc->xPortIntTranslation != nullptr) &&
+                  x28_loadedGenDesc->xPortXfmd != kPortXfmdFollowUnscaled;
   xPortVars.Init(x28_loadedGenDesc->xPortVars.get());
+  xPortVars.InitSys(x28_loadedGenDesc->xPortSys.get());
+  // A child is built inside its parent's update (or constructor), whose memory is current.
+  xPortVars.SetParent(CPortVarGlobals::sCurrent);
   CPortVarScope portVarScope(&xPortVars);
+  const bool portChildSeed = sPortChildSeedSet;
+  sPortChildSeedSet = false;
+  if (x28_loadedGenDesc->xPortIrnd) {
+    if (portChildSeed) {
+      xPortSeed = sPortChildSeed;
+    }
+    x27c_randState.SetSeed(xPortSeed);
+  }
 #endif
   CGlobalRandom gr(x27c_randState);
 
@@ -199,9 +238,20 @@ CElementGen::CElementGen(TToken< CGenDescription > gen, EModelOrientationType or
     int seedVal;
     seed->GetValue(x74_curFrame, seedVal);
     x94_randomSeed = seedVal;
+#ifdef TARGET_PC
+    xPortSeed = seedVal;
+#endif
   }
+#ifdef TARGET_PC
+  // Remastered keeps the seed as 32 bits (CElementGen ctor: +0x24, copied to the CRandom16 at +0x28).
+  x27c_randState.SetSeed(x28_loadedGenDesc->xPortIrnd ? xPortSeed : uint(x94_randomSeed));
+#else
   x27c_randState.SetSeed(x94_randomSeed);
+#endif
   ++mParticleSystemAliveCount;
+  if (x28_loadedGenDesc->xPortIrnd) {
+    ++sPortIrndSystems;
+  }
 
   x26c_25_LIT_ = x28_loadedGenDesc->x30_29_LIT_;
   x26c_26_AAPH = x28_loadedGenDesc->x30_26_AAPH;
@@ -217,26 +267,44 @@ CElementGen::CElementGen(TToken< CGenDescription > gen, EModelOrientationType or
   if (CModVectorElement* vel1 = x28_loadedGenDesc->x68_VEL1) {
     x280_VELSources[idx] = vel1;
     x278_hasVMD[idx] = x28_loadedGenDesc->x31_28_VMD1;
+#ifdef TARGET_PC
+    xPortVelocityGlobal[idx] = x28_loadedGenDesc->xPortVelocityGlobal[0];
+#endif
     ++idx;
   }
   if (CModVectorElement* vel2 = x28_loadedGenDesc->x6c_VEL2) {
     x280_VELSources[idx] = vel2;
     x278_hasVMD[idx] = x28_loadedGenDesc->x31_29_VMD2;
+#ifdef TARGET_PC
+    xPortVelocityGlobal[idx] = x28_loadedGenDesc->xPortVelocityGlobal[1];
+#endif
     ++idx;
   }
   if (CModVectorElement* vel3 = x28_loadedGenDesc->x70_VEL3) {
     x280_VELSources[idx] = vel3;
     x278_hasVMD[idx] = x28_loadedGenDesc->x31_30_VMD3;
+#ifdef TARGET_PC
+    xPortVelocityGlobal[idx] = x28_loadedGenDesc->xPortVelocityGlobal[2];
+#endif
     ++idx;
   }
   if (CModVectorElement* vel4 = x28_loadedGenDesc->x74_VEL4) {
     x280_VELSources[idx] = vel4;
     x278_hasVMD[idx] = x28_loadedGenDesc->x31_31_VMD4;
+#ifdef TARGET_PC
+    xPortVelocityGlobal[idx] = x28_loadedGenDesc->xPortVelocityGlobal[3];
+#endif
     ++idx;
   }
   for (int i = idx; i < 4; ++i) {
     x280_VELSources[i] = nullptr;
   }
+#ifdef TARGET_PC
+  xPortVelFinalizes = false;
+  for (int i = 0; i < idx; ++i) {
+    xPortVelFinalizes = xPortVelFinalizes || x280_VELSources[i]->PortFinalizesPosition();
+  }
+#endif
 
   if (x28_loadedGenDesc->x10c_ADV1 || x28_loadedGenDesc->x110_ADV2 ||
       x28_loadedGenDesc->x114_ADV3 || x28_loadedGenDesc->x118_ADV4 ||
@@ -244,6 +312,11 @@ CElementGen::CElementGen(TToken< CGenDescription > gen, EModelOrientationType or
       x28_loadedGenDesc->x124_ADV7 || x28_loadedGenDesc->x128_ADV8) {
     x26d_28_enableADV = true;
   }
+#ifdef TARGET_PC
+  if (x28_loadedGenDesc->xPortPartVars) {
+    x26d_28_enableADV = true;
+  }
+#endif
 
   for (int i = 0; i < 16; ++i) {
     x9c_externalVars[i] = 0.f;
@@ -369,6 +442,9 @@ CElementGen::CElementGen(TToken< CGenDescription > gen, EModelOrientationType or
 
 CElementGen::~CElementGen() {
   --mParticleSystemAliveCount;
+  if (x28_loadedGenDesc->xPortIrnd) {
+    --sPortIrndSystems;
+  }
   mParticleAliveCount -= x30_particles.size();
 
   for (AUTO(it, x290_activePartChildren.begin()); it != x290_activePartChildren.end(); ++it) {
@@ -400,6 +476,11 @@ bool CElementGen::PortFollowsEmitter() const {
 }
 
 CTransform4f CElementGen::PortEmitterFrame() const {
+  if (PortHasMover()) {
+    // XFMD 4: T_g/Q_g are the mover's output (zero and identity with no SMVR) at unit scale; the
+    // render adds the global translation.
+    return CTransform4f::Translate(xPortMover.pos - xe8_globalTranslation) * xPortMover.rot;
+  }
   const CTransform4f rotation =
       CTransform4f(x22c_globalOrientation.BuildMatrix3f(), CVector3f::Zero()) *
       CTransform4f(x1d8_orientation.BuildMatrix3f(), CVector3f::Zero());
@@ -426,6 +507,11 @@ void CElementGen::PortFollowEmitter(const CTransform4f& before) {
 
 void CElementGen::SetTranslation(const CVector3f& translation) {
 #ifdef TARGET_PC
+  if (xPortIntFrame) {
+    xPortExtTranslation = translation;
+    PortApplyIntFrame(true);
+    return;
+  }
   const CTransform4f portBefore = PortFollowsEmitter() ? PortEmitterFrame() : CTransform4f::Identity();
 #endif
   xdc_translation = translation;
@@ -434,6 +520,11 @@ void CElementGen::SetTranslation(const CVector3f& translation) {
 #endif
   for (AUTO(it, x290_activePartChildren.begin()); it != x290_activePartChildren.end(); ++it) {
     CParticleGen* ch = *it;
+#ifdef TARGET_PC
+    if (!xPortKssmChildren.empty() && PortFindKssmChild(ch) != nullptr) {
+      continue; // its component places it
+    }
+#endif
     if (ch->Get4CharId() == 'ELSC') {
       ch->SetTranslation(translation + x2c0_SEPO);
     } else if (ch->Get4CharId() == 'SWHC') {
@@ -452,10 +543,28 @@ void CElementGen::SetGlobalTranslation(const CVector3f& translation) {
     xPortPrevGlobalTranslation = xPortGlobalGeneration == 0 ? translation : xe8_globalTranslation;
     xPortGlobalGeneration = gen;
   }
+  if (xPortIntFrame) {
+    xe8_globalTranslation = translation;
+    PortApplyIntFrame(true);
+    return;
+  }
+  // A mover's frame is held in world space (PortEmitterFrame), so it does not move with GT.
+  const CTransform4f portBefore = PortHasMover() ? PortEmitterFrame() : CTransform4f::Identity();
 #endif
   xe8_globalTranslation = translation;
+#ifdef TARGET_PC
+  if (PortHasMover()) {
+    PortFollowEmitter(portBefore);
+  }
+#endif
   for (AUTO(it, x290_activePartChildren.begin()); it != x290_activePartChildren.end(); ++it) {
     (*it)->SetGlobalTranslation(translation);
+#ifdef TARGET_PC
+    // A child its component places stays where it was put until its next update.
+    if (const PortKssmChild* state = xPortKssmChildren.empty() ? nullptr : PortFindKssmChild(*it)) {
+      (*it)->SetTranslation(state->pos - translation);
+    }
+#endif
   }
 }
 
@@ -466,6 +575,14 @@ void CElementGen::PortGlobalIsPresented() {
   for (AUTO(it, x290_activePartChildren.begin()); it != x290_activePartChildren.end(); ++it) {
     if ((*it)->Get4CharId() == 'PART')
       static_cast< CElementGen* >(*it)->PortGlobalIsPresented();
+  }
+}
+
+void CElementGen::PortSetHudScene(float eyeScale) {
+  xPortHudEyeScale = eyeScale;
+  for (AUTO(it, x290_activePartChildren.begin()); it != x290_activePartChildren.end(); ++it) {
+    if ((*it)->Get4CharId() == 'PART')
+      static_cast< CElementGen* >(*it)->PortSetHudScene(eyeScale);
   }
 }
 #endif
@@ -481,6 +598,27 @@ const CColor& CElementGen::GetModulationColor() const { return x338_moduColor; }
 
 void CElementGen::SetGlobalScale(const CVector3f& scale) {
 #ifdef TARGET_PC
+  xPortExternalScale = scale;
+  PortSetSystemScale(PortSystemScale());
+}
+
+// CParticleDescription::Compile 0x289af0 (XFMD != 5): the system scale (+0x40) is INTS's when it
+// is authored, in place of the external scale (+0x30); it composes with the external one only
+// through an EXTS read inside it. The system draws at it and hands it to its children (SetupSpawn,
+// +0x2a0 = +0x40). Remastered has no local scale: the port's composes with it as retail's does.
+CVector3f CElementGen::PortSystemScale() {
+  const CVectorElement* ints = x28_loadedGenDesc->xPortIntScale;
+  if (ints == nullptr) {
+    return xPortExternalScale;
+  }
+  CParticleGlobals::SParticleSystem thisSystem('PART', this);
+  CPortVarScope portVarScope(&xPortVars);
+  CVector3f scale = xPortExternalScale;
+  ints->GetValue(x74_curFrame, scale);
+  return scale;
+}
+
+void CElementGen::PortSetSystemScale(const CVector3f& scale) {
   const CTransform4f portBefore = PortFollowsEmitter() ? PortEmitterFrame() : CTransform4f::Identity();
 #endif
   x100_globalScale = scale;
@@ -522,8 +660,34 @@ void CElementGen::SetLocalScale(const CVector3f& scale) {
   }
 }
 
+#ifdef TARGET_PC
+// The children take it from the update loop, before their own update, around this system's
+// translation. A particle system sits on its parent's translation, so it needs no origin.
+void CElementGen::PortSetSpawnSpread(const CVector3f& spread, const CVector3f&) {
+  xPortSpawnSpread = spread;
+}
+
+// `rel` is a new particle's offset from the system origin. With the emitter followed (XFMD 3) the
+// offset is already turned by the global orientation, so spread it in the unturned axes.
+CVector3f CElementGen::PortSpreadSpawn(const CVector3f& rel) const {
+  if (xPortSpawnSpread == CVector3f(1.f, 1.f, 1.f)) {
+    return rel;
+  }
+  if (PortFollowsEmitter() && !PortHasMover()) {
+    return x22c_globalOrientation.Rotate(CVector3f::ByElementMultiply(
+        x22c_globalOrientation.TransposeRotate(rel), xPortSpawnSpread));
+  }
+  return CVector3f::ByElementMultiply(rel, xPortSpawnSpread);
+}
+#endif
+
 void CElementGen::SetOrientation(const CTransform4f& orientation) {
 #ifdef TARGET_PC
+  if (xPortIntFrame) {
+    xPortExtOrientation = orientation;
+    PortApplyIntFrame(true);
+    return;
+  }
   const CTransform4f portBefore = PortFollowsEmitter() ? PortEmitterFrame() : CTransform4f::Identity();
 #endif
   x1d8_orientation = orientation;
@@ -532,12 +696,23 @@ void CElementGen::SetOrientation(const CTransform4f& orientation) {
   PortFollowEmitter(portBefore);
 #endif
   for (AUTO(it, x290_activePartChildren.begin()); it != x290_activePartChildren.end(); ++it) {
+#ifdef TARGET_PC
+    const PortKssmChild* state = xPortKssmChildren.empty() ? nullptr : PortFindKssmChild(*it);
+    if (state != nullptr && state->hasRot) {
+      continue; // its component orients it
+    }
+#endif
     (*it)->SetOrientation(orientation);
   }
 }
 
 void CElementGen::SetGlobalOrientation(const CTransform4f& orientation) {
 #ifdef TARGET_PC
+  if (xPortIntFrame) {
+    xPortExtGlobalOrientation.SetRotation(orientation);
+    PortApplyIntFrame(true);
+    return;
+  }
   const CTransform4f portBefore = PortFollowsEmitter() ? PortEmitterFrame() : CTransform4f::Identity();
 #endif
   x22c_globalOrientation.SetRotation(orientation);
@@ -546,8 +721,80 @@ void CElementGen::SetGlobalOrientation(const CTransform4f& orientation) {
 #endif
   for (AUTO(it, x290_activePartChildren.begin()); it != x290_activePartChildren.end(); ++it) {
     (*it)->SetGlobalOrientation(x22c_globalOrientation);
+#ifdef TARGET_PC
+    const PortKssmChild* state = xPortKssmChildren.empty() ? nullptr : PortFindKssmChild(*it);
+    if (state != nullptr && state->hasRot) {
+      (*it)->SetOrientation(x22c_globalOrientation.GetQuickInverse() * state->rot);
+    }
+#endif
   }
 }
+
+#ifdef TARGET_PC
+// CParticleDescription::Compile 0x289af0 (XFMD != 5): the system orientation (+0x38) and
+// translation (+0x3c) are INTR's and INTT's when authored, in place of the external ones; they
+// read those only through EXTR/EXTT. XFMD 2 bakes them at spawn (Q_l, vec 0x12 = T / S) with an
+// identity, zero global frame; 3 makes them the live global frame (SetupTransformMode 0x2887d8).
+// The port puts both in x1d8/xdc with x22c identity, which its spawn bakes and PortEmitterFrame
+// follows, and keeps xe8 the owner's so the presented-translation tracking is unchanged. Children
+// get the system values as their external ones (SetupSpawn +0x298/+0x29c, 0x246508).
+void CElementGen::PortApplyIntFrame(bool force) {
+  const CGenDescription& desc = *x28_loadedGenDesc;
+  CVector3f euler = CVector3f::Zero();
+  CVector3f translation = PortExternalTranslation();
+  {
+    CParticleGlobals::SParticleSystem thisSystem('PART', this);
+    CPortVarScope portVarScope(&xPortVars);
+    if (desc.xPortIntRotation != nullptr) {
+      desc.xPortIntRotation->GetValue(x74_curFrame, euler);
+    }
+    if (desc.xPortIntTranslation != nullptr) {
+      desc.xPortIntTranslation->GetValue(x74_curFrame, translation);
+    }
+  }
+  if (!force && euler == xPortIntEuler && translation == xPortIntTranslation) {
+    return;
+  }
+  xPortIntEuler = euler;
+  xPortIntTranslation = translation;
+  const CTransform4f portBefore = PortFollowsEmitter() ? PortEmitterFrame() : CTransform4f::Identity();
+  if (desc.xPortIntRotation != nullptr) {
+    // PINR's Euler vector as PMRT's is turned into a rotation.
+    CTransform4f rotation = CTransform4f::RotateZ(CRelAngle::FromDegrees(euler.GetZ()));
+    rotation.RotateLocalY(CRelAngle::FromDegrees(euler.GetY()));
+    rotation.RotateLocalX(CRelAngle::FromDegrees(euler.GetX()));
+    x22c_globalOrientation = CTransform4f::Identity();
+    x1d8_orientation = rotation;
+  } else {
+    x22c_globalOrientation = xPortExtGlobalOrientation;
+    x1d8_orientation = xPortExtOrientation;
+  }
+  x208_orientationInverse = x1d8_orientation.GetQuickInverse().BuildMatrix3f();
+  xdc_translation =
+      desc.xPortIntTranslation != nullptr ? translation - xe8_globalTranslation : xPortExtTranslation;
+  PortFollowEmitter(portBefore);
+  for (AUTO(it, x290_activePartChildren.begin()); it != x290_activePartChildren.end(); ++it) {
+    CParticleGen* ch = *it;
+    const PortKssmChild* state = xPortKssmChildren.empty() ? nullptr : PortFindKssmChild(ch);
+    ch->SetGlobalTranslation(xe8_globalTranslation);
+    if (state != nullptr) {
+      ch->SetTranslation(state->pos - xe8_globalTranslation); // its component places it
+    } else if (ch->Get4CharId() == 'ELSC') {
+      ch->SetTranslation(xdc_translation + x2c0_SEPO);
+    } else if (ch->Get4CharId() == 'SWHC') {
+      ch->SetTranslation(xdc_translation + x2b0_SSPO);
+    } else {
+      ch->SetTranslation(xdc_translation);
+    }
+    ch->SetGlobalOrientation(x22c_globalOrientation);
+    if (state != nullptr && state->hasRot) {
+      ch->SetOrientation(x22c_globalOrientation.GetQuickInverse() * state->rot);
+    } else {
+      ch->SetOrientation(x1d8_orientation);
+    }
+  }
+}
+#endif
 
 void CElementGen::SetGlobalOrientAndTrans(const CTransform4f& xf) {
   SetGlobalOrientation(xf);
@@ -565,6 +812,22 @@ const bool CElementGen::Update(double dt) {
   CParticleGlobals::SParticleSystem thisSystem('PART', this);
 #ifdef TARGET_PC
   CPortVarScope portVarScope(&xPortVars);
+  if (!xPortMoverInit) {
+    // CAddVarSystem::Init 0x278438: every system variable once, on the generator's random.
+    CGlobalRandom gr(x27c_randState);
+    CParticleGlobals::SetEmitterTime(x74_curFrame);
+#ifdef TARGET_PC
+    CParticleGlobals::PortSetSystemTime(x74_curFrame, x268_PSLT);
+#endif
+    PortEvalSys(true);
+    if (x28_loadedGenDesc->xPortIntScale != nullptr) {
+      PortSetSystemScale(PortSystemScale());
+    }
+    if (xPortIntFrame) {
+      PortApplyIntFrame(true);
+    }
+    PortInitMover();
+  }
 #endif
 
   if (x28_loadedGenDesc->x4_PSWT && !x26d_25_warmedUp) {
@@ -586,6 +849,9 @@ bool CElementGen::InternalUpdate(double dt) {
   double dt1 = close_enough(dt, kTickTime) ? kTickTime : dt;
 
   CParticleGlobals::SetEmitterTime(x74_curFrame);
+#ifdef TARGET_PC
+  CParticleGlobals::PortSetSystemTime(x74_curFrame, x268_PSLT);
+#endif
 
   if (x28_loadedGenDesc->x8_PSTS) {
     float psts = 1.0f;
@@ -608,10 +874,23 @@ bool CElementGen::InternalUpdate(double dt) {
     x2ec_maxSize = 0.0f;
 
     CParticleGlobals::SetEmitterTime(x74_curFrame);
+#ifdef TARGET_PC
+    CParticleGlobals::PortSetSystemTime(x74_curFrame, x268_PSLT);
+#endif
+#ifdef TARGET_PC
+    PortStepMover();
+    PortStepPemv();
+#endif
     UpdateExistingParticles();
     CParticleGlobals::SetParticleLifetime(x268_PSLT);
 
+#ifdef TARGET_PC
+    // CODE emitter: no automatic rate-driven spawn (TickSystem_Node 0x24a16c skips the rate
+    // element and its remainder when desc[0x2fa] bit 4 is set).
+    if (x74_curFrame < x268_PSLT && x88_particleEmission && !x28_loadedGenDesc->xPortCodeSpawn) {
+#else
     if (x74_curFrame < x268_PSLT && x88_particleEmission) {
+#endif
       float grte = 0.0f;
 #ifdef TARGET_PC
       // Retail data always has a GRTE; a mod's PART may not (no particles then).
@@ -645,6 +924,13 @@ bool CElementGen::InternalUpdate(double dt) {
     }
 
     UpdateChildParticleSystems(kTickTime);
+
+#ifdef TARGET_PC
+    // UpdateCountdownTimerForShutdown (0x27b864): counts down while positive, shuts down at zero.
+    if (xPortShutdownCountdown > 0 && --xPortShutdownCountdown == 0) {
+      PortDoShutdownBehavior(0xff);
+    }
+#endif
 
     ++frameUpdateCount;
     t += kTickTime;
@@ -739,9 +1025,33 @@ void CElementGen::UpdateLightParameters() {
 #endif
 }
 
-void CElementGen::UpdateAdvanceAccessParameters(int particleFrame, int particleIndex) {
+void CElementGen::UpdateAdvanceAccessParameters(int particleFrame, int particleIndex, bool spawn) {
   float* params = x60_advValues[particleFrame].values;
   CParticleGlobals::mParticleAccessParameters = params;
+#ifdef TARGET_PC
+  // PPVR: Remastered's ADV1..9 / IAV0..3 with its constant-after-start rule.
+  if (x28_loadedGenDesc->xPortPartVars) {
+    CRealElement* const advs[8] = {
+        x28_loadedGenDesc->x10c_ADV1, x28_loadedGenDesc->x110_ADV2, x28_loadedGenDesc->x114_ADV3,
+        x28_loadedGenDesc->x118_ADV4, x28_loadedGenDesc->x11c_ADV5, x28_loadedGenDesc->x120_ADV6,
+        x28_loadedGenDesc->x124_ADV7, x28_loadedGenDesc->x128_ADV8};
+    x28_loadedGenDesc->xPortPartVars->Eval(advs, spawn, particleIndex, params);
+    return;
+  }
+  // Remastered sorts its variables so one is evaluated after those it reads (SortVars 0x276188).
+  if (!x28_loadedGenDesc->xPortAdvOrder.empty()) {
+    CRealElement* const advs[8] = {
+        x28_loadedGenDesc->x10c_ADV1, x28_loadedGenDesc->x110_ADV2, x28_loadedGenDesc->x114_ADV3,
+        x28_loadedGenDesc->x118_ADV4, x28_loadedGenDesc->x11c_ADV5, x28_loadedGenDesc->x120_ADV6,
+        x28_loadedGenDesc->x124_ADV7, x28_loadedGenDesc->x128_ADV8};
+    for (const u8 n : x28_loadedGenDesc->xPortAdvOrder) {
+      if (advs[n] != nullptr) {
+        advs[n]->GetValue(particleIndex, params[n]);
+      }
+    }
+    return;
+  }
+#endif
   if (x28_loadedGenDesc->x10c_ADV1) {
     x28_loadedGenDesc->x10c_ADV1->GetValue(particleIndex, params[0]);
   }
@@ -771,7 +1081,19 @@ void CElementGen::UpdateAdvanceAccessParameters(int particleFrame, int particleI
 bool CElementGen::UpdateVelocitySource(int velIdx, int frame, CParticle& particle) {
   bool reset;
 #ifdef TARGET_PC
-  if (x278_hasVMD[velIdx] && PortFollowsEmitter()) {
+  if (xPortVelocityGlobal[velIdx]) {
+    // VGD mode 2: Compile 0x291b90 converts the particle to the global frame around
+    // the evaluator (0x292710/0x292810, inverse 0x2928f0/0x2929f0). In this port the
+    // emitter rotation is already in the particle; PortWorldFromLocal supplies the
+    // remaining global translation and scale. Transform the live particle so element
+    // reads through CParticleGlobals see the same coordinates as the modifier arguments.
+    const CTransform4f toWorld = CTransform4f::Translate(xe8_globalTranslation) * x10c_globalScaleTransform;
+    const CTransform4f fromWorld = x13c_globalScaleTransformInverse * CTransform4f::Translate(-xe8_globalTranslation);
+    reset = PortParticleMath::EvaluateGlobalVelocity(toWorld, fromWorld, particle.x1c_vel, particle.x4_pos,
+        [&](CVector3f& velocity, CVector3f& position) {
+          return x280_VELSources[velIdx]->GetValue(frame, velocity, position);
+        });
+  } else if (x278_hasVMD[velIdx] && PortFollowsEmitter()) {
     const CTransform4f emitter = PortEmitterFrame();
     const CTransform4f inverse = emitter.GetQuickInverse();
     CVector3f localVel = inverse.Rotate(particle.x1c_vel);
@@ -801,6 +1123,9 @@ void CElementGen::UpdateExistingParticles() {
   AUTO(p, x30_particles.begin());
   x25c_activeParticleCount = 0;
   CParticleGlobals::SetEmitterTime(x74_curFrame);
+#ifdef TARGET_PC
+  CParticleGlobals::PortSetSystemTime(x74_curFrame, x268_PSLT);
+#endif
   CParticleGlobals::mParticleAccessParameters = NULL;
 
   while (p != x30_particles.end()) {
@@ -825,11 +1150,19 @@ void CElementGen::UpdateExistingParticles() {
       }
     }
     p->x10_prevPos = p->x4_pos;
+#ifdef TARGET_PC
+    // Remastered omits `pos += vel` when a VEL source finalizes the position (0x291b90).
+    if (!xPortVelFinalizes) {
+      p->x4_pos += p->x1c_vel;
+    }
+#else
     p->x4_pos += p->x1c_vel;
+#endif
     int particleFrame = x74_curFrame - p->x28_startFrame;
     CParticleGlobals::mCurrentParticle = &*p;
 #ifdef TARGET_PC
     CParticleGlobals::xPortIrndParticle = x28_loadedGenDesc->xPortIrnd ? &*p : nullptr;
+    CPortKeepGlobals::sCurrent = x28_loadedGenDesc->xPortIrnd ? &p->xPortKeep : nullptr;
 #endif
     CParticleGlobals::SetParticleLifetime(p->x0_endFrame - p->x28_startFrame);
     CParticleGlobals::UpdateParticleLifetimeTweenValues(particleFrame);
@@ -882,6 +1215,7 @@ void CElementGen::UpdateExistingParticles() {
   }
 #ifdef TARGET_PC
   CParticleGlobals::xPortIrndParticle = nullptr;
+  CPortKeepGlobals::sCurrent = nullptr;
 #endif
 
   if (x30_particles.size() > 0) {
@@ -913,8 +1247,11 @@ void CElementGen::CreateNewParticles(int count) {
     newCount = x90_MAXP - x30_particles.size();
   }
 
-  if (newCount + mParticleAliveCount > 0xa00) {
-    newCount = 0xa00 - mParticleAliveCount;
+  // Remastered's CreateNewParticles (0x24a4cc) clamps only to MAXP: the 0xa00 global cap is gone,
+  // for every system. Busy rooms (Exterior Docking Hangar idles near 1900) otherwise starve
+  // projectile emitters. Their last one gone, the count can still be past 0xa00: clamp at zero.
+  if (sPortIrndSystems == 0 && newCount + mParticleAliveCount > 0xa00) {
+    newCount = rstl::max_val(0, 0xa00 - mParticleAliveCount);
   }
 
   CGlobalRandom gr(x27c_randState);
@@ -929,6 +1266,24 @@ void CElementGen::CreateNewParticles(int count) {
   }
 
   CParticleGlobals::mParticleAccessParameters = NULL;
+
+#ifdef TARGET_PC
+  // CreateNewParticles 0x24a4cc: the system's change of translation since the last tick (EMRV, 0 on
+  // the first) scaled by ISVF joins each new velocity (the element is read once, with no clamp
+  // variable: the shipped ones are constants), and ITPE spreads the `count` particles of a tick
+  // back along it when it is above 2^-23 (0x24a630: step = delta / (count + 1), the i-th of count
+  // is put (count - i) steps back, so the last is one step behind the system).
+  CVector3f inheritVel = CVector3f::Zero();
+  if (const CRealElement* isvf = x28_loadedGenDesc->xPortInheritVel) {
+    float factor = 0.f;
+    isvf->GetValue(x74_curFrame, factor);
+    inheritVel = PortEmitterVelocity() * factor;
+  }
+  CVector3f spreadStep = CVector3f::Zero();
+  if (x28_loadedGenDesc->xPortSpread && count >= 2 && PortEmitterVelocity().Magnitude() > 1.1920929e-7f) {
+    spreadStep = PortEmitterVelocity() * (1.f / float(count + 1));
+  }
+#endif
 
   for (int i = 0; i < newCount; ++i) {
     // TODO: The x1c_vel values somehow get frsp'd, despite being
@@ -948,6 +1303,8 @@ void CElementGen::CreateNewParticles(int count) {
     particle.x28_startFrame = x74_curFrame;
 #ifdef TARGET_PC
     particle.xPortSeed = PortNextParticleSeed();
+    particle.xPortKeep.latched = 0;
+    std::memset(particle.xPortKeep.values, 0, sizeof(particle.xPortKeep.values));
 #endif
 
     if (CIntElement* ltme = x28_loadedGenDesc->x28_LTME) {
@@ -959,13 +1316,20 @@ void CElementGen::CreateNewParticles(int count) {
     CParticleGlobals::mCurrentParticle = &particle;
 #ifdef TARGET_PC
     CParticleGlobals::xPortIrndParticle = x28_loadedGenDesc->xPortIrnd ? &particle : nullptr;
+    CPortKeepGlobals::sCurrent = x28_loadedGenDesc->xPortIrnd ? &particle.xPortKeep : nullptr;
 #endif
 
     if (x26d_28_enableADV) {
-      UpdateAdvanceAccessParameters(particleIndex, 0);
+      UpdateAdvanceAccessParameters(particleIndex, 0, true);
     }
 
     particle.x0_endFrame += x74_curFrame;
+#ifdef TARGET_PC
+    // _Init_Particle: the KPIN latches the ADVs did not already read.
+    for (const CREPortKeep* keep : x28_loadedGenDesc->xPortKeeps) {
+      keep->Latch(0);
+    }
+#endif
 
     if (CColorElement* colr = x28_loadedGenDesc->x24_COLR) {
       colr->GetValue(0, particle.x34_color);
@@ -984,25 +1348,59 @@ void CElementGen::CreateNewParticles(int count) {
       if (PortFollowsEmitter()) {
         // Also turned by the global orientation, which PortFollowEmitter follows.
         const CTransform4f frame = PortEmitterFrame();
-        particle.x4_pos = frame * particle.x4_pos + xf4_POFS;
-        particle.x1c_vel = frame.Rotate(particle.x1c_vel);
+        particle.x4_pos =
+            frame.GetTranslation() + PortSpreadSpawn(frame.Rotate(particle.x4_pos) + xf4_POFS);
+        if (!x28_loadedGenDesc->xPortNoIvse) {
+          particle.x1c_vel = frame.Rotate(particle.x1c_vel);
+        }
       } else
 #endif
       {
+#ifdef TARGET_PC
+        particle.x4_pos =
+            PortSpreadSpawn(x1d8_orientation.Rotate(particle.x4_pos) + xf4_POFS) +
+            ((x13c_globalScaleTransformInverse * x1a8_localScaleTransformInverse) *
+             xdc_translation);
+#else
         particle.x4_pos =
             x1d8_orientation.Rotate(particle.x4_pos) +
             ((x13c_globalScaleTransformInverse * x1a8_localScaleTransformInverse) *
              xdc_translation) +
             xf4_POFS;
-        particle.x1c_vel = x1d8_orientation.Rotate(particle.x1c_vel);
+#endif
+        // IVSE 0 (PIVS): the velocity is not turned by the system orientation
+        if (!x28_loadedGenDesc->xPortNoIvse) {
+          particle.x1c_vel = x1d8_orientation.Rotate(particle.x1c_vel);
+        }
       }
     } else {
+#ifdef TARGET_PC
+      const CVector3f compPos =
+          PortFollowsEmitter() ? PortEmitterFrame().GetTranslation()
+                               : (x13c_globalScaleTransformInverse * x1a8_localScaleTransformInverse) *
+                                     xdc_translation;
+#else
       const CVector3f& compPos =
           (x13c_globalScaleTransformInverse * x1a8_localScaleTransformInverse) * xdc_translation;
+#endif
       particle.x4_pos = compPos + xf4_POFS;
+#ifdef TARGET_PC
+      // CreateNewParticles 0x24a9ec: only a missing EMTR uses the DVVN default;
+      // IVSE applies to this velocity too, before inherited emitter motion is added.
+      particle.x1c_vel = PortParticleMath::DefaultParticleVelocity(x28_loadedGenDesc->xPortDefaultValuesVersion);
+      if (!x28_loadedGenDesc->xPortNoIvse) {
+        particle.x1c_vel = PortFollowsEmitter() ? PortEmitterFrame().Rotate(particle.x1c_vel)
+                                              : x1d8_orientation.Rotate(particle.x1c_vel);
+      }
+#else
       particle.x1c_vel = CVector3f::Zero();
+#endif
     }
 
+#ifdef TARGET_PC
+    particle.x4_pos = particle.x4_pos - spreadStep * float(count - i);
+    particle.x1c_vel = particle.x1c_vel + inheritVel;
+#endif
     particle.x10_prevPos = particle.x4_pos;
 #ifdef TARGET_PC
     PortVfxSetLaunchDir(particle);
@@ -1036,11 +1434,37 @@ void CElementGen::CreateNewParticles(int count) {
     if (x28_loadedGenDesc->xPortVfx) {
       PortVfxEvalParticle(*x28_loadedGenDesc, particle, 0);
     }
+    // CreateNewParticles 0x24abd0 invokes the complete velocity program after initial values.
+    // Compile 0x291b90 prepends pos += vel unless a source finalizes position itself;
+    // the killing op 0x292b88 terminates the program immediately. Keep prevPos/launchDir
+    // from before this step, and remove a killed newborn before it can be rendered.
+    if (x28_loadedGenDesc->xPortVelocityAtCreation) {
+      if (!xPortVelFinalizes) {
+        particle.x4_pos += particle.x1c_vel;
+      }
+      bool killed = false;
+      for (int v = 0; v < 4 && x280_VELSources[v] != nullptr; ++v) {
+        if (UpdateVelocitySource(v, 0, particle)) {
+          killed = true;
+          break;
+        }
+      }
+      if (killed) {
+        // Remastered +0x168 is the per-tick active count (UpdateExistingParticles 0x24a26c),
+        // not the cumulative +0x1e8 returned by GetTotalParticlesCreated 0x24db30.
+        // Failed births still consume a cumulative particle number.
+        x30_particles.pop_back();
+        --mParticleAliveCount;
+        --x25c_activeParticleCount;
+        continue;
+      }
+    }
 #endif
     AccumulateBounds(particle.x4_pos, particle.x2c_lineLengthOrSize);
   }
 #ifdef TARGET_PC
   CParticleGlobals::xPortIrndParticle = nullptr;
+  CPortKeepGlobals::sCurrent = nullptr;
 #endif
 }
 
@@ -1059,7 +1483,588 @@ void CElementGen::UpdatePSTranslationAndOrientation() {
   }
 }
 
+#ifdef TARGET_PC
+// Remastered's child seed (0x2c59e0, called from 0x27b014 for every child a generator constructs):
+// FNV-1a over 32-bit words of the parent's seed, the child description's GUID word 0, the parent's
+// frame and the parent's live child count before the push.
+uint CElementGen::PortChildSeed(const CGenDescription& child) const {
+  const uint kPrime = 0x01000193;
+  uint hash = (xPortSeed ^ 0x811c9dc5u) * kPrime;
+  hash = (hash ^ child.xPortGuidWord) * kPrime;
+  hash = (hash ^ uint(x74_curFrame)) * kPrime;
+  return (hash ^ uint(x290_activePartChildren.size())) * kPrime;
+}
+
+// A swoosh or electric child: Remastered places every child it constructs alike
+// (ConstructChildSystemCoords 0x24c594, no per-type offset when no component is given).
+void CElementGen::PortAddChild(CParticleGen* child) {
+  child->SetGlobalTranslation(xe8_globalTranslation);
+  child->SetGlobalOrientation(x22c_globalOrientation);
+  child->SetGlobalScale(x100_globalScale);
+  child->SetLocalScale(x16c_localScale);
+  child->SetTranslation(xdc_translation);
+  child->SetOrientation(x1d8_orientation);
+  child->SetParticleEmission(x88_particleEmission);
+  child->SetModulationColor(x338_moduColor);
+  x290_activePartChildren.reserve(x290_activePartChildren.size() + 1);
+  x290_activePartChildren.push_back(child);
+}
+
+// Remastered's spawn-table components (SEVT(SMOV) placing a child), as its component update runs
+// them: the pos tree is evaluated (a top-level KPIN only at frame 0), then the rot tree, then the
+// mover adds the velocity (GRAV adds its vector to the velocity first). The math below is the
+// Switch build's, operation for operation.
+namespace {
+// CIRC's sine: the parabolic one of the wrapped angle.
+float PortKssmFastSin(float t) { return PortParticleMath::ParabolicSin(PortParticleMath::WrapAngle(t)); }
+
+CQuaternion PortKssmQuat(const PortParticleMath::Quat& q) { return CQuaternion(q.w, CVector3f(q.x, q.y, q.z)); }
+
+PortParticleMath::Quat PortKssmQuat(const CQuaternion& q) {
+  const CVector3f v = q.GetVector();
+  return {q.GetScalar(), v.GetX(), v.GetY(), v.GetZ()};
+}
+} // namespace
+
+CElementGen::PortKssmChild* CElementGen::PortFindKssmChild(const CParticleGen* child) {
+  for (PortKssmChild& state : xPortKssmChildren) {
+    if (state.child == child) {
+      return &state;
+    }
+  }
+  return nullptr;
+}
+
+float CElementGen::PortKssmReal(PortKssmChild& state, u32 index) {
+  const CGenDescription::PortKssmNode& node = state.kssm->nodes[index];
+  switch (node.op) {
+  case 'CNST':
+    return node.value;
+  case 'VARF':
+    return CPortVarGlobals::sCurrent != nullptr ? CPortVarGlobals::sCurrent->Real(node.slot) : 0.f;
+  case 'PSYR':
+    return xPortVars.SysReal(node.slot);
+  case 'KEYE': {
+    // GetAnimTime on the parent's frame.
+    const int end = int(node.keys.size()) - 1;
+    const int t = x74_curFrame;
+    int key = t;
+    if (node.loop) {
+      const int loopStart = int(node.loopStart);
+      if (t >= end && end != loopStart) {
+        key = (t - loopStart) % (end - loopStart) + loopStart;
+      }
+    } else if (t > end) {
+      key = end;
+    }
+    key = key < 0 ? 0 : key > end ? end : key;
+    return node.keys[key];
+  }
+  case 'ADD_': {
+    const float a = PortKssmReal(state, node.args[0]);
+    return a + PortKssmReal(state, node.args[1]);
+  }
+  case 'MULT': {
+    const float a = PortKssmReal(state, node.args[0]);
+    return a * PortKssmReal(state, node.args[1]);
+  }
+  case 'IRND':
+  case 'RAND': {
+    // IRND rolls once, at the instance's frame 0; RAND on every evaluation.
+    if (node.op == 'IRND' && state.frame != 0) {
+      return state.latches[node.slot];
+    }
+    const float min = PortKssmReal(state, node.args[0]);
+    const float max = PortKssmReal(state, node.args[1]);
+    const float value = (max - min) * CRandom16::GetRandomNumber()->Float() + min;
+    if (node.op == 'IRND') {
+      state.latches[node.slot] = value;
+    }
+    return value;
+  }
+  default:
+    return 0.f;
+  }
+}
+
+// Between Remastered's particle space and the port's (CVEPortBasis): a point or direction, a
+// scale, and a rotation (conjugated by the basis change, a proper rotation, so its vector part
+// moves as a direction does). Each is its own inverse.
+static CVector3f PortBasis(const CVector3f& v) { return CVector3f(-v.GetX(), v.GetZ(), v.GetY()); }
+static CVector3f PortBasisScale(const CVector3f& v) { return CVector3f(v.GetX(), v.GetZ(), v.GetY()); }
+static CQuaternion PortBasis(const CQuaternion& q) { return CQuaternion(q.GetScalar(), PortBasis(q.GetVector())); }
+
+CVector3f CElementGen::PortKssmVector(PortKssmChild& state, u32 index) {
+  const CGenDescription::PortKssmNode& node = state.kssm->nodes[index];
+  switch (node.op) {
+  case 'EXTT':
+    return PortBasis(PortExternalTranslation());
+  case 'EXTS':
+    return PortBasisScale(PortExternalScale());
+  case 'KPIN': {
+    float* latch = &state.latches[node.slot];
+    if (state.frame == 0) {
+      const CVector3f v = PortKssmVector(state, node.args[0]);
+      latch[0] = v.GetX();
+      latch[1] = v.GetY();
+      latch[2] = v.GetZ();
+    }
+    return CVector3f(latch[0], latch[1], latch[2]);
+  }
+  case 'ADD_': {
+    const CVector3f a = PortKssmVector(state, node.args[0]);
+    return a + PortKssmVector(state, node.args[1]);
+  }
+  case 'MULT': {
+    const CVector3f a = PortKssmVector(state, node.args[0]);
+    const CVector3f b = PortKssmVector(state, node.args[1]);
+    return CVector3f(a.GetX() * b.GetX(), a.GetY() * b.GetY(), a.GetZ() * b.GetZ());
+  }
+  case 'ROTV': {
+    // CVERotateVector::GetValue 0x2a0328: the rotation first, then the vector.
+    const CQuaternion q = PortKssmRotation(state, node.args[1]);
+    return PortParticleMath::QuatTransform(PortKssmQuat(q), PortKssmVector(state, node.args[0]));
+  }
+  case 'CNST': {
+    const float x = PortKssmReal(state, node.args[0]);
+    const float y = PortKssmReal(state, node.args[1]);
+    const float z = PortKssmReal(state, node.args[2]);
+    return CVector3f(x, y, z);
+  }
+  case 'CIRC': {
+    const CVector3f centre = PortKssmVector(state, node.args[0]);
+    const CVector3f normal = PortKssmVector(state, node.args[1]);
+    const float angleConst = PortKssmReal(state, node.args[2]);
+    const float angleLinear = PortKssmReal(state, node.args[3]);
+    const float radius = PortKssmReal(state, node.args[4]);
+    // CVECircle: its ctor 0x2a05d8 builds u = n x (X or Y), v = n x u from AsNormalized 0x6b238
+    // (Normalize's math); GetValue 0x2a06b4 wraps a before b = a + pi/2, and sums
+    // c + (r u) sin b + sin a (r v) per axis.
+    const CVector3f n = PortParticleMath::NormalizeInPlace(normal);
+    const float nx = n.GetX(), ny = n.GetY(), nz = n.GetZ();
+    float u[3];
+    if (nx <= 0.8f) {
+      u[0] = ny * 0.f - nz * 0.f;
+      u[1] = nz - nx * 0.f;
+      u[2] = nx * 0.f - ny;
+    } else {
+      u[0] = ny * 0.f - nz;
+      u[1] = nz * 0.f - nx * 0.f;
+      u[2] = nx - ny * 0.f;
+    }
+    const float v[3] = {ny * u[2] - nz * u[1], nz * u[0] - nx * u[2], nx * u[1] - ny * u[0]};
+    const float a = PortParticleMath::WrapAngle((angleLinear * float(state.frame) + angleConst) * 0.017453292f);
+    const float sb = PortKssmFastSin(a + 1.5707964f);
+    const float sa = PortParticleMath::ParabolicSin(a);
+    const float c[3] = {centre.GetX(), centre.GetY(), centre.GetZ()};
+    float out[3];
+    for (int i = 0; i < 3; ++i) {
+      out[i] = (c[i] + (radius * u[i]) * sb) + sa * (radius * v[i]);
+    }
+    return CVector3f(out[0], out[1], out[2]);
+  }
+  default:
+    return CVector3f::Zero();
+  }
+}
+
+CQuaternion CElementGen::PortKssmRotation(PortKssmChild& state, u32 index) {
+  const CGenDescription::PortKssmNode& node = state.kssm->nodes[index];
+  switch (node.op) {
+  case 'EXTR':
+    return PortBasis(PortExternalRotation());
+  case 'REUL': {
+    // Order 0 (CERotationEuler::GetValue 0x29c944).
+    const float x = PortKssmReal(state, node.args[0]);
+    const float y = PortKssmReal(state, node.args[1]);
+    const float z = PortKssmReal(state, node.args[2]);
+    return PortKssmQuat(PortParticleMath::EulerQuat(x, y, z));
+  }
+  case 'RADD': {
+    // CERotationAdd::GetValue 0x29c370.
+    const CQuaternion a = PortKssmRotation(state, node.args[0]);
+    const CQuaternion b = PortKssmRotation(state, node.args[1]);
+    return PortKssmQuat(PortParticleMath::QuatMultiply(PortKssmQuat(a), PortKssmQuat(b)));
+  }
+  default: // IDNT
+    return CQuaternion::NoRotation();
+  }
+}
+
+void CElementGen::PortKssmEvaluate(PortKssmChild& state) {
+  const CGenDescription::PortKssm& kssm = *state.kssm;
+  const CGenDescription::PortKssmComponent& component = kssm.components[state.component];
+  if (kssm.nodes[component.pos].op != 'KPIN' || state.frame == 0) {
+    state.remPos = PortKssmVector(state, component.pos);
+  }
+  if (component.rot != ~0u) {
+    state.rotQuat = PortBasis(PortKssmRotation(state, component.rot));
+    state.rot = state.rotQuat.BuildTransform4f();
+  }
+  if (component.grav != ~0u) {
+    state.vel = state.vel + PortKssmVector(state, component.grav);
+  }
+  state.remPos = state.remPos + state.vel;
+  state.pos = PortBasis(state.remPos);
+}
+
+void CElementGen::PortGlobalFrame(CVector3f& t, CQuaternion& q, CVector3f& s) const {
+  switch (x28_loadedGenDesc->xPortXfmd) {
+  case kPortXfmdFollow:
+    t = PortSystemTranslation();
+    q = PortSystemRotation();
+    s = PortExternalScale();
+    break;
+  case kPortXfmdFollowUnscaled:
+    if (PortHasMover()) {
+      // Zero and identity until the mover is initialised, and with no SMVR.
+      t = xPortMover.pos;
+      q = xPortMover.hasRot ? xPortMover.rotQuat : CQuaternion::NoRotation();
+    } else {
+      t = PortExternalTranslation();
+      q = PortExternalRotation();
+    }
+    s = CVector3f(1.f, 1.f, 1.f);
+    break;
+  default:
+    t = CVector3f::Zero();
+    q = CQuaternion::NoRotation();
+    s = PortExternalScale();
+    break;
+  }
+}
+
+bool CElementGen::PortHasMover() const {
+  return x28_loadedGenDesc->xPortMover && x28_loadedGenDesc->xPortXfmd == kPortXfmdFollowUnscaled;
+}
+
+// CAddVarSystem::Init at the first Update (CElementGen::Update 0x2460e0, before the PSWT warm-up):
+// the mover starts at frame 0, evaluated once and moved one step.
+void CElementGen::PortInitMover() {
+  xPortMoverInit = true;
+  const CGenDescription::PortKssm* mover = x28_loadedGenDesc->xPortMover.get();
+  if (!PortHasMover() || mover->components.empty()) {
+    return;
+  }
+  const CGenDescription::PortKssmComponent& component = mover->components[0];
+  xPortMover.kssm = mover;
+  xPortMover.component = 0;
+  xPortMover.vel = CVector3f(component.delta[0], component.delta[1], component.delta[2]);
+  xPortMover.hasRot = component.rot != ~0u;
+  xPortMover.latches.assign(component.latches, 0.f);
+  PortKssmEvaluate(xPortMover);
+}
+
+// The system variables in PSYS order, at the emitter's frame: all of them (CAddVarSystem::Init
+// 0x278438) or those that are not init-only (CAddVarSystem::Update 0x278638). [I] Remastered
+// keeps separate Init and Update lists; their order is taken as PSYS's.
+// They are evaluated on the generator's own time context, whose slot 0 is the system's PSLT (a
+// tag-1 ILPT in one of them is the port's PLPT offset 0), so the port's lifetime globals are the
+// system's while they run; the rest of the update reads a particle's own life.
+void CElementGen::PortEvalSys(bool init) {
+  const CPortSys* sys = x28_loadedGenDesc->xPortSys.get();
+  if (sys == nullptr) {
+    return;
+  }
+  const int frame = x74_curFrame;
+  const int lifetime = CParticleGlobals::mParticleLifetime;
+  const float lifetimeReal = CParticleGlobals::mParticleLifetimeReal;
+  const int percentage = CParticleGlobals::mParticleLifetimePercentage;
+  const float percentageReal = CParticleGlobals::mParticleLifetimePercentageReal;
+  const float percentageRemainder = CParticleGlobals::mParticleLifetimePercentageRemainder;
+  CParticleGlobals::SetParticleLifetime(x268_PSLT);
+  CParticleGlobals::UpdateParticleLifetimeTweenValues(frame);
+  for (const SPortSysItem& item : sys->items) {
+    if (item.initOnly && !init) {
+      continue;
+    }
+    std::array< float, 4 > v{};
+    switch (item.type) {
+    case EPortVarType::Real:
+      item.real->GetValue(frame, v[0]);
+      break;
+    case EPortVarType::Int: {
+      int i = 0;
+      item.intE->GetValue(frame, i);
+      v[0] = static_cast< float >(i);
+    } break;
+    case EPortVarType::Color:
+      item.color->GetValueHdr(frame, v.data());
+      break;
+    default: {
+      CVector3f vec;
+      item.vec->GetValue(frame, vec);
+      v = {vec.GetX(), vec.GetY(), vec.GetZ(), 0.f};
+    } break;
+    }
+    xPortVars.SetSys(item.type, item.slot, v);
+  }
+  CParticleGlobals::mParticleLifetime = lifetime;
+  CParticleGlobals::mParticleLifetimeReal = lifetimeReal;
+  CParticleGlobals::mParticleLifetimePercentage = percentage;
+  CParticleGlobals::mParticleLifetimePercentageReal = percentageReal;
+  CParticleGlobals::mParticleLifetimePercentageRemainder = percentageRemainder;
+}
+
+// CAddVarSystem::Update at the start of each tick (TickSystem_Complete 0x24ac98), before the
+// particles update and spawn. The live particles stay put in the mover's frame.
+void CElementGen::PortStepMover() {
+  PortEvalSys(false);
+  if (x28_loadedGenDesc->xPortIntScale != nullptr) {
+    const CVector3f scale = PortSystemScale();
+    if (scale != x100_globalScale) {
+      PortSetSystemScale(scale);
+    }
+  }
+  if (xPortIntFrame) {
+    PortApplyIntFrame(false);
+  }
+  if (xPortMover.kssm == nullptr) {
+    return;
+  }
+  const CTransform4f before = PortEmitterFrame();
+  ++xPortMover.frame;
+  PortKssmEvaluate(xPortMover);
+  PortFollowEmitter(before);
+}
+
+// CVEVelocityCalc (SetupTransformMode 0x2893f8): V12(f) - V12(f-1), 0 at the first, no time step.
+// V12 is the reciprocal of the system scale times its translation, per component (CVEReciprocal
+// then multiply, not a division), plus the constant POFS (Remastered's INTT) under XFMD 5 (the
+// CVEAdd at 0x289338).
+// The delta is in the port's axes and the converter's BSIS takes it into Remastered's.
+void CElementGen::PortStepPemv() {
+  const u8 mode = x28_loadedGenDesc->xPortPemv;
+  if (mode == 0) {
+    return;
+  }
+  const CVector3f t = mode >= 2 ? xdc_translation : PortSystemTranslation();
+  const CVector3f s = PortExternalScale();
+  CVector3f cur((1.f / s.GetX()) * t.GetX(), (1.f / s.GetY()) * t.GetY(), (1.f / s.GetZ()) * t.GetZ());
+  if (mode == 3) {
+    cur = CVector3f(cur.GetX() + xf4_POFS.GetX(), cur.GetY() + xf4_POFS.GetY(), cur.GetZ() + xf4_POFS.GetZ());
+  }
+  if (xPortPemvStarted) {
+    xPortPemvDelta = CVector3f(cur.GetX() - xPortPemvPrev.GetX(), cur.GetY() - xPortPemvPrev.GetY(),
+                               cur.GetZ() - xPortPemvPrev.GetZ());
+  } else {
+    xPortPemvDelta = CVector3f::Zero();
+    xPortPemvStarted = true;
+  }
+  xPortPemvPrev = cur;
+}
+
+// Holds the child where its component puts it: it keeps the parent's global translation and
+// orientation (ConstructChildParticleSystem/PortAddChild), so its local ones make up the rest.
+void CElementGen::PortKssmPlace(const PortKssmChild& state) {
+  state.child->SetTranslation(state.pos - xe8_globalTranslation);
+  if (state.hasRot) {
+    state.child->SetOrientation(x22c_globalOrientation.GetQuickInverse() * state.rot);
+  }
+}
+
+// The spawns of the first entry of table `table` at `frame`, as Remastered's callback (0x24dd5c) runs
+// them: a generator whose OPTS the parent enables is skipped, the rest start GetNumInstances
+// (0x2940fc) times.
+void CElementGen::PortSpawnTableEntry(size_t table, int frame) {
+  for (const CGenDescription::PortKssmEntry& entry : x28_loadedGenDesc->xPortKssm->tables[table].entries) {
+    if (int(entry.frame) != frame) {
+      continue;
+    }
+    for (const CGenDescription::PortKssmSpawn& spawn : entry.spawns) {
+      if (spawn.type == 'PART') {
+        TLockedToken< CGenDescription > token = spawn.part->GetToken();
+        if (x26d_27_enableOPTS && token->x32_25_OPTS) {
+          continue;
+        }
+      }
+      int instances = 1;
+      if (spawn.instances != nullptr) {
+        // Once per spawn (GetNumInstances 0x2940fc); a PSYI count reads this system's slots.
+        CPortVarScope portVarScope(&xPortVars);
+        spawn.instances->GetValue(x74_curFrame, instances);
+      }
+      for (int i = 0; i < instances; ++i) {
+        // A component starts at its frame 0: evaluated once and moved one step.
+        PortKssmChild state;
+        state.kssm = x28_loadedGenDesc->xPortKssm.get();
+        if (spawn.component != ~0u) {
+          const CGenDescription::PortKssmComponent& component =
+              x28_loadedGenDesc->xPortKssm->components[spawn.component];
+          state.component = spawn.component;
+          state.vel = CVector3f(component.delta[0], component.delta[1], component.delta[2]);
+          state.hasRot = component.rot != ~0u;
+          state.latches.assign(component.latches, 0.f);
+          PortKssmEvaluate(state);
+        }
+        if (spawn.type == 'PART') {
+          TLockedToken< CGenDescription > token = spawn.part->GetToken();
+          state.child = ConstructChildParticleSystem(token);
+          x290_activePartChildren.reserve(x290_activePartChildren.size() + 1);
+          x290_activePartChildren.push_back(state.child);
+        } else if (spawn.type == 'SWHC') {
+          state.child = rs_new CParticleSwoosh(*spawn.swoosh, 0);
+          PortAddChild(state.child);
+        } else {
+          state.child = rs_new CParticleElectric(*spawn.electric);
+          PortAddChild(state.child);
+        }
+        if (spawn.component != ~0u) {
+          PortKssmPlace(state);
+          xPortKssmChildren.push_back(std::move(state));
+        }
+      }
+    }
+    return;
+  }
+}
+
+// CSpawnSystemKeyframeData::Update (0x293930) for each table at the current frame.
+void CElementGen::PortSpawnTables() {
+  const CGenDescription::PortKssm& kssm = *x28_loadedGenDesc->xPortKssm;
+  if (xPortKssmPeriods.size() != kssm.tables.size()) {
+    xPortKssmPeriods.assign(kssm.tables.size(), 0);
+  }
+  const int frame = x74_curFrame;
+  for (size_t i = 0; i < kssm.tables.size(); ++i) {
+    const CGenDescription::PortKssmTable& table = kssm.tables[i];
+    int& slot = xPortKssmPeriods[i];
+    if (frame == 0 && !table.periodConst) {
+      table.periodElement->GetValue(0, slot);
+    }
+    const int period = table.periodConst ? table.period : slot;
+    const bool runs = frame <= int(kssm.end) || !table.periodConst || table.period > 0;
+    if (!runs) {
+      continue;
+    }
+    const int start = int(table.start);
+    const int local = period > 0 && start <= frame ? (frame - start) % period + start : frame;
+    const bool wrapped = start < frame && local == start;
+    PortSpawnTableEntry(i, wrapped ? start + period : local);
+    if (wrapped) {
+      if (start <= int(kssm.end) || !table.periodConst || table.period > 0) {
+        PortSpawnTableEntry(i, start);
+      }
+      if (!table.periodConst) {
+        table.periodElement->GetValue(frame, slot);
+      }
+    }
+  }
+}
+
+// Remastered's CElementGen::SpawnChildSystems (0x249bd8): the death spawns first, nothing more
+// from the last frame on, then ICTS, IITS, the swoosh, the electric and the spawn tables.
+void CElementGen::PortSpawnChildSystems() {
+  if (x84_prevFrame == x74_curFrame) {
+    return;
+  }
+  // The children's components step before anything spawns (frame++, evaluate, move).
+  for (PortKssmChild& state : xPortKssmChildren) {
+    ++state.frame;
+    PortKssmEvaluate(state);
+    PortKssmPlace(state);
+  }
+  CGenDescription* desc = x28_loadedGenDesc;
+  if (desc->x90_IDTS && x74_curFrame == x268_PSLT) {
+    int ndsyVal = 1;
+    if (CIntElement* ndsy = desc->xa0_NDSY) {
+      ndsy->GetValue(0, ndsyVal);
+    }
+    for (int i = 0; i < ndsyVal; ++i) {
+      TLockedToken< CGenDescription > token = desc->x90_IDTS->GetToken();
+      if (x26d_27_enableOPTS && token->x32_25_OPTS) {
+        break;
+      }
+      x290_activePartChildren.reserve(x290_activePartChildren.size() + 1);
+      x290_activePartChildren.push_back(ConstructChildParticleSystem(token));
+    }
+  }
+  if (x268_PSLT <= x74_curFrame) {
+    return;
+  }
+  if (desc->x78_ICTS && x74_curFrame == x2a0_CSSD) {
+    int ncsyVal = 1;
+    if (CIntElement* ncsy = desc->x88_NCSY) {
+      ncsy->GetValue(x74_curFrame, ncsyVal);
+    }
+    for (int i = 0; i < ncsyVal; ++i) {
+      TLockedToken< CGenDescription > token = desc->x78_ICTS->GetToken();
+      if (x26d_27_enableOPTS && token->x32_25_OPTS) {
+        break;
+      }
+      x290_activePartChildren.reserve(x290_activePartChildren.size() + 1);
+      x290_activePartChildren.push_back(ConstructChildParticleSystem(token));
+    }
+  }
+  if (desc->xa4_IITS && x88_particleEmission && x74_curFrame >= x2a4_SISY &&
+      ((x74_curFrame - x2a4_SISY) % x2a8_PISY) == 0) {
+    TLockedToken< CGenDescription > token = desc->xa4_IITS->GetToken();
+    if (!(x26d_27_enableOPTS && token->x32_25_OPTS)) {
+      x290_activePartChildren.reserve(x290_activePartChildren.size() + 1);
+      x290_activePartChildren.push_back(ConstructChildParticleSystem(token));
+    }
+  }
+  if (desc->xc0_SSWH && x74_curFrame == x2ac_SSSD) {
+    CParticleSwoosh* swoosh = rs_new CParticleSwoosh(*desc->xc0_SSWH, 0);
+    swoosh->SetGlobalTranslation(xe8_globalTranslation);
+    swoosh->SetGlobalScale(x100_globalScale);
+    swoosh->SetLocalScale(x16c_localScale);
+    swoosh->SetTranslation(xdc_translation + x2b0_SSPO);
+    swoosh->SetOrientation(x1d8_orientation);
+    swoosh->SetParticleEmission(x88_particleEmission);
+    x290_activePartChildren.reserve(x290_activePartChildren.size() + 1);
+    x290_activePartChildren.push_back(swoosh);
+  }
+  for (auto& extra : desc->xPortExtraSwooshes) {
+    if (x74_curFrame != extra.frame) {
+      continue;
+    }
+    CParticleSwoosh* swoosh = rs_new CParticleSwoosh(extra.swoosh, 0);
+    swoosh->SetGlobalTranslation(xe8_globalTranslation);
+    swoosh->SetGlobalScale(x100_globalScale);
+    swoosh->SetLocalScale(x16c_localScale);
+    swoosh->SetTranslation(xdc_translation + x2b0_SSPO);
+    swoosh->SetOrientation(x1d8_orientation);
+    swoosh->SetParticleEmission(x88_particleEmission);
+    x290_activePartChildren.reserve(x290_activePartChildren.size() + 1);
+    x290_activePartChildren.push_back(swoosh);
+  }
+  if (desc->xd8_SELC && x74_curFrame == x2bc_SESD) {
+    CParticleElectric* electric = rs_new CParticleElectric(*desc->xd8_SELC);
+    electric->SetGlobalTranslation(xe8_globalTranslation);
+    electric->SetGlobalScale(x100_globalScale);
+    electric->SetLocalScale(x16c_localScale);
+    electric->SetTranslation(xdc_translation + x2c0_SEPO);
+    electric->SetOrientation(x1d8_orientation);
+    electric->SetParticleEmission(x88_particleEmission);
+    x290_activePartChildren.reserve(x290_activePartChildren.size() + 1);
+    x290_activePartChildren.push_back(electric);
+  }
+  if (desc->xPortKssm) {
+    PortSpawnTables();
+  } else if (desc->xbc_KSSM.get() != nullptr) {
+    // A spawn table the converter could not carry exactly: retail's reading of it.
+    rstl::vector< CSpawnSystemKeyframeData::CSpawnSystemKeyframeInfo >& spawns =
+        desc->xbc_KSSM->GetSpawnedSystemsAtFrame(x74_curFrame);
+    for (int i = 0; i < spawns.size(); ++i) {
+      TLockedToken< CGenDescription > token = *spawns[i].GetToken();
+      if (x26d_27_enableOPTS && token->x32_25_OPTS) {
+        continue;
+      }
+      x290_activePartChildren.reserve(x290_activePartChildren.size() + 1);
+      x290_activePartChildren.push_back(ConstructChildParticleSystem(token));
+    }
+  }
+}
+#endif
+
 CElementGen* CElementGen::ConstructChildParticleSystem(TToken< CGenDescription > desc) const {
+#ifdef TARGET_PC
+  if (x28_loadedGenDesc->xPortIrnd && desc->xPortIrnd) {
+    sPortChildSeed = PortChildSeed(**desc);
+    sPortChildSeedSet = true;
+  }
+#endif
   CElementGen* child =
       rs_new CElementGen(desc, kMOT_Normal, x26d_27_enableOPTS ? kOSF_Two : kOSF_One);
   child->x26d_26_modelsUseLights = x26d_26_modelsUseLights;
@@ -1080,6 +2085,13 @@ void CElementGen::UpdateChildParticleSystems(double dt) {
   }
 
   CGlobalRandom gr(x27c_randState);
+
+#ifdef TARGET_PC
+  if (x28_loadedGenDesc->xPortIrnd) {
+    PortSpawnChildSystems();
+    goto update_children;
+  }
+#endif
 
   // ICTS - child particle systems spawned at CSSD frame
   if (x28_loadedGenDesc->x78_ICTS && x84_prevFrame != x74_curFrame && x74_curFrame == x2a0_CSSD) {
@@ -1193,12 +2205,31 @@ void CElementGen::UpdateChildParticleSystems(double dt) {
     x290_activePartChildren.push_back(electric);
   }
 
+#ifdef TARGET_PC
+update_children:
+#endif
   // Update all child particle systems
   AUTO(it, x290_activePartChildren.begin());
   while (it != x290_activePartChildren.end()) {
     CParticleGen* child = *it;
+#ifdef TARGET_PC
+    child->PortSetSpawnSpread(xPortSpawnSpread, xdc_translation);
+#endif
     child->Update(dt);
+#ifdef TARGET_PC
+    PortKssmChild* placed = xPortKssmChildren.empty() ? nullptr : PortFindKssmChild(child);
+    // A child its component holds still in the world was not carried by the parent's move.
+    if (placed != nullptr && child->Get4CharId() == 'PART' &&
+        !x28_loadedGenDesc->xPortKssm->components[placed->component].liveExtt) {
+      static_cast< CElementGen* >(child)->PortGlobalIsPresented();
+    }
+#endif
     if (child->IsSystemDeletable() == true) {
+#ifdef TARGET_PC
+      if (placed != nullptr) {
+        xPortKssmChildren.erase(xPortKssmChildren.begin() + (placed - xPortKssmChildren.data()));
+      }
+#endif
       delete child;
       it = x290_activePartChildren.erase(it);
     } else {
@@ -1216,14 +2247,191 @@ void CElementGen::SetParticleEmission(bool emission) {
   }
 }
 
+#ifdef TARGET_PC
+// CParticleGen::ShutdownEffect (0x27a66c): with a SHTT the countdown is armed once, else the
+// shutdown acts now.
+void CElementGen::ShutdownEffect() {
+  if (x28_loadedGenDesc->xPortShutdownTime == nullptr) {
+    PortDoShutdownBehavior(0xff);
+    return;
+  }
+  if (xPortShutdownCountdown == -1) {
+    int ticks = 0;
+    CParticleGlobals::SParticleSystem thisSystem('PART', this);
+    CParticleGlobals::SetEmitterTime(x74_curFrame);
+    x28_loadedGenDesc->xPortShutdownTime->GetValue(x74_curFrame, ticks);
+    xPortShutdownCountdown = ticks;
+    xPortShutdownTotal = ticks;
+  }
+}
+
+// CParticleGen::DoShutdownBehavior (0x27b88c): mode 0xff is the description's SHTM. Modes 0 and 1
+// stop the emission and mode 1 also destroys the live particles. With ISDT (the default) the
+// children get the same call with the same mode, so 0xff acts at once on each one's own SHTM
+// (CElementGen's override 0x2499b8 does the same); without it they get their own ShutdownEffect.
+void CElementGen::PortDoShutdownBehavior(u32 mode) {
+  const u32 use = mode == 0xff ? x28_loadedGenDesc->xPortShutdownMode : (mode & 0xff);
+  if (use < 2) {
+    SetParticleEmission(false);
+    if (use == 1) {
+      DestroyParticles();
+    }
+  }
+  const bool byMode = x28_loadedGenDesc->xPortChildShutdownByMode;
+  for (AUTO(it, x290_activePartChildren.begin()); it != x290_activePartChildren.end(); ++it) {
+    if (byMode) {
+      (*it)->PortDoShutdownBehavior(mode);
+    } else {
+      (*it)->ShutdownEffect();
+    }
+  }
+}
+
+bool CREPortShutdownRemaining::GetValue(int, float& out) const {
+  const CParticleGlobals::SParticleSystem* system = CParticleGlobals::GetCurrentParticleSystem();
+  out = system != nullptr && system->x4_system != nullptr ? system->x4_system->PortShutdownTimeRemaining() : 1.f;
+  return false;
+}
+
+float CElementGen::PortShutdownTimeRemaining() const {
+  if (xPortShutdownCountdown == -1 || xPortShutdownTotal == 0) {
+    return 1.f;
+  }
+  return static_cast< float >(xPortShutdownCountdown) / static_cast< float >(xPortShutdownTotal);
+}
+#endif
+
 void CElementGen::ForceParticleCreation(int amount) {
   CParticleGlobals::SParticleSystem thisSystem('PART', this);
 #ifdef TARGET_PC
   CPortVarScope portVarScope(&xPortVars);
 #endif
   CParticleGlobals::SetEmitterTime(x74_curFrame);
+#ifdef TARGET_PC
+  CParticleGlobals::PortSetSystemTime(x74_curFrame, x268_PSLT);
+#endif
   CreateNewParticles(amount);
 }
+
+#ifdef TARGET_PC
+// Remastered CElementGen::_CreateNewParticleAtPositionsIncludingChildren 0x24bfd0: the PART
+// children first, each one's new particles added to this generator's recursive count, then this
+// generator's own (the visor goo splat manager spawns one splat into the whole effect).
+void CElementGen::PortCreateParticlesAtPositionsIncludingChildren(int n, const CVector3f* pos) {
+  for (AUTO(it, x290_activePartChildren.begin()); it != x290_activePartChildren.end(); ++it) {
+    if (*it == nullptr || (*it)->Get4CharId() != 'PART') {
+      continue;
+    }
+    CElementGen& child = static_cast< CElementGen& >(**it);
+    const uint before = child.x264_recursiveParticleCount;
+    child.PortCreateParticlesAtPositionsIncludingChildren(n, pos);
+    const uint after = child.x264_recursiveParticleCount;
+    if (after != before && before <= after) {
+      x264_recursiveParticleCount += after - before;
+    }
+  }
+  CParticleGlobals::SParticleSystem thisSystem('PART', this);
+  CPortVarScope portVarScope(&xPortVars);
+  CParticleGlobals::SetEmitterTime(x74_curFrame);
+  CParticleGlobals::PortSetSystemTime(x74_curFrame, x268_PSLT);
+  PortCreateParticlesAtPositions(n, pos);
+}
+
+// Remastered CElementGen::_CreateNewParticlesAtPositions 0x24c0dc: up to MAXP particles at the
+// given positions, raw (no POFS, orientation or translation), at rest, without the EMTR. The
+// order is ADV, COLR, SIZE, then ROTA; there is no 0xa00 cap and no LINE case.
+void CElementGen::PortCreateParticlesAtPositions(int n, const CVector3f* pos) {
+  if (!sStaticListInitialized) {
+    Initialize();
+  }
+  const int room = x90_MAXP - static_cast< int >(x30_particles.size());
+  const int newCount = n <= room ? n : room;
+  if (newCount <= 0) {
+    return;
+  }
+
+  CGlobalRandom gr(x27c_randState);
+  x30_particles.reserve(newCount + x30_particles.size());
+
+  if (x26d_28_enableADV && x60_advValues.capacity() < newCount + x30_particles.size()) {
+    int newCap = x60_advValues.capacity() * 2;
+    x60_advValues.reserve(rstl::min_val(x90_MAXP, newCap));
+    while (x60_advValues.size() < x60_advValues.capacity()) {
+      x60_advValues.push_back(CAdvancedValues());
+    }
+  }
+
+  CParticleGlobals::mParticleAccessParameters = NULL;
+
+  for (int i = 0; i < newCount; ++i) {
+    x30_particles.push_back(CParticle());
+    const int particleIndex = x30_particles.size() - 1;
+
+    if (x2c_orientType == kMOT_One) {
+      x50_parentMatrices[particleIndex] = x1d8_orientation.BuildMatrix3f();
+    }
+
+    CParticle& particle = x30_particles[particleIndex];
+    particle.x28_startFrame = x74_curFrame;
+    particle.xPortSeed = PortNextParticleSeed();
+    particle.xPortKeep.latched = 0;
+    std::memset(particle.xPortKeep.values, 0, sizeof(particle.xPortKeep.values));
+
+    if (CIntElement* ltme = x28_loadedGenDesc->x28_LTME) {
+      ltme->GetValue(0, particle.x0_endFrame);
+    }
+    CParticleGlobals::SetParticleLifetime(particle.x0_endFrame);
+    CParticleGlobals::UpdateParticleLifetimeTweenValues(0);
+    CParticleGlobals::mCurrentParticle = &particle;
+    CParticleGlobals::xPortIrndParticle = x28_loadedGenDesc->xPortIrnd ? &particle : nullptr;
+    CPortKeepGlobals::sCurrent = x28_loadedGenDesc->xPortIrnd ? &particle.xPortKeep : nullptr;
+    particle.x0_endFrame += x74_curFrame;
+
+    particle.x4_pos = pos[i];
+    particle.x10_prevPos = pos[i];
+    particle.x1c_vel = CVector3f::Zero();
+    particle.x34_color = CColor(0xFFFFFFFF);
+
+    if (x26d_28_enableADV) {
+      UpdateAdvanceAccessParameters(particleIndex, 0, true);
+    }
+    for (const CREPortKeep* keep : x28_loadedGenDesc->xPortKeeps) {
+      keep->Latch(0);
+    }
+
+    if (CColorElement* colr = x28_loadedGenDesc->x24_COLR) {
+      colr->GetValue(0, particle.x34_color);
+      if (x28_loadedGenDesc->xPortVfx) {
+        colr->GetValueHdr(0, particle.xPortColor);
+      }
+    }
+    PortVfxSetLaunchDir(particle);
+
+    if (CRealElement* size = x28_loadedGenDesc->x38_SIZE) {
+      size->GetValue(0, particle.x2c_lineLengthOrSize);
+    } else {
+      particle.x2c_lineLengthOrSize = 0.1f;
+    }
+    if (CRealElement* rota = x28_loadedGenDesc->x3c_ROTA) {
+      rota->GetValue(0, particle.x30_lineWidthOrRota);
+    } else {
+      particle.x30_lineWidthOrRota = 0.f;
+    }
+
+    if (x28_loadedGenDesc->xPortVfx) {
+      PortVfxEvalParticle(*x28_loadedGenDesc, particle, 0);
+    }
+    AccumulateBounds(particle.x4_pos, particle.x2c_lineLengthOrSize);
+
+    ++mParticleAliveCount;
+    ++x25c_activeParticleCount;
+    ++x260_cumulativeParticles;
+    ++x264_recursiveParticleCount;
+  }
+  CParticleGlobals::xPortIrndParticle = nullptr;
+  CPortKeepGlobals::sCurrent = nullptr;
+}
+#endif
 
 void CElementGen::EndLifetime() {
   x268_PSLT = 0;
@@ -1263,7 +2471,8 @@ bool CElementGen::IsSystemDeletable() const {
 void CElementGen::Render() {
   CStopwatch timer;
 #ifdef TARGET_PC
-  PortFx::RenderScope fxScope;
+  PortFx::RenderScope fxScope(x28_loadedGenDesc->xPortUnfogged);
+  CPortParticleDepthBias portDepthBias(*this, x28_loadedGenDesc->xPortDepthBias);
 #endif
 
   x274_backupLightActive = CGraphics::GetLightMask();
@@ -1308,17 +2517,20 @@ void CElementGen::Render() {
 #endif
 
   if (x30_particles.size() > 0) {
-    if (x28_loadedGenDesc->x48_PMDL || x28_loadedGenDesc->x31_26_PMUS) {
+    const u8 primitive = x28_loadedGenDesc->xPortPrimitive;
+    if (primitive == 2 || primitive == 3 ||
+        (primitive == 255 && (x28_loadedGenDesc->x48_PMDL || x28_loadedGenDesc->x31_26_PMUS))) {
       RenderModels();
     }
-    if (x26c_31_LINE) {
+    if (primitive == 255 && x26c_31_LINE) {
       RenderLines();
-    } else {
+    } else if (primitive == 255 || primitive == 1) {
       RenderParticles();
     }
   }
 
 #ifdef TARGET_PC
+  CParticleGlobals::mParticleAccessParameters = nullptr;
   if (xPortPresenting) {
     PortRestoreNewborns();
     xe8_globalTranslation = portSavedGlobal;
@@ -1479,7 +2691,8 @@ void CElementGen::RenderParticles() {
     // Render() runs RenderModels() first. A model PART's TEXR is its VMAT's ramp texture, not a
     // sprite: drawing it as a card too put a 1x1 slab beside the mesh, or round each of the
     // PMDV variants RenderModels draws as retail models.
-    if (x28_loadedGenDesc->x31_26_PMUS || !x28_loadedGenDesc->x48_PMDL) {
+    if (x28_loadedGenDesc->xPortPrimitive == 1 ||
+        x28_loadedGenDesc->x31_26_PMUS || !x28_loadedGenDesc->x48_PMDL) {
       PortRenderParticlesVfx();
     }
     return;
@@ -1605,11 +2818,15 @@ void CElementGen::RenderParticles() {
     GXSetTevSwapMode(nextStage, GX_TEV_SWAP0, GX_TEV_SWAP1);
     nextStage = static_cast< GXTevStageID >(nextStage + 1);
   } else if (x26c_26_AAPH) {
-    CGraphics::SetDepthWriteMode(x26c_28_zTest, kE_LEqual, false);
+    CGraphics::SetDepthWriteMode(x26c_28_zTest, (PortNoZTest() ? kE_Always : kE_LEqual), false);
     CGraphics::SetBlendMode(kBM_Blend, kBF_SrcAlpha, kBF_One, kLO_Clear);
   } else {
-    CGraphics::SetDepthWriteMode(x26c_28_zTest, kE_LEqual, x26c_27_ZBUF);
+    CGraphics::SetDepthWriteMode(x26c_28_zTest, (PortNoZTest() ? kE_Always : kE_LEqual), x26c_27_ZBUF);
+#ifdef TARGET_PC
+    CGraphics::SetBlendMode(kBM_Blend, PortBlendSrc(x28_loadedGenDesc), PortBlendDst(x28_loadedGenDesc), kLO_Clear);
+#else
     CGraphics::SetBlendMode(kBM_Blend, kBF_SrcAlpha, kBF_InvSrcAlpha, kLO_Clear);
+#endif
   }
 
   CGX::SetNumTevStages(static_cast< uchar >(nextStage));
@@ -1655,6 +2872,9 @@ void CElementGen::RenderParticles() {
   }
 
   CParticleGlobals::SetEmitterTime(x74_curFrame);
+#ifdef TARGET_PC
+  CParticleGlobals::PortSetSystemTime(x74_curFrame, x268_PSLT);
+#endif
 
   if (!x26c_30_MBLR) {
     if (!SORT && constUVs && !x26c_29_ORNT) {
@@ -1685,6 +2905,16 @@ void CElementGen::RenderParticles() {
           int partFrame = x74_curFrame - particle.x28_startFrame - 1;
           CParticleGlobals::SetParticleLifetime(particle.x0_endFrame - particle.x28_startFrame);
           CParticleGlobals::UpdateParticleLifetimeTweenValues(partFrame);
+#ifdef TARGET_PC
+          // Remastered evaluates COLR in UpdateExistingParticles 0x24a26c with ctx+0x38 = this particle
+          // and ctx+0x20 = its own var block (this+0x170 + stride * index), after _Update_Particle.
+          // TMTR is read from that same block by FillInParticleTextureTransformMaterialData
+          // 0x2acfc0 (ctx+0x20 = block + index * stride; the _WithParticleIndices form 0x2ad058
+          // does the same per index). Binding the particle's x60_advValues here matches.
+          if (x26d_28_enableADV) {
+            CParticleGlobals::mParticleAccessParameters = x60_advValues[&particle - &x30_particles[0]].values;
+          }
+#endif
 #ifdef TARGET_PC
           PortGetValueUV(x28_loadedGenDesc->x40_TEXR, partFrame, &particle, uvs);
 #else
@@ -1865,6 +3095,11 @@ void CElementGen::RenderParticles() {
           CParticleGlobals::SetParticleLifetime(particle->x0_endFrame - particle->x28_startFrame);
           CParticleGlobals::UpdateParticleLifetimeTweenValues(partFrame);
 #ifdef TARGET_PC
+          if (x26d_28_enableADV) {
+            CParticleGlobals::mParticleAccessParameters = x60_advValues[particle - &x30_particles[0]].values;
+          }
+#endif
+#ifdef TARGET_PC
           PortGetValueUV(x28_loadedGenDesc->x40_TEXR, partFrame, particle, uvs);
 #else
           x28_loadedGenDesc->x40_TEXR->GetValueUV(partFrame, uvs);
@@ -1938,6 +3173,11 @@ void CElementGen::RenderParticles() {
         int partFrame = x74_curFrame - particle->x28_startFrame - 1;
         CParticleGlobals::SetParticleLifetime(particle->x0_endFrame - particle->x28_startFrame);
         CParticleGlobals::UpdateParticleLifetimeTweenValues(partFrame);
+#ifdef TARGET_PC
+        if (x26d_28_enableADV) {
+          CParticleGlobals::mParticleAccessParameters = x60_advValues[particle - &x30_particles[0]].values;
+        }
+#endif
 #ifdef TARGET_PC
         PortGetValueUV(x28_loadedGenDesc->x40_TEXR, partFrame, particle, uvs);
 #else
@@ -2088,7 +3328,8 @@ void CElementGen::RenderParticlesFlameThrower(CElementGen* const* gens, int coun
   // then skips them. Retail effects never match, so they keep the batch.
   const auto drawnAlone = [](const CElementGen* gen) {
     const CGenDescription& desc = *gen->x28_loadedGenDesc;
-    return desc.x40_TEXR == nullptr || desc.x48_PMDL || desc.x31_26_PMUS ||
+    return (desc.xPortPrimitive != 255 && desc.xPortPrimitive != 1) ||
+           desc.x40_TEXR == nullptr || desc.x48_PMDL || desc.x31_26_PMUS ||
            PortVfxActive(desc);
   };
   for (int i = 0; i < count; ++i) {
@@ -2206,7 +3447,11 @@ void CElementGen::RenderParticlesFlameThrower(CElementGen* const* gens, int coun
         if (desc->x30_26_AAPH) {
           CGraphics::SetBlendMode(kBM_Blend, kBF_SrcAlpha, kBF_One, kLO_Clear);
         } else {
+#ifdef TARGET_PC
+          CGraphics::SetBlendMode(kBM_Blend, PortBlendSrc(desc), PortBlendDst(desc), kLO_Clear);
+#else
           CGraphics::SetBlendMode(kBM_Blend, kBF_SrcAlpha, kBF_InvSrcAlpha, kLO_Clear);
+#endif
         }
       } else {
         CGX::SetTevOrder(stage, GX_TEXCOORD0, static_cast< GXTexMapID >(map), GX_COLOR_NULL);
@@ -2222,6 +3467,11 @@ void CElementGen::RenderParticlesFlameThrower(CElementGen* const* gens, int coun
     CParticleGlobals::SetParticleLifetime(particle.x0_endFrame - particle.x28_startFrame);
     CParticleGlobals::UpdateParticleLifetimeTweenValues(elapsed);
 
+#ifdef TARGET_PC
+    if (gen->x26d_28_enableADV) {
+      CParticleGlobals::mParticleAccessParameters = gen->x60_advValues[&particle - &gen->x30_particles[0]].values;
+    }
+#endif
 #ifdef TARGET_PC
     PortGetValueUV(genDesc->x40_TEXR, elapsed, &particle, uvs);
 #else
@@ -2284,11 +3534,16 @@ void CElementGen::RenderParticlesIndirectTexture() {
   CGX::SetAlphaCompare(GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0);
 
   if (x26c_26_AAPH) {
-    CGX::SetZMode(true, GX_LEQUAL, false);
+    CGX::SetZMode(true, (PortNoZTest() ? GX_ALWAYS : GX_LEQUAL), false);
     CGX::SetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_ONE, GX_LO_CLEAR);
   } else {
-    CGX::SetZMode(true, GX_LEQUAL, x26c_27_ZBUF);
+    CGX::SetZMode(true, (PortNoZTest() ? GX_ALWAYS : GX_LEQUAL), x26c_27_ZBUF);
+#ifdef TARGET_PC
+    CGX::SetBlendMode(GX_BM_BLEND, GXBlendFactor(PortBlendSrc(x28_loadedGenDesc)), GXBlendFactor(PortBlendDst(x28_loadedGenDesc)),
+                      GX_LO_CLEAR);
+#else
     CGX::SetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_CLEAR);
+#endif
   }
 
   SUVElementSet uvs;
@@ -2366,7 +3621,12 @@ void CElementGen::RenderParticlesIndirectTexture() {
   CGX::SetStandardTevColorAlphaOp(GX_TEVSTAGE1);
   CGX::SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_APREV, GX_CA_RASA, GX_CA_ZERO);
 
+#ifdef TARGET_PC
+  CGX::SetBlendMode(GX_BM_BLEND, GXBlendFactor(PortBlendSrc(x28_loadedGenDesc)), GXBlendFactor(PortBlendDst(x28_loadedGenDesc)),
+                    GX_LO_CLEAR);
+#else
   CGX::SetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_CLEAR);
+#endif
   CGX::SetNumChans(1);
   CGX::SetChanCtrl(CGX::Channel0, false, GX_SRC_REG, GX_SRC_VTX, GX_LIGHT_NULL, GX_DF_NONE,
                    GX_AF_NONE);
@@ -2573,11 +3833,15 @@ void CElementGen::RenderLines() {
   CGraphics::SetAlphaCompare(kAF_Always, 0, kAO_And, kAF_Always, 0);
 
   if (x26c_26_AAPH) {
-    CGraphics::SetDepthWriteMode(true, kE_LEqual, false);
+    CGraphics::SetDepthWriteMode(true, (PortNoZTest() ? kE_Always : kE_LEqual), false);
     CGraphics::SetBlendMode(kBM_Blend, kBF_SrcAlpha, kBF_One, kLO_Clear);
   } else {
-    CGraphics::SetDepthWriteMode(true, kE_LEqual, true);
+    CGraphics::SetDepthWriteMode(true, (PortNoZTest() ? kE_Always : kE_LEqual), true);
+#ifdef TARGET_PC
+    CGraphics::SetBlendMode(kBM_Blend, PortBlendSrc(x28_loadedGenDesc), PortBlendDst(x28_loadedGenDesc), kLO_Clear);
+#else
     CGraphics::SetBlendMode(kBM_Blend, kBF_SrcAlpha, kBF_InvSrcAlpha, kLO_Clear);
+#endif
   }
 
   bool constUVs = true;
@@ -2726,6 +3990,8 @@ void CElementGen::RenderLines() {
 }
 
 void CElementGen::RenderModels() {
+  const bool square = x28_loadedGenDesc->xPortPrimitive == 2 ||
+                      (x28_loadedGenDesc->xPortPrimitive == 255 && x28_loadedGenDesc->x31_26_PMUS);
   CParticleGlobals::mParticleAccessParameters = NULL;
   if (x26d_26_modelsUseLights) {
     CGraphics::SetLightState(x274_backupLightActive);
@@ -2741,7 +4007,7 @@ void CElementGen::RenderModels() {
   uvs.yMin = 0.f;
   uvs.yMax = 1.f;
 
-  if (x28_loadedGenDesc->x31_26_PMUS) {
+  if (square) {
     bool enableMRTA = false;
     if (sMoveRedToAlphaBuffer && x28_loadedGenDesc->x31_25_PMAB &&
         x28_loadedGenDesc->x40_TEXR != NULL) {
@@ -2750,7 +4016,7 @@ void CElementGen::RenderModels() {
     moveRedToAlphaBuffer = enableMRTA;
 
     if (x28_loadedGenDesc->x31_25_PMAB) {
-      CGraphics::SetDepthWriteMode(true, kE_LEqual, false);
+      CGraphics::SetDepthWriteMode(true, (PortNoZTest() ? kE_Always : kE_LEqual), false);
       if (enableMRTA) {
         CGraphics::SetBlendMode(kBM_Blend, kBF_One, kBF_One, kLO_Clear);
       } else {
@@ -2758,8 +4024,12 @@ void CElementGen::RenderModels() {
         CGraphics::SetAlphaCompare(kAF_Greater, 0, kAO_And, kAF_Always, 0);
       }
     } else {
-      CGraphics::SetDepthWriteMode(true, kE_LEqual, true);
+      CGraphics::SetDepthWriteMode(true, (PortNoZTest() ? kE_Always : kE_LEqual), true);
+#ifdef TARGET_PC
+      CGraphics::SetBlendMode(kBM_Blend, PortBlendSrc(x28_loadedGenDesc), PortBlendDst(x28_loadedGenDesc), kLO_Clear);
+#else
       CGraphics::SetBlendMode(kBM_Blend, kBF_SrcAlpha, kBF_InvSrcAlpha, kLO_Clear);
+#endif
       CGraphics::SetAlphaCompare(kAF_Greater, 0, kAO_And, kAF_Always, 0);
     }
 
@@ -2811,6 +4081,15 @@ void CElementGen::RenderModels() {
     }
   }
 
+  // Primitive 2 uses the sprite pass's states, not retail PMUS's PMAB states.
+#ifdef TARGET_PC
+  if (x28_loadedGenDesc->xPortPrimitive == 2) {
+    CGraphics::SetDepthWriteMode(x26c_28_zTest, PortNoZTest() ? kE_Always : kE_LEqual,
+                                 x26c_26_AAPH ? false : x26c_27_ZBUF);
+    CGraphics::SetBlendMode(kBM_Blend, PortBlendSrc(x28_loadedGenDesc),
+                            x26c_26_AAPH ? kBF_One : PortBlendDst(x28_loadedGenDesc), kLO_Clear);
+  }
+#endif
   CVector3f pmopVec(0.f, 0.f, 0.f);
 
   CTransform4f orient(CTransform4f::Identity());
@@ -2829,7 +4108,28 @@ void CElementGen::RenderModels() {
 
 #ifdef TARGET_PC
   CPortVfxMeshBatch vfxMeshes;
-  const bool vfxMesh = !x28_loadedGenDesc->x31_26_PMUS && PortVfxHasMesh(*x28_loadedGenDesc);
+  const bool vfxMesh = !square && PortVfxHasMesh(*x28_loadedGenDesc);
+  // A Remastered HUD billboard's model (VisorSteam): Remastered draws it in the HUD camera's
+  // space under the system transform BuildTransform4f(Q_g, T_g, S_g) (UpdateModelRenderState
+  // 0x246758), so the translation is never scaled and the scale covers the particle's position
+  // and model alike. Retail's trans above undoes the local scale, which the local scale on the
+  // right never puts back: the steam landed 1 / scale times as far away. The port's HUD local
+  // scale is in camera axes (as the sprite paths apply it), and the scene is pushed out from the
+  // eye so that the game's near plane clips where the HUD camera's does
+  // (CHUDBillboardEffect::PreRender).
+  const bool vfxHudMesh = vfxMesh && xPortHudEyeScale > 0.f;
+  CTransform4f vfxHudSystem(CTransform4f::Identity());
+  if (vfxHudMesh) {
+    const CTransform4f& view = CGraphics::GetViewMatrix();
+    CTransform4f viewRot(view);
+    viewRot.SetTranslation(CVector3f::Zero());
+    const CVector3f eye = view.GetTranslation();
+    vfxHudSystem = CTransform4f::Translate(eye) * CTransform4f::Scale(xPortHudEyeScale) *
+                   CTransform4f::Translate(xe8_globalTranslation - eye) *
+                   x10c_globalScaleTransform * viewRot * x178_localScaleTransform *
+                   viewRot.GetQuickInverse();
+    trans = CVector3f::Zero();
+  }
 #endif
   CTransform4f rot(CTransform4f::Identity());
   if (pmrtConst) {
@@ -2839,21 +4139,41 @@ void CElementGen::RenderModels() {
     rot.RotateLocalY(CRelAngle::FromDegrees(pmrtVal.GetY()));
     rot.RotateLocalX(CRelAngle::FromDegrees(pmrtVal.GetX()));
   }
-#ifdef TARGET_PC
-  // Port-only PFCM (converted Remastered effects): each particle's Y points away from the camera,
-  // then PMRT applies, in place of the emitter's orientation. The camera is taken into partTrans's
-  // space (the model matrix is x10c_globalScaleTransform * partTrans * x178_localScaleTransform).
-  const bool faceCamera = x28_loadedGenDesc->xPortFaceCamera;
-  const CTransform4f pmrtRot = rot;
-  const CVector3f cameraPos =
-      x13c_globalScaleTransformInverse * CGraphics::GetViewMatrix().GetTranslation();
-#endif
-  rot = orient * rot;
+  // PMRF 1 (Remastered PMRB/PMCF without a global rotation) leaves the orientation out of the model.
+  const u8 pmrqFrame = x28_loadedGenDesc->xPortPmrqFrame;
+  const CTransform4f modelOrient = pmrqFrame == 1 ? CTransform4f::Identity() : orient;
+  // PMOV (Remastered SolveParticleTransform 0x246f14) replaces the system orientation per particle;
+  // Fixup deletes it under a PMRQ base rotation, so it only counts with PMRF 0.
+  const CVectorElement* const pmov = pmrqFrame == 0 ? x28_loadedGenDesc->xPortPmov : nullptr;
+  const CTransform4f pmrtConstRot = rot;
+  rot = modelOrient * rot;
 
   CParticleGlobals::SetEmitterTime(x74_curFrame);
+#ifdef TARGET_PC
+  CParticleGlobals::PortSetSystemTime(x74_curFrame, x268_PSLT);
+#endif
   CColor col = x338_moduColor;
 
-  for (int i = 0; i < x30_particles.size(); ++i) {
+  // PlanarSquareModel uses the same depth sort as sprites (0x2bb0e0).
+  struct PlanarSortEntry { int index; float depth; };
+  std::vector<PlanarSortEntry> planarOrder;
+  if (x28_loadedGenDesc->xPortPrimitive == 2 && x28_loadedGenDesc->x30_28_SORT) {
+    CTransform4f cameraRotation(CGraphics::GetViewMatrix());
+    cameraRotation.SetTranslation(CVector3f::Zero());
+    const CTransform4f inverse = cameraRotation.GetQuickInverse();
+    const CTransform4f systemCamera = inverse * x22c_globalOrientation;
+    for (int i = 0; i < x30_particles.size(); ++i) {
+      const CParticle& p = x30_particles[i];
+      const CVector3f point = PortParticleMath::ParticlePositionForSort(
+          inverse, systemCamera, PortFollowsEmitter(), p.x4_pos, p.x10_prevPos, x80_timeDeltaScale);
+      planarOrder.push_back({i, point.GetY()});
+    }
+    std::stable_sort(planarOrder.begin(), planarOrder.end(), [](const auto& a, const auto& b) {
+      return a.depth > b.depth;
+    });
+  }
+  for (int draw = 0; draw < x30_particles.size(); ++draw) {
+    const int i = planarOrder.empty() ? draw : planarOrder[draw].index;
     CParticle& particle = x30_particles[i];
     if (particle.x0_endFrame != -1) {
       int lifetime = particle.x0_endFrame - particle.x28_startFrame;
@@ -2863,6 +4183,7 @@ void CElementGen::RenderModels() {
       CParticleGlobals::mCurrentParticle = &particle;
 #ifdef TARGET_PC
       CParticleGlobals::xPortIrndParticle = x28_loadedGenDesc->xPortIrnd ? &particle : nullptr;
+      CPortKeepGlobals::sCurrent = x28_loadedGenDesc->xPortIrnd ? &particle.xPortKeep : nullptr;
 #endif
 
       if (x26d_28_enableADV) {
@@ -2873,78 +4194,127 @@ void CElementGen::RenderModels() {
         x28_loadedGenDesc->x58_PMOP->GetValue(partFrame, pmopVec);
       }
 
+      // This particle's orientation: the system's, or PMOV's. PMOV is a direction (the model's
+      // forward, +Y in the port's model space); a zero one falls back to the system's. The model's
+      // up is world up. The basis is Remastered's (x = up x f, y = f x x, z = f) after the
+      // conversion B, which maps its columns (x, y, z) to the port's (-x, f, y).
+      const CTransform4f* particleOrient = &orient;
+      const CTransform4f* particleModelOrient = &modelOrient;
+      CTransform4f pmovOrient(CTransform4f::Identity());
+      if (pmov != nullptr) {
+        CVector3f dir(0.f, 0.f, 0.f);
+        pmov->GetValue(partFrame, dir);
+        if (dir.MagSquared() > FLT_EPSILON) {
+          dir.Normalize();
+          const CVector3f up(0.f, 0.f, 1.f);
+          CVector3f side = CVector3f::Cross(up, dir);
+          if (side.MagSquared() < 4.7683716e-07f) {
+            // Parallel to up: Remastered builds the frame from the left vector instead.
+            const CVector3f yAxis = CVector3f::Cross(dir, CVector3f(-1.f, 0.f, 0.f));
+            side = CVector3f::Cross(yAxis, dir);
+            side.Normalize();
+          } else {
+            side.Normalize();
+          }
+          CVector3f yAxis = CVector3f::Cross(dir, side);
+          yAxis.Normalize();
+          const CVector3f xCol = side * -1.f;
+          pmovOrient = CTransform4f(xCol.GetX(), dir.GetX(), yAxis.GetX(), 0.f, xCol.GetY(), dir.GetY(),
+                                    yAxis.GetY(), 0.f, xCol.GetZ(), dir.GetZ(), yAxis.GetZ(), 0.f) *
+                       x22c_globalOrientation;
+          particleOrient = &pmovOrient;
+          particleModelOrient = &pmovOrient;
+        }
+      }
+
       CTransform4f partTrans = CTransform4f::Translate(
           trans +
           ((particle.x4_pos - particle.x10_prevPos) * x80_timeDeltaScale + particle.x10_prevPos));
 
       if (x2c_orientType == kMOT_One) {
         CTransform4f partRot(x50_parentMatrices[i], CVector3f::Zero());
-        partTrans.AddTranslation((orient * partRot) * pmopVec);
+        if (pmrqFrame == 0) {
+          partTrans.AddTranslation((*particleOrient * partRot) * pmopVec);
+        }
         partTrans *= partRot;
-      } else {
-        partTrans.AddTranslation(orient * pmopVec);
+      } else if (pmrqFrame == 0) {
+        partTrans.AddTranslation(*particleOrient * pmopVec);
       }
 
-#ifdef TARGET_PC
-      if (faceCamera) {
-        CTransform4f look = CTransform4f::LookAt(cameraPos, partTrans.GetTranslation());
-        look.SetTranslation(CVector3f::Zero());
-        CTransform4f partPmrt = pmrtRot;
-        if (!pmrtConst && x28_loadedGenDesc->x5c_PMRT != NULL) {
-          CVector3f pmrtVal(0.f, 0.f, 0.f);
-          x28_loadedGenDesc->x5c_PMRT->GetValue(partFrame, pmrtVal);
-          partPmrt = CTransform4f::RotateZ(CRelAngle::FromDegrees(pmrtVal.GetZ()));
-          partPmrt.RotateLocalY(CRelAngle::FromDegrees(pmrtVal.GetY()));
-          partPmrt.RotateLocalX(CRelAngle::FromDegrees(pmrtVal.GetX()));
-        }
-        partTrans *= look * partPmrt;
-      } else
-#endif
       if (pmrtConst) {
-        partTrans *= rot;
+        partTrans *= (particleOrient == &orient ? rot : *particleOrient * pmrtConstRot);
       } else if (x28_loadedGenDesc->x5c_PMRT != NULL) {
         CVector3f pmrtVal(0.f, 0.f, 0.f);
         x28_loadedGenDesc->x5c_PMRT->GetValue(partFrame, pmrtVal);
         rot = CTransform4f::RotateZ(CRelAngle::FromDegrees(pmrtVal.GetZ()));
         rot.RotateLocalY(CRelAngle::FromDegrees(pmrtVal.GetY()));
         rot.RotateLocalX(CRelAngle::FromDegrees(pmrtVal.GetX()));
-        partTrans *= (orient * rot);
+        partTrans *= (*particleModelOrient * rot);
       } else {
-        partTrans *= rot;
+        partTrans *= (particleOrient == &orient ? rot : *particleOrient);
+      }
+      if (pmrqFrame != 0) {
+        // Remastered turns PMOP by the PMRQ base rotation (SolveParticleTransform 0x246f14).
+        partTrans.AddTranslation(partTrans.Rotate(pmopVec));
       }
 
       if (x28_loadedGenDesc->x60_PMSC != NULL) {
         CVector3f pmscVal(0.f, 0.f, 0.f);
         x28_loadedGenDesc->x60_PMSC->GetValue(partFrame, pmscVal);
+        if (x28_loadedGenDesc->xPortPrimitive == 2 || x28_loadedGenDesc->xPortPrimitive == 3) {
+          // SolveParticleTransform 0x2472ac clamps each scale component to 1/256.
+          pmscVal = CVector3f(std::max(pmscVal.GetX(), 0.00390625f),
+                              std::max(pmscVal.GetY(), 0.00390625f),
+                              std::max(pmscVal.GetZ(), 0.00390625f));
+        }
         partTrans *= CTransform4f::Scale(pmscVal.GetX(), pmscVal.GetY(), pmscVal.GetZ());
+      }
+
+      // PMPV: a pivot offset in the model's final frame (rotation, PMRT, PMSC), added to the
+      // translation (Remastered's translation = M * PMPV + t).
+      if (x28_loadedGenDesc->xPortPmpv != nullptr) {
+        CVector3f pmpvVal(0.f, 0.f, 0.f);
+        x28_loadedGenDesc->xPortPmpv->GetValue(partFrame, pmpvVal);
+        partTrans.AddTranslation(partTrans.Rotate(pmpvVal));
       }
 
       if (x28_loadedGenDesc->x64_PMCL != NULL) {
         x28_loadedGenDesc->x64_PMCL->GetValue(partFrame, col);
         col = CColor::Modulate(col, x338_moduColor);
       }
+      if (x28_loadedGenDesc->xPortPrimitive == 2) {
+        col = CColor::Modulate(particle.x34_color, x338_moduColor);
+      }
 
       CGraphics::SetModelMatrix(x10c_globalScaleTransform * partTrans * x178_localScaleTransform);
 
-      if (x28_loadedGenDesc->x31_26_PMUS) {
+      if (square) {
+        // B(x,y,z)=(-x,z,y); retail PMUS uses the opposite UV handedness.
+        const float halfX = x28_loadedGenDesc->xPortPrimitive == 2 ? -0.5f : 0.5f;
 #ifdef TARGET_PC
-        if (!x28_loadedGenDesc->x40_TEXR->HasConstantUV()) {
+        if (x28_loadedGenDesc->xPortPrimitive == 2 && PortVfxActive(*x28_loadedGenDesc)) {
+          PortRenderPlanarVfx(particle, partFrame);
+          continue;
+        }
+#endif
+#ifdef TARGET_PC
+        if (x28_loadedGenDesc->x40_TEXR && !x28_loadedGenDesc->x40_TEXR->HasConstantUV()) {
           PortGetValueUV(x28_loadedGenDesc->x40_TEXR, partFrame, &particle, uvs);
         }
 #endif
         if (moveRedToAlphaBuffer) {
           CGX::Begin(GX_QUADS, GX_VTXFMT0, 4);
-          GXPosition3f32(0.5f, 0.f, 0.5f);
+          GXPosition3f32(halfX, 0.f, 0.5f);
           u32 c = col.GetColor_u32();
           GXColor1u32(c);
           GXTexCoord2f32(uvs.xMax, uvs.yMax);
-          GXPosition3f32(-0.5f, 0.f, 0.5f);
+          GXPosition3f32(-halfX, 0.f, 0.5f);
           GXColor1u32(c);
           GXTexCoord2f32(uvs.xMin, uvs.yMax);
-          GXPosition3f32(-0.5f, 0.f, -0.5f);
+          GXPosition3f32(-halfX, 0.f, -0.5f);
           GXColor1u32(c);
           GXTexCoord2f32(uvs.xMin, uvs.yMin);
-          GXPosition3f32(0.5f, 0.f, -0.5f);
+          GXPosition3f32(halfX, 0.f, -0.5f);
           GXColor1u32(c);
           GXTexCoord2f32(uvs.xMax, uvs.yMin);
           CGX::End();
@@ -2952,13 +4322,13 @@ void CElementGen::RenderModels() {
           CGraphics::StreamBegin(kP_Quads);
           CGraphics::StreamColor(col.GetColor_u32());
           CGraphics::StreamTexcoord(uvs.xMax, uvs.yMax);
-          CGraphics::StreamVertex(0.5f, 0.f, 0.5f);
+          CGraphics::StreamVertex(halfX, 0.f, 0.5f);
           CGraphics::StreamTexcoord(uvs.xMin, uvs.yMax);
-          CGraphics::StreamVertex(-0.5f, 0.f, 0.5f);
+          CGraphics::StreamVertex(-halfX, 0.f, 0.5f);
           CGraphics::StreamTexcoord(uvs.xMin, uvs.yMin);
-          CGraphics::StreamVertex(-0.5f, 0.f, -0.5f);
+          CGraphics::StreamVertex(-halfX, 0.f, -0.5f);
           CGraphics::StreamTexcoord(uvs.xMax, uvs.yMin);
-          CGraphics::StreamVertex(0.5f, 0.f, -0.5f);
+          CGraphics::StreamVertex(halfX, 0.f, -0.5f);
           CGraphics::StreamEnd();
         }
       } else {
@@ -2969,8 +4339,11 @@ void CElementGen::RenderModels() {
             PortRenderMeshesVfx(vfxMeshes);
           }
           vfxMeshes.Add(*x28_loadedGenDesc->xPortVfx,
-                        x10c_globalScaleTransform * partTrans * x178_localScaleTransform, particle,
-                        partFrame, x338_moduColor);
+                        vfxHudMesh ? vfxHudSystem * partTrans
+                                   : x10c_globalScaleTransform * partTrans *
+                                         x178_localScaleTransform,
+                        particle,
+                        partFrame, x338_moduColor, PortVfxExposureGain(*x28_loadedGenDesc, true));
           continue;
         }
         CModel* model = x28_loadedGenDesc->x48_PMDL->GetObject();
@@ -2998,6 +4371,7 @@ void CElementGen::RenderModels() {
 
 #ifdef TARGET_PC
   CParticleGlobals::xPortIrndParticle = nullptr;
+  CPortKeepGlobals::sCurrent = nullptr;
   if (vfxMesh) {
     PortRenderMeshesVfx(vfxMeshes);
   }
@@ -3165,7 +4539,19 @@ CParticleGen* CElementGen::GetActiveChildParticle(int index) const {
   return x290_activePartChildren[index];
 }
 
-void CElementGen::SetExternalVar(int index, float val) { x9c_externalVars[index] = val; }
+void CElementGen::SetExternalVar(int index, float val) {
+  x9c_externalVars[index] = val;
+#ifdef TARGET_PC
+  xPortExternalSet = true;
+#endif
+}
+
+#ifdef TARGET_PC
+const float* PortCurrentExternalVars() {
+  const CParticleGlobals::SParticleSystem* system = CParticleGlobals::GetCurrentParticleSystem();
+  return system != nullptr && system->x4_system != nullptr ? system->x4_system->PortExternalVars() : nullptr;
+}
+#endif
 
 float CElementGen::GetExternalVar(int index) const { return x9c_externalVars[index]; }
 
@@ -3175,7 +4561,14 @@ bool CElementGen::IsIndirectTextured() const {
 
 bool CElementGen::GetParticleEmission() const { return x88_particleEmission; }
 
-const CTransform4f& CElementGen::GetGlobalOrientation() const { return x22c_globalOrientation; }
+const CTransform4f& CElementGen::GetGlobalOrientation() const {
+#ifdef TARGET_PC
+  if (xPortIntFrame) {
+    return xPortExtGlobalOrientation; // what the owner set (PortApplyIntFrame)
+  }
+#endif
+  return x22c_globalOrientation;
+}
 
 const CVector3f& CElementGen::GetGlobalTranslation() const { return xe8_globalTranslation; }
 

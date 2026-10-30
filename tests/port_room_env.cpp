@@ -1,6 +1,7 @@
 #include "port_room_env.h"
 
 #include "port_room_env_lod.h"
+#include "port_room_geo.h"
 #include "port_test.h"
 
 #include <algorithm>
@@ -273,14 +274,14 @@ void TestGrid() {
     extra1.insert(extra1.end(), {0, 1, 0, 0});
     Put32(extra1, 0x04100022);
     extra1.insert(extra1.end(), {9, 2, 0, 0});
-    std::vector<uint8_t> extra0 = {1, 0, 0, 0};
+    std::vector<uint8_t> extra0 = {1, 1, 0, 0};  // on, the master's
     Put32(extra0, 50);
     Put32(extra0, 0);
     v10.insert(v10.begin() + std::ptrdiff_t(first + record + 12), extra1.begin(), extra1.end());
     v10.insert(v10.begin() + std::ptrdiff_t(first + 12), extra0.begin(), extra0.end());
     CHECK_MSG(PortRoomEnv::Parse(std::vector<uint8_t>(v10), file, error) && file.grades.size() == 2 &&
-                  file.grades[0].on && file.grades[0].priority == 50 && file.grades[0].links.empty() &&
-                  !file.grades[1].on && file.grades[1].priority == 55 && file.grades[1].links.size() == 2 &&
+                  file.grades[0].on && file.grades[0].master && file.grades[0].priority == 50 &&
+                  file.grades[0].links.empty() && !file.grades[1].on && !file.grades[1].master && file.grades[1].priority == 55 && file.grades[1].links.size() == 2 &&
                   file.grades[1].links[0].sender == PortRoomEnv::kSenderCameraWater && file.grades[1].links[0].action == 1 &&
                   file.grades[1].links[1].sender == 0x04100022 && file.grades[1].links[1].state == 9 &&
                   file.grades[1].fadeOut == 0.5f && file.grades[1].id != 0 && file.exposureSigma == 32.f,
@@ -298,7 +299,7 @@ void TestGrid() {
       Put32(v11, i == 0 ? uint32_t(-1) : 3u);
       PutFloat(v11, i == 0 ? 1.f : 0.f);
       PutFloat(v11, 0.5f);
-      v11.insert(v11.end(), {uint8_t(i == 0 ? 1 : 0), 0, 0, 0});
+      v11.insert(v11.end(), {uint8_t(i == 0 ? 1 : 0), uint8_t(i == 1 ? 1 : 0), 0, 0});
       Put32(v11, i == 0 ? 50 : 70);
       PutFloat(v11, i == 0 ? 1.f : 3.f);
       PutFloat(v11, i == 0 ? 1.f : 0.25f);
@@ -310,7 +311,8 @@ void TestGrid() {
     }
     CHECK_MSG(PortRoomEnv::Parse(std::vector<uint8_t>(v11), file, error) && file.backlights.size() == 2 &&
                   file.backlights[0].layer == -1 && file.backlights[0].on && file.backlights[0].priority == 50 &&
-                  file.backlights[0].links.empty() && file.backlights[1].layer == 3 && !file.backlights[1].on &&
+                  file.backlights[0].links.empty() && !file.backlights[0].master && file.backlights[1].master &&
+                  file.backlights[1].layer == 3 && !file.backlights[1].on &&
                   file.backlights[1].fadeIn == 0.f && file.backlights[1].fadeOut == 0.5f &&
                   file.backlights[1].top == 3.f && file.backlights[1].back == 0.25f &&
                   file.backlights[1].links.size() == 1 &&
@@ -609,6 +611,14 @@ void TestParse() {
   bad = good;
   bad[32 + 88] = 2;
   CHECK_MSG(!PortRoomEnv::Parse(std::vector<uint8_t>(bad), file, error), "parse: cube index");
+  // A probe without a cube (its REFL texture id invalid) is kept, with no cube.
+  bad = good;
+  for (int i = 0; i < 4; ++i) {
+    bad[32 + 88 + i] = 0xFF;
+  }
+  CHECK_MSG(PortRoomEnv::Parse(std::vector<uint8_t>(bad), file, error) && !file.probes.empty() &&
+                file.probes[0].cube == PortRoomEnv::kProbeNoCube,
+            "parse: probe without a cube");
   bad = good;
   bad[32 + 300] = 6; // the first cube's size
   CHECK_MSG(!PortRoomEnv::Parse(std::vector<uint8_t>(bad), file, error), "parse: cube size");
@@ -927,6 +937,78 @@ void TestExposureHints() {
   g.Set(one, true);
   CHECK_MSG(!g.Set(one, false) && g.Pick(1) == -1, "hints: leaving only unregisters mode 1");
 
+  // Shipped registration is priority descending, insertion-before-equal. A
+  // priority of 1 or 2 is not a fluid mode (SLdrAutoExposureHint::Load 0x538b54).
+  {
+    std::vector<FluidHint> ranked(4);
+    for (auto& hint : ranked) {
+      hint.mode = 0;
+    }
+    ranked[0].priority = 6;
+    ranked[1].priority = 1;
+    ranked[2].priority = 6;
+    ranked[3].priority = 10;
+    ranked[3].on = false;
+    ExposureHints r;
+    CHECK(!r.Load(ranked, false));
+    CHECK_MSG(r.Pick(4) == 2, "highest active priority, newest first on ties");
+    CHECK_MSG(!r.Set(ranked, true) && r.Pick(4) == 2, "plain priority-6 hints do not change underwater");
+    ranked[2].mode = 1;
+    r.Load(ranked, false);
+    CHECK(r.Pick(4) == 0);
+    CHECK(r.Set(ranked, true) && r.Pick(4) == 2);
+    ranked[2].priority = -1;
+    r.Load(ranked, false);
+    CHECK_MSG(!r.Set(ranked, true) && r.Pick(4) == 0, "a newer lower-priority fluid hint cannot override or snap");
+  }
+
+  // CAutoExposureHintMP1: pair A (role 1) and B (role 2), plus an ordinary mode 1 hint.
+  {
+    using Swap = ExposureHints;
+    std::vector<FluidHint> pair(3);
+    pair[0].mode = 0;
+    pair[0].role = 1;
+    pair[1].mode = 0;
+    pair[1].role = 2;
+    pair[2].mode = 1;
+    ExposureHints p;
+    CHECK_MSG(!p.Load(pair, false, 1) && p.Pick(3) == 0, "pair: A registers at load, without a snap");
+    CHECK_MSG(!p.SetPair(pair, Swap::SwapState(true, false, false)), "pair: no change, no snap");
+    CHECK_MSG(p.SetPair(pair, Swap::SwapState(true, true, false)) && p.Pick(3) == 1, "pair: thermal registers B (snap)");
+    CHECK_MSG(!p.SetPair(pair, Swap::SwapState(true, true, false)), "pair: same state, no snap");
+    CHECK_MSG(p.SetPair(pair, Swap::SwapState(true, false, false)) && p.Pick(3) == 0, "pair: back to A (snap)");
+    CHECK_MSG(!p.SetPair(pair, Swap::SwapState(false, true, false)), "pair: morphed thermal stays on A");
+    CHECK_MSG(p.SetPair(pair, Swap::SwapState(true, true, true)) == false && p.Pick(3) == 0,
+              "pair: thermal in a cinematic stays on A");
+    CHECK_MSG(p.SetPair(pair, Swap::SwapState(true, true, false)) && p.Pick(3) == 1, "pair: thermal again picks B");
+    // The newest registered hint wins: a fluid hint registered after B outranks it.
+    CHECK_MSG(p.Set(pair, true) && p.Pick(3) == 2, "pair: the fluid hint registered last wins");
+    CHECK_MSG(p.SetPair(pair, 1) && p.Pick(3) == 0, "pair: A registers after the fluid hint and wins");
+    // Load straight into thermal: B, no snap.
+    ExposureHints q;
+    CHECK_MSG(!q.Load(pair, false, 0) && q.Pick(3) == 1, "pair: load in thermal starts B");
+    // Fluid-mode pair hint: eligible only inside the fluid while enabled.
+    std::vector<FluidHint> fl(2);
+    fl[0].mode = 1;
+    fl[0].role = 1;
+    fl[1].mode = 1;
+    fl[1].role = 2;
+    ExposureHints r;
+    r.Load(fl, false, 1);
+    CHECK_MSG(r.Pick(2) == -1, "pair: fluid-mode hints idle outside");
+    CHECK_MSG(r.Set(fl, true) && r.Pick(2) == 0, "pair: inside registers A only");
+    CHECK_MSG(r.SetPair(fl, 0) && r.Pick(2) == 1, "pair: swap inside registers B");
+    // Script modes never register.
+    std::vector<FluidHint> sc(2);
+    sc[0].mode = 5;
+    sc[0].role = 1;
+    sc[1].mode = 5;
+    sc[1].role = 2;
+    ExposureHints s5;
+    s5.Load(sc, true, 1);
+    CHECK_MSG(!s5.SetPair(sc, 0) && !s5.Set(sc, false) && s5.Pick(2) == -1, "pair: mode 5 never registers");
+  }
+
   const float a[6] = {1, 2, 3, 4, 5, 6};
   const float b[6] = {11, 12, 13, 14, 15, 16};
   const float c[6] = {21, 22, 23, 24, 25, 26};
@@ -992,9 +1074,463 @@ void TestTileSection() {
   cut.pop_back();
   CHECK_MSG(!parse(cut), "tiles: cut short");
 }
+
+// A version 22 file with nothing in it but `volumes` world volumes.
+std::vector<uint8_t> MakeVolumeFile(const std::vector<PortRoomEnv::WorldVolume>& volumes) {
+  std::vector<uint8_t> out = {'M', 'P', 'E', 'V'};
+  Put32(out, 22);
+  for (float t : {4.f, 0.18f, 0.6f, 0.15f}) {
+    PutFloat(out, t);
+  }
+  Put32(out, 0); // probes
+  Put32(out, 0); // cubes
+  Put32(out, 0); // no tiles
+  for (float f : {0.f, 0.f, 0.f, 0.f, 0.9f}) {
+    PutFloat(out, f); // exposure range, bias, contrast, bloom threshold
+  }
+  Put32(out, 0); // tints
+  Put32(out, 0); // grades
+  PutFloat(out, 32.f);
+  PutFloat(out, 0.5f);
+  for (int section = 0; section < 8; ++section) {
+    Put32(out, 0); // backlights, fogs, regions, transitions, suns, lightmap, lights, hints
+  }
+  Put32(out, uint32_t(volumes.size()));
+  for (const PortRoomEnv::WorldVolume& v : volumes) {
+    for (float f : v.centre) PutFloat(out, f);
+    for (float f : v.half) PutFloat(out, f);
+    for (float f : v.axes) PutFloat(out, f);
+  }
+  return out;
+}
+
+// CAreaPrioritizedGameHintManager::Update (0x5e4de4): the view area's own hint, by priority
+// then the last turned on, wins over any of the master's; the master's shows only when the
+// room has none on.
+void TestHintOutranks() {
+  PortRoomEnv::Grade master, room, room2;
+  master.master = true;
+  master.priority = 90;
+  room.priority = 10;
+  room2.priority = 10;
+  CHECK_MSG(PortRoomEnv::HintOutranks(master, 0, static_cast<const PortRoomEnv::Grade*>(nullptr), 0),
+            "hint: anything beats none");
+  CHECK_MSG(PortRoomEnv::HintOutranks(room, 1, &master, 0) && !PortRoomEnv::HintOutranks(master, 1, &room, 0),
+            "hint: the room's beats a higher-priority master's");
+  PortRoomEnv::Grade master2 = master;
+  master2.priority = 95;
+  CHECK_MSG(PortRoomEnv::HintOutranks(master2, 1, &master, 0) && !PortRoomEnv::HintOutranks(master, 0, &master2, 1),
+            "hint: the master's by priority among themselves");
+  CHECK_MSG(PortRoomEnv::HintOutranks(room2, 2, &room, 1) && !PortRoomEnv::HintOutranks(room, 1, &room2, 2),
+            "hint: equal priorities, the last turned on");
+  // The same rule for the fogs and backlights, and as a scan over a room's list.
+  std::vector<PortRoomEnv::FogHint> fogs(3);
+  fogs[0].master = true;
+  fogs[0].priority = 10;
+  fogs[1].priority = 5;
+  fogs[2].master = true;
+  fogs[2].priority = 20;
+  const PortRoomEnv::FogHint* pick = nullptr;
+  uint64_t pickOrder = 0;
+  for (size_t i = 0; i < fogs.size(); ++i) {
+    if (PortRoomEnv::HintOutranks(fogs[i], i, pick, pickOrder)) {
+      pick = &fogs[i];
+      pickOrder = i;
+    }
+  }
+  CHECK_MSG(pick == &fogs[1], "hint: fog, the room's over the master's");
+  PortRoomEnv::BacklightHint b0, b1;
+  b0.master = true;
+  b0.priority = 90;
+  b1.priority = 50;
+  CHECK_MSG(PortRoomEnv::HintOutranks(b1, 0, &b0, 1), "hint: backlight, the room's over the master's");
+}
+
+void TestWorldVolumes() {
+  using PortRoomEnv::WorldVolume;
+  using Event = PortRoomEnv::WorldVolumeState::Event;
+  WorldVolume a;
+  a.half[0] = a.half[1] = a.half[2] = 1.f;
+  // At x = 10, turned a quarter about z: 2 m along world y, 1 m along world x.
+  WorldVolume b;
+  b.centre[0] = 10.f;
+  b.half[0] = 2.f;
+  b.half[1] = b.half[2] = 1.f;
+  const float axes[9] = {0.f, 1.f, 0.f, -1.f, 0.f, 0.f, 0.f, 0.f, 1.f};
+  std::copy(axes, axes + 9, b.axes);
+  PortRoomEnv::File file;
+  std::string error;
+  const std::vector<uint8_t> good = MakeVolumeFile({a, b});
+  {
+    auto v27 = MakeVolumeFile({});
+    v27[4] = 27;
+    v27.resize(v27.size() - 8); // replace the empty hint and volume lists
+    Put32(v27, 2);
+    for (int i = 0; i < 2; ++i) {
+      v27.insert(v27.end(), {0, 0, 0, uint8_t(i == 0)}); // plain, ordinary, active/inactive
+      for (float f : {5.75f, 6.f, 0.f, 32.f, 0.5f}) PutFloat(v27, f);
+      Put32(v27, uint32_t(i == 0 ? -2 : 6));
+    }
+    Put32(v27, 0); // world volumes
+    for (float f : {0.f, 0.f, 0.f, 1.f}) PutFloat(v27, f);
+    CHECK_MSG(PortRoomEnv::Parse(std::vector<uint8_t>(v27), file, error), "hint v27 record stride");
+    CHECK(file.fluidHints.size() == 2);
+    CHECK(file.fluidHints[0].mode == 0 && file.fluidHints[0].on && file.fluidHints[0].priority == -2);
+    CHECK(!file.fluidHints[1].on && file.fluidHints[1].priority == 6);
+    CHECK(file.fluidHints[1].exposure[0] == 5.75f && file.envFxIntensity == 1.f);
+    v27.resize(v27.size() - 20); // truncate inside the second priority
+    CHECK(!PortRoomEnv::Parse(std::move(v27), file, error));
+  }
+  {
+    // Version 28: each hint ends with the script links that (de)activate its entity.
+    auto v28 = MakeVolumeFile({});
+    v28[4] = 28;
+    v28.resize(v28.size() - 8);
+    Put32(v28, 2);
+    for (int i = 0; i < 2; ++i) {
+      v28.insert(v28.end(), {0, 0, 0, 0}); // both start inactive
+      for (float f : {5.75f, 6.f, 0.f, 32.f, 0.5f}) PutFloat(v28, f);
+      Put32(v28, uint32_t(i + 1));
+      Put32(v28, 1);
+      Put32(v28, 0x172);
+      v28.insert(v28.end(), {0, uint8_t(i == 0 ? PortRoomGeo::kShow : PortRoomGeo::kToggle), 0, 0});
+    }
+    Put32(v28, 0);
+    for (float f : {0.f, 0.f, 0.f, 1.f}) PutFloat(v28, f);
+    CHECK_MSG(PortRoomEnv::Parse(std::vector<uint8_t>(v28), file, error), "hint v28 links");
+    CHECK(file.fluidHints.size() == 2 && file.fluidHints[1].priority == 2);
+    CHECK(file.fluidHints[0].links.size() == 1 && file.fluidHints[0].links[0].sender == 0x172 &&
+          file.fluidHints[0].links[0].state == 0 && file.fluidHints[0].links[0].action == PortRoomGeo::kShow);
+    PortRoomEnv::ExposureHints hints;
+    hints.Load(file.fluidHints, false);
+    CHECK_MSG(hints.Pick(2) < 0, "hint links: nothing on before the sender fires");
+    CHECK_MSG(!hints.Drive(file.fluidHints, 0x172, 1), "hint links: another state drives nothing");
+    CHECK_MSG(hints.Drive(file.fluidHints, 0x172, 0) && hints.Pick(2) == 1, "hint links: show and toggle on");
+    CHECK_MSG(hints.Drive(file.fluidHints, 0x172, 0) && hints.Pick(2) == 0, "hint links: toggle off again");
+    v28.resize(v28.size() - 24); // inside the second hint's link
+    CHECK(!PortRoomEnv::Parse(std::move(v28), file, error));
+  }
+  CHECK_MSG(PortRoomEnv::Parse(std::vector<uint8_t>(good), file, error), "volumes: parse");
+  CHECK_MSG(file.worldVolumes.size() == 2 && PortRoomEnv::SameWorldVolumes(file.worldVolumes, {a, b}),
+            "volumes: read back");
+  CHECK_MSG(!PortRoomEnv::Parse(std::vector<uint8_t>(good.begin(), good.end() - 4), file, error),
+            "volumes: cut short");
+  CHECK_MSG(file.worldShift[0] == 0.f && file.worldShift[2] == 0.f, "volumes: version 22 has no world shift");
+  // Version 23 adds the world shift at the end.
+  std::vector<uint8_t> v23 = good;
+  v23[4] = 23;
+  CHECK_MSG(!PortRoomEnv::Parse(std::vector<uint8_t>(v23), file, error), "shift: cut short");
+  for (float f : {1.5f, -2.f, 30.f}) {
+    PutFloat(v23, f);
+  }
+  CHECK_MSG(PortRoomEnv::Parse(std::vector<uint8_t>(v23), file, error) && file.worldShift[0] == 1.5f &&
+                file.worldShift[1] == -2.f && file.worldShift[2] == 30.f && file.worldVolumes.size() == 2,
+            "shift: version 23 read back");
+  // Version 26 adds the EnvironmentFX colour intensity after the shift; before it, 1.
+  CHECK_MSG(file.envFxIntensity == 1.f, "envfx: version 23 has the default intensity");
+  std::vector<uint8_t> v26 = v23;
+  v26[4] = 26;
+  CHECK_MSG(!PortRoomEnv::Parse(std::vector<uint8_t>(v26), file, error), "envfx: cut short");
+  PutFloat(v26, 5.f);
+  CHECK_MSG(PortRoomEnv::Parse(std::vector<uint8_t>(v26), file, error) && file.envFxIntensity == 5.f &&
+                file.worldShift[2] == 30.f,
+            "envfx: version 26 read back");
+  v26.resize(v26.size() - 4);
+  PutFloat(v26, std::numeric_limits<float>::infinity());
+  CHECK_MSG(PortRoomEnv::Parse(std::vector<uint8_t>(v26), file, error) && file.envFxIntensity == 1.f,
+            "envfx: a bad intensity is the default");
+  {
+    // Version 30 adds the room's own trigger volumes at the end.
+    CHECK_MSG(file.roomVolumes.empty(), "room volumes: none before version 30");
+    std::vector<uint8_t> v30 = v26;
+    v30[4] = 30;
+    CHECK_MSG(!PortRoomEnv::Parse(std::vector<uint8_t>(v30), file, error), "room volumes: cut short");
+    Put32(v30, 2);
+    for (int k = 0; k < 2; ++k) {
+      // b's box (turned a quarter about z), then one that reads wrong.
+      for (float f : b.centre) PutFloat(v30, f);
+      for (float f : b.half) PutFloat(v30, k == 0 ? f : std::numeric_limits<float>::quiet_NaN());
+      for (float f : b.axes) PutFloat(v30, f);
+      v30.insert(v30.end(), {uint8_t(k == 0 ? 3 : 1), 0, 0, 0});
+    }
+    CHECK_MSG(!PortRoomEnv::Parse(std::vector<uint8_t>(v30.begin(), v30.end() - 4), file, error),
+              "room volumes: entry cut short");
+    CHECK_MSG(PortRoomEnv::Parse(std::vector<uint8_t>(v30), file, error) && file.roomVolumes.size() == 2 &&
+                  file.envFxIntensity == 1.f && file.worldVolumes.size() == 2,
+              "room volumes: version 30 read back");
+    using PortRoomEnv::RoomVolume;
+    const RoomVolume& r = file.roomVolumes[0];
+    CHECK_MSG(r.detect == (PortRoomEnv::kRoomVolumePlayer | PortRoomEnv::kRoomVolumeCamera) && r.centre[0] == 10.f &&
+                  r.half[0] == 2.f && r.axes[1] == 1.f,
+              "room volumes: fields");
+    const float in[3] = {10.f, 1.5f, 0.f}, out[3] = {11.5f, 0.f, 0.f}, far[3] = {50.f, 50.f, 50.f};
+    // The box spans x 9..11, y -2..2, z -1..1 in the area's axes.
+    const float touchLo[3] = {10.8f, -0.5f, -0.5f}, touchHi[3] = {12.f, 0.5f, 0.5f};
+    const float awayLo[3] = {11.2f, -0.5f, -0.5f}, awayHi[3] = {12.f, 0.5f, 0.5f};
+    CHECK_MSG(PortRoomEnv::InsideRoomVolume(r, in, nullptr, nullptr, false), "room volumes: camera inside");
+    CHECK_MSG(!PortRoomEnv::InsideRoomVolume(r, out, nullptr, nullptr, false), "room volumes: camera outside");
+    CHECK_MSG(PortRoomEnv::InsideRoomVolume(r, far, touchLo, touchHi, true), "room volumes: player bounds overlap");
+    CHECK_MSG(!PortRoomEnv::InsideRoomVolume(r, far, awayLo, awayHi, true), "room volumes: player bounds apart");
+    CHECK_MSG(!PortRoomEnv::InsideRoomVolume(r, far, touchLo, touchHi, false), "room volumes: no player");
+    RoomVolume cameraOnly = r;
+    cameraOnly.detect = PortRoomEnv::kRoomVolumeCamera;
+    CHECK_MSG(!PortRoomEnv::InsideRoomVolume(cameraOnly, far, touchLo, touchHi, true),
+              "room volumes: a camera trigger ignores the player");
+    RoomVolume playerOnly = r;
+    playerOnly.detect = PortRoomEnv::kRoomVolumePlayer;
+    CHECK_MSG(!PortRoomEnv::InsideRoomVolume(playerOnly, in, awayLo, awayHi, true),
+              "room volumes: a player trigger ignores the camera");
+    const RoomVolume& bad = file.roomVolumes[1];
+    CHECK_MSG(bad.half[0] < 0.f && !PortRoomEnv::InsideRoomVolume(bad, in, touchLo, touchHi, true),
+              "room volumes: a bad box detects nothing");
+    CHECK_MSG(file.worldVolumes[0].detect == PortRoomEnv::kRoomVolumeCamera && file.envVars.empty() &&
+                  file.envOps.empty() && file.envBranches.empty(),
+              "env vars: before version 31 world volumes see the camera, and no variables");
+
+    // Version 31: what each world volume detects, then the world's variables, ops and branches.
+    std::vector<uint8_t> v31 = v30;
+    v31[4] = 31;
+    CHECK_MSG(!PortRoomEnv::Parse(std::vector<uint8_t>(v31), file, error), "env vars: cut short");
+    Put32(v31, 2);
+    v31.insert(v31.end(), {PortRoomEnv::kRoomVolumePlayer, 0xff});
+    Put32(v31, 1);
+    std::array<uint8_t, 16> guid{};
+    for (size_t i = 0; i < guid.size(); ++i) guid[i] = uint8_t(0x35 + i);
+    v31.insert(v31.end(), guid.begin(), guid.end());
+    const std::string name = "ZIM_Fog";
+    Put32(v31, uint32_t(name.size()));
+    v31.insert(v31.end(), name.begin(), name.end());
+    for (uint32_t f : {0u, 3u, 0u, 3u}) Put32(v31, f); // value, flags, min, max
+    Put32(v31, 1);
+    Put32(v31, PortRoomEnv::kSenderWorldVolume + 1);
+    v31.insert(v31.end(), {1, PortRoomEnv::kEnvAdd, 0, 0});
+    Put32(v31, uint32_t(-2));
+    v31.insert(v31.end(), guid.begin(), guid.end());
+    Put32(v31, 3);
+    for (int k = 0; k < 3; ++k) {
+      v31.insert(v31.end(), guid.begin(), guid.end());
+      v31.insert(v31.end(), {uint8_t(k), uint8_t(PortRoomEnv::kEnvOnLoad | PortRoomEnv::kEnvSkipUnchanged), 0, 0});
+      Put32(v31, uint32_t(k));
+      Put32(v31, 39);
+    }
+    CHECK_MSG(!PortRoomEnv::Parse(std::vector<uint8_t>(v31.begin(), v31.end() - 4), file, error),
+              "env vars: branch cut short");
+    CHECK_MSG(PortRoomEnv::Parse(std::vector<uint8_t>(v31), file, error) && file.roomVolumes.size() == 2 &&
+                  file.worldVolumes.size() == 2,
+              "env vars: version 31 read back");
+    CHECK_MSG(file.worldVolumes[0].detect == PortRoomEnv::kRoomVolumePlayer &&
+                  file.worldVolumes[1].detect == (PortRoomEnv::kRoomVolumePlayer | PortRoomEnv::kRoomVolumeCamera),
+              "env vars: world volume detect, unknown bits dropped");
+    CHECK_MSG(file.envVars.size() == 1 && file.envVars[0].guid == guid && file.envVars[0].name == name &&
+                  file.envVars[0].value == 0 && file.envVars[0].flags == 3 && file.envVars[0].max == 3,
+              "env vars: variable");
+    CHECK_MSG(file.envOps.size() == 1 && file.envOps[0].sender == PortRoomEnv::kSenderWorldVolume + 1 &&
+                  file.envOps[0].state == 1 && file.envOps[0].op == PortRoomEnv::kEnvAdd &&
+                  file.envOps[0].value == -2 && file.envOps[0].var == guid,
+              "env vars: op");
+    CHECK_MSG(file.envBranches.size() == 3 && file.envBranches[2].relop == 2 && file.envBranches[2].value == 2 &&
+                  file.envBranches[2].query == 39 && file.envBranches[1].var == guid &&
+                  file.envBranches[0].flags == (PortRoomEnv::kEnvOnLoad | PortRoomEnv::kEnvSkipUnchanged),
+              "env vars: branches");
+    std::vector<uint8_t> wrongCount = v30;
+    wrongCount[4] = 31;
+    Put32(wrongCount, 1); // not the file's two world volumes
+    wrongCount.push_back(1);
+    for (int k = 0; k < 3; ++k) Put32(wrongCount, 0);
+    CHECK_MSG(!PortRoomEnv::Parse(std::move(wrongCount), file, error), "env vars: detect count must match");
+    // Version 32 adds to each volume whether the trigger is active at load, and the script
+    // that switches it (its own links); the version 31 section follows the volumes.
+    std::vector<uint8_t> v32 = v26;
+    v32[4] = 32;
+    Put32(v32, 2);
+    for (int k = 0; k < 2; ++k) {
+      for (float f : b.centre) PutFloat(v32, f);
+      for (float f : b.half) PutFloat(v32, k == 0 ? f : std::numeric_limits<float>::quiet_NaN());
+      for (float f : b.axes) PutFloat(v32, f);
+      v32.insert(v32.end(), {uint8_t(k == 0 ? 3 : 1), 0, 0, 0});
+      // The first starts off, switched on by 0x172 state 2 and toggled by 0x173 state 0; the
+      // second is on at load with nothing switching it.
+      v32.insert(v32.end(), {uint8_t(k == 0 ? 0 : 1), 0, 0, 0});
+      Put32(v32, k == 0 ? 2 : 0);
+      if (k == 0) {
+        Put32(v32, 0x172);
+        v32.insert(v32.end(), {2, uint8_t(PortRoomGeo::kShow), 0, 0});
+        Put32(v32, 0x173);
+        v32.insert(v32.end(), {0, uint8_t(PortRoomGeo::kToggle), 0, 0});
+      }
+    }
+    Put32(v32, 2);                      // version 31's section: what the two world volumes detect
+    v32.insert(v32.end(), {1, 1});      // then no variables, ops or branches
+    for (uint32_t empty : {0u, 0u, 0u}) Put32(v32, empty);
+    const size_t inTail = v26.size() + 4 + 64 + 4;  // inside the first volume's version 32 tail
+    CHECK_MSG(!PortRoomEnv::Parse(std::vector<uint8_t>(v32.begin(), v32.begin() + inTail), file, error),
+              "room volumes: version 32 tail cut short");
+    CHECK_MSG(PortRoomEnv::Parse(std::vector<uint8_t>(v32), file, error) && file.roomVolumes.size() == 2 &&
+                  file.envBranches.empty(),
+              "room volumes: version 32 read back");
+    const RoomVolume& off = file.roomVolumes[0];
+    CHECK_MSG(off.detect == (PortRoomEnv::kRoomVolumePlayer | PortRoomEnv::kRoomVolumeCamera) && !off.on &&
+                  off.links.size() == 2 && off.links[0].sender == 0x172 && off.links[0].state == 2 &&
+                  off.links[0].action == PortRoomGeo::kShow && off.links[1].sender == 0x173 &&
+                  off.links[1].state == 0 && off.links[1].action == PortRoomGeo::kToggle,
+              "room volumes: version 32 off at load with the links that switch it");
+    CHECK_MSG(file.roomVolumes[1].on && file.roomVolumes[1].links.empty(),
+              "room volumes: version 32 a trigger on at load has no links");
+  }
+  const float inB[3] = {10.f, 1.5f, 0.f}, outB[3] = {11.5f, 0.f, 0.f};
+  CHECK_MSG(PortRoomEnv::InsideWorldVolume(b, inB) && !PortRoomEnv::InsideWorldVolume(b, outB), "volumes: turned box");
+
+  const std::vector<WorldVolume> table{a, b};
+  PortRoomEnv::WorldVolumeState state;
+  std::vector<Event> events;
+  const auto same = [](const std::vector<Event>& got, std::initializer_list<Event> want) {
+    return got.size() == want.size() && std::equal(got.begin(), got.end(), want.begin(), [](const Event& x, const Event& y) {
+             return x.volume == y.volume && x.state == y.state;
+           });
+  };
+  const float atA[3] = {0.f, 0.f, 0.f}, atB[3] = {10.f, 0.f, 0.f};
+  state.Update(table, atA, events);
+  CHECK_MSG(same(events, {{0, 0}}), "volumes: starting inside enters");
+  events.clear();
+  state.Update(table, atA, events);
+  CHECK_MSG(events.empty(), "volumes: staying");
+  state.Update(table, atB, events);
+  CHECK_MSG(same(events, {{0, 1}, {1, 0}}), "volumes: crossing");
+  events.clear();
+  state.Update(table, atA, events);
+  CHECK_MSG(same(events, {{0, 0}, {1, 1}}), "volumes: back");
+  events.clear();
+  // b entered (3) and left (5), a entered last (4): a late area hears them in that order.
+  state.Replay(events);
+  CHECK_MSG(same(events, {{1, 0}, {0, 0}, {1, 1}}), "volumes: replay order");
+  events.clear();
+  state.Update({a}, atA, events);
+  CHECK_MSG(same(events, {{0, 0}}), "volumes: a new table starts outside");
+  events.clear();
+  state.Clear();
+  state.Replay(events);
+  CHECK_MSG(events.empty(), "volumes: cleared");
+}
+// CScriptEnvironmentVarQuery / CScriptEnvironmentVarModifier: the criteria relations, and the
+// modifier's set/add/sub clamped by the variable's range.
+void TestEnvVars() {
+  using PortRoomEnv::EnvBranch;
+  using PortRoomEnv::EnvVar;
+  const auto holds = [](uint8_t relop, int32_t criteria, int32_t value) {
+    EnvBranch b;
+    b.relop = relop;
+    b.value = criteria;
+    return PortRoomEnv::EnvBranchHolds(b, value);
+  };
+  CHECK_MSG(holds(0, 1, 1) && !holds(0, 1, 2), "env vars: relop 0 ==");
+  CHECK_MSG(holds(1, 1, 2) && !holds(1, 1, 1), "env vars: relop 1 !=");
+  CHECK_MSG(holds(2, 1, 2) && !holds(2, 1, 1) && !holds(2, 2, 1), "env vars: relop 2 criteria < var");
+  CHECK_MSG(holds(3, 1, 1) && holds(3, 1, 2) && !holds(3, 2, 1), "env vars: relop 3 criteria <= var");
+  CHECK_MSG(holds(4, 2, 1) && !holds(4, 1, 1) && !holds(4, 1, 2), "env vars: relop 4 var < criteria");
+  CHECK_MSG(holds(5, 1, 1) && holds(5, 2, 1) && !holds(5, 1, 2), "env vars: relop 5 var <= criteria");
+  CHECK_MSG(!holds(6, 1, 1), "env vars: an unknown relop never holds");
+
+  EnvVar free;
+  CHECK_MSG(PortRoomEnv::ApplyEnvOp(free, 5, PortRoomEnv::kEnvSet, -3) == -3, "env vars: set");
+  CHECK_MSG(PortRoomEnv::ApplyEnvOp(free, 5, PortRoomEnv::kEnvAdd, 2) == 7, "env vars: add");
+  CHECK_MSG(PortRoomEnv::ApplyEnvOp(free, 5, PortRoomEnv::kEnvSub, 7) == -2, "env vars: sub, unclamped");
+  CHECK_MSG(PortRoomEnv::ApplyEnvOp(free, INT32_MAX, PortRoomEnv::kEnvAdd, 1) == INT32_MAX,
+            "env vars: no wrap past int32");
+  CHECK_MSG(PortRoomEnv::ApplyEnvOp(free, 5, 9, 1) == 5, "env vars: an unknown op keeps the value");
+  EnvVar fog; // Intro's ZIM_Fog: 0..3
+  fog.flags = PortRoomEnv::kEnvVarMin | PortRoomEnv::kEnvVarMax;
+  fog.max = 3;
+  CHECK_MSG(PortRoomEnv::ApplyEnvOp(fog, 2, PortRoomEnv::kEnvAdd, 5) == 3, "env vars: clamped to max");
+  CHECK_MSG(PortRoomEnv::ApplyEnvOp(fog, 1, PortRoomEnv::kEnvSub, 4) == 0, "env vars: clamped to min");
+  EnvVar low = fog;
+  low.flags = PortRoomEnv::kEnvVarMin; // min only
+  CHECK_MSG(PortRoomEnv::ApplyEnvOp(low, 1, PortRoomEnv::kEnvAdd, 9) == 10 &&
+                PortRoomEnv::ApplyEnvOp(low, 1, PortRoomEnv::kEnvSub, 9) == 0,
+            "env vars: one bound only");
+
+  // Tallon Intro's ZIM_Fog query: one criteria per value, all onLoad. At load the variable is
+  // 0, so only the value-0 branches hold.
+  std::vector<EnvBranch> intro;
+  for (int32_t value : {0, 0, 0, 1, 1, 1, 2, 2}) {
+    EnvBranch b;
+    b.value = value;
+    b.flags = PortRoomEnv::kEnvOnLoad | PortRoomEnv::kEnvOnChange | PortRoomEnv::kEnvSkipUnchanged;
+    intro.push_back(b);
+  }
+  size_t held = 0;
+  for (size_t i = 0; i < intro.size(); ++i) {
+    if ((intro[i].flags & PortRoomEnv::kEnvOnLoad) != 0 && PortRoomEnv::EnvBranchHolds(intro[i], 0)) {
+      CHECK_MSG(intro[i].value == 0, "env vars: onLoad at 0 holds only value 0");
+      ++held;
+    }
+  }
+  CHECK_MSG(held == 3, "env vars: onLoad at 0 fires the three value-0 branches");
+}
+
+// CPostFXManager::UpdateTonemapping 0xaffb18: L from the readback, and the start.
+void TestExposureAverage() {
+  constexpr float kGrey = 0.2158605f;
+  PortRoomEnv::ExposureAverage e;
+  float target = 0.f;
+  CHECK_MSG(e.L == -1.f && !e.created, "exposure average: starts without a measurement");
+  CHECK_MSG(e.Update(true, 1.5f, -4.f, 8.f, 0.f, 32.f, false, 1, &target) == 1.5f && target == 1.5f && !e.created,
+            "exposure average: the tonemap EV before the first L");
+  const float rgb[3] = {0.1f, 4.f * kGrey, 0.3f};
+  e.Take(rgb);
+  CHECK_MSG(e.L == 4.f * kGrey, "exposure average: L is the largest channel");
+  CHECK_MSG(e.Update(false, 1.5f, -4.f, 8.f, 0.f, 32.f, false, 1, &target) == 1.5f && !e.created,
+            "exposure average: no hint, the tonemap EV and no Gaussian");
+  // log2(4) + 3 + 0.5 = 5.5
+  CHECK_MSG(Near(e.Update(true, 1.5f, -4.f, 8.f, 0.5f, 32.f, false, 1, &target), 5.5f) && Near(target, 5.5f) &&
+                e.created,
+            "exposure average: the Gaussian starts at the first target");
+  const float bright[3] = {64.f * kGrey, 0.f, 0.f}; // log2(64) + 3 = 9, past hi
+  e.Take(bright);
+  const float before = e.ev.value;
+  const float stepped = e.Update(true, 1.5f, -4.f, 8.f, 0.f, 32.f, false, 10, &target);
+  CHECK_MSG(target == 8.f && stepped > before && stepped < 8.f, "exposure average: clamped to hi, steps towards it");
+  CHECK_MSG(e.Update(true, 1.5f, -4.f, 8.f, 0.f, 32.f, true, 0, &target) == 8.f, "exposure average: a snap sets it");
+  const float black[3] = {0.f, 0.f, 0.f}; // log2(0) = -inf, clamped to lo
+  e.Take(black);
+  CHECK_MSG(e.Update(true, 1.5f, -4.f, 8.f, 0.f, 32.f, true, 0, &target) == -4.f && target == -4.f,
+            "exposure average: L = 0 clamps to lo");
+  const float nan[3] = {std::numeric_limits<float>::quiet_NaN(), 0.f, 0.f};
+  e.Take(nan);
+  CHECK_MSG(e.Update(true, 1.5f, -4.f, 8.f, 0.f, 32.f, false, 1, &target) == 1.5f,
+            "exposure average: a NaN L fails L >= 0");
+  e.Reset();
+  CHECK_MSG(!e.created && e.L == -1.f, "exposure average: reset");
+  e.Take(rgb);
+  CHECK_MSG(Near(e.Update(true, 1.5f, -4.f, 8.f, 0.f, 32.f, false, 5, &target), 5.f) && e.created,
+            "exposure average: after a reset the Gaussian starts again at L");
+}
 } // namespace
 
+// What the camera's blend overrides a material's cube with (CMaterialMgr::ResolveReflectionProbe):
+// no probe around is a black cube, a lone probe without a cube no override at all.
+void TestCameraCube() {
+  using PortRoomEnv::CameraCube;
+  PortRoomEnv::Probe withCube;
+  withCube.cube = 0;
+  PortRoomEnv::Probe noCube;
+  noCube.cube = PortRoomEnv::kProbeNoCube;
+  PortRoomEnv::Blend blend;
+  CHECK_MSG(PortRoomEnv::CameraCubeState(blend) == CameraCube::Black, "camera cube: empty is black");
+  blend.entries.push_back({1, &withCube, 1.f});
+  CHECK_MSG(PortRoomEnv::CameraCubeState(blend) == CameraCube::Probe, "camera cube: lone probe");
+  blend.entries[0].probe = &noCube;
+  CHECK_MSG(PortRoomEnv::CameraCubeState(blend) == CameraCube::NoOverride, "camera cube: lone probe without a cube");
+  blend.entries[0].probe = nullptr;
+  CHECK_MSG(PortRoomEnv::CameraCubeState(blend) == CameraCube::NoOverride, "camera cube: null result");
+  blend.entries[0].probe = &noCube;
+  blend.entries.push_back({2, &withCube, 0.5f});
+  CHECK_MSG(PortRoomEnv::CameraCubeState(blend) == CameraCube::Probe, "camera cube: two probes");
+}
+
 int main() {
+  TestCameraCube();
+  TestWorldVolumes();
+  TestEnvVars();
   TestTileSection();
   TestBrdfLut();
   TestPowerBomb();
@@ -1006,6 +1542,8 @@ int main() {
   TestGrid();
   TestLod();
   TestExposureHints();
+  TestHintOutranks();
+  TestExposureAverage();
   if (port_test::Failures() == 0) {
     std::puts("port_room_env tests passed");
   }

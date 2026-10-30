@@ -1,4 +1,5 @@
 #include "port_input_settings.h"
+#include "port_mouse.h"
 #include "port_test.h"
 
 #include <cmath>
@@ -44,6 +45,38 @@ int main() {
   ApplySetting("stick_aim_rate_y", "20000");
   REQUIRE_MSG(Get().stickAimRateY == 450.f, "stick_aim_rate_y above range");
   ApplySetting("stick_aim_split", "0");
+  REQUIRE_MSG(!Get().mouseSensitivitySplit && !Get().touchAimSplit && !Get().gyroSplit, "vertical splits default off");
+  // 3.0 on the Source scale (issue #210), both axes.
+  REQUIRE_MSG(std::fabs(PortInput::Settings{}.mouseSensitivity - PortMouse::kDefaultSensitivity) < 1e-8f &&
+                  std::fabs(PortInput::Settings{}.mouseSensitivityY - PortMouse::kDefaultSensitivity) < 1e-8f,
+              "mouse sensitivity defaults to 3.0 Source");
+  REQUIRE_MSG(ApplySetting("mouse_sensitivity_split", "1") && Get().mouseSensitivitySplit, "mouse_sensitivity_split");
+  REQUIRE_MSG(ApplySetting("mouse_sensitivity_y", "0.002") && Get().mouseSensitivityY == 0.002f, "mouse_sensitivity_y");
+  ApplySetting("mouse_sensitivity_y", "5");
+  ApplySetting("mouse_sensitivity_y", "0");
+  REQUIRE_MSG(Get().mouseSensitivityY == 0.002f, "mouse_sensitivity_y range");
+  REQUIRE_MSG(ApplySetting("touch_aim_split", "1") && Get().touchAimSplit, "touch_aim_split");
+  REQUIRE_MSG(ApplySetting("touch_aim_speed_y", "1.5") && Get().touchAimSpeedY == 1.5f, "touch_aim_speed_y");
+  ApplySetting("touch_aim_speed_y", "50");
+  ApplySetting("touch_aim_speed_y", "0.1");
+  REQUIRE_MSG(Get().touchAimSpeedY == 1.5f, "touch_aim_speed_y range");
+  REQUIRE_MSG(ApplySetting("gyro_split", "1") && Get().gyroSplit, "gyro_split");
+  REQUIRE_MSG(ApplySetting("gyro_sensitivity_y", "0.5") && Get().gyroSensitivityY == 0.5f, "gyro_sensitivity_y");
+  ApplySetting("gyro_sensitivity_y", "50");
+  REQUIRE_MSG(Get().gyroSensitivityY == 0.5f, "gyro_sensitivity_y range");
+  {
+    const std::string text = Text();
+    REQUIRE_MSG(text.find("mouse_sensitivity_split=1") != std::string::npos &&
+                    text.find("mouse_sensitivity_y=0.002") != std::string::npos &&
+                    text.find("touch_aim_split=1") != std::string::npos &&
+                    text.find("touch_aim_speed_y=1.5") != std::string::npos &&
+                    text.find("gyro_split=1") != std::string::npos &&
+                    text.find("gyro_sensitivity_y=0.5") != std::string::npos,
+                "vertical split keys written");
+  }
+  ApplySetting("mouse_sensitivity_split", "0");
+  ApplySetting("touch_aim_split", "0");
+  ApplySetting("gyro_split", "0");
   ApplySetting("crosshair_size", "80");
   REQUIRE_MSG(Get().crosshairSize == 80, "crosshair_size");
   ApplySetting("crosshair_size", "5");
@@ -52,6 +85,11 @@ int main() {
   REQUIRE_MSG(Get().touchSideMargin.load() == 40.f, "touch_side_margin");
   ApplySetting("touch_side_margin", "400");
   REQUIRE_MSG(Get().touchSideMargin.load() == 40.f, "touch_side_margin range");
+  REQUIRE_MSG(Get().touchControls.load(), "touch_controls defaults on");
+  ApplySetting("touch_controls", "0");
+  REQUIRE_MSG(!Get().touchControls.load(), "touch_controls off");
+  ApplySetting("touch_controls", "1");
+  REQUIRE_MSG(Get().touchControls.load(), "touch_controls on");
   ApplySetting("touch_opacity", "50");
   REQUIRE_MSG(Get().touchOpacity.load() == 50.f, "touch_opacity");
   ApplySetting("touch_opacity", "400");
@@ -80,14 +118,24 @@ int main() {
   PostLoad();
   REQUIRE_MSG(Get().gyroSensitivity == 1.5f, "gyro_sensitivity wins over gyro_rate");
   REQUIRE_MSG(Text().find("gyro_rate") == std::string::npos, "gyro_rate not written");
-  REQUIRE_MSG(Get().gyroSpace == 1 && Get().gyroAutoCalibrate, "gyro space/calibration defaults");
+  REQUIRE_MSG(Get().gyroSpace == 1 && Get().gyroAutoCalibrate == 1, "gyro space/calibration defaults");
   ApplySetting("gyro_space", "2");
   ApplySetting("gyro_space", "5");
   ApplySetting("gyro_auto_calibrate", "0");
-  REQUIRE_MSG(Get().gyroSpace == 2 && !Get().gyroAutoCalibrate, "gyro space/calibration");
+  REQUIRE_MSG(Get().gyroSpace == 2 && Get().gyroAutoCalibrate == 0, "gyro space/calibration");
   REQUIRE_MSG(Text().find("gyro_space=2\n") != std::string::npos &&
                   Text().find("gyro_auto_calibrate=0\n") != std::string::npos,
               "gyro space/calibration written");
+  ApplySetting("gyro_auto_calibrate", "1");
+  REQUIRE_MSG(Get().gyroAutoCalibrate == 1, "gyro_auto_calibrate 1 = always (old on)");
+  ApplySetting("gyro_auto_calibrate", "2");
+  REQUIRE_MSG(Get().gyroAutoCalibrate == 2 &&
+                  Text().find("gyro_auto_calibrate=2\n") != std::string::npos,
+              "gyro_auto_calibrate 2 = only in menus, written");
+  ApplySetting("gyro_auto_calibrate", "true");
+  REQUIRE_MSG(Get().gyroAutoCalibrate == 1, "gyro_auto_calibrate true = always");
+  ApplySetting("gyro_auto_calibrate", "false");
+  REQUIRE_MSG(Get().gyroAutoCalibrate == 0, "gyro_auto_calibrate false = off");
   REQUIRE_MSG(Get().gyroSmoothing == 0.f && Get().gyroTightening == 0.f, "gyro filter defaults off");
   ApplySetting("gyro_smoothing", "5");
   ApplySetting("gyro_tightening", "3");
@@ -105,6 +153,14 @@ int main() {
   REQUIRE_MSG(Text().find("gyro_cursor_angle=60\n") != std::string::npos &&
                   Text().find("gyro_cursor_camera=1\n") != std::string::npos,
               "gyro cursor written");
+  REQUIRE_MSG(!Get().lockOnFreeAim, "lock_on_free_aim default off");
+  ApplySetting("lock_on_free_aim", "1");
+  REQUIRE_MSG(Get().lockOnFreeAim && Text().find("lock_on_free_aim=1\n") != std::string::npos,
+              "lock_on_free_aim");
+  REQUIRE_MSG(!Get().resetAimBoth, "reset_aim_both default off");
+  ApplySetting("reset_aim_both", "1");
+  REQUIRE_MSG(Get().resetAimBoth && Text().find("reset_aim_both=1\n") != std::string::npos,
+              "reset_aim_both");
   ApplySetting("shift_key_alt", "44");
   ApplySetting("turbo_pad", "3");
   REQUIRE_MSG(Get().shiftBindings[1] == 44 && Get().turboBindings[2] == 3, "bindings");
@@ -141,19 +197,14 @@ int main() {
   REQUIRE_MSG(ApplySetting("double_tap_dash", "1") && Get().doubleTapDash, "double_tap_dash");
   REQUIRE_MSG(ApplySetting("manual_aim", "0") && !Get().manualAim, "manual_aim off");
 
-  // Dead Space Prime's walk and dash speeds and gun sway: a faster walk, a 130% dash and a 3
-  // degree sway by default, each held to its range.
-  REQUIRE_MSG(Get().walkSpeed == kWalkSpeedDefault && Get().dashSpeed == kDashSpeedDefault &&
-                  Get().gunSway == kGunSwayDefault,
-              "walk, dash and sway defaults");
-  REQUIRE_MSG(defaults.find("double_tap_dash=0\nwalk_speed=1.15\ndash_speed=1.3\ngun_sway=3\n") !=
-                  std::string::npos,
-              "walk, dash and sway lines");
-  REQUIRE_MSG(ApplySetting("walk_speed", "1.3") && Get().walkSpeed == 1.3f, "walk_speed");
-  ApplySetting("walk_speed", "0.5");
-  REQUIRE_MSG(Get().walkSpeed == 1.3f, "walk_speed below range");
-  ApplySetting("walk_speed", "inf");
-  REQUIRE_MSG(Get().walkSpeed == 1.3f, "walk_speed not finite");
+  // Dead Space Prime's dash speed and gun sway: a 130% dash and a 3 degree sway by default, each
+  // held to its range. Its faster walk is the port's own walk_speed, which isn't an input key.
+  REQUIRE_MSG(Get().dashSpeed == kDashSpeedDefault && Get().gunSway == kGunSwayDefault,
+              "dash and sway defaults");
+  REQUIRE_MSG(defaults.find("double_tap_dash=0\ndash_speed=1.3\ngun_sway=3\n") != std::string::npos,
+              "dash and sway lines");
+  REQUIRE_MSG(!ApplySetting("walk_speed", "115") && defaults.find("walk_speed=") == std::string::npos,
+              "walk_speed left to the caller");
   REQUIRE_MSG(ApplySetting("dash_speed", "1.25") && Get().dashSpeed == 1.25f, "dash_speed");
   ApplySetting("dash_speed", "2");
   REQUIRE_MSG(Get().dashSpeed == 1.25f, "dash_speed above range");

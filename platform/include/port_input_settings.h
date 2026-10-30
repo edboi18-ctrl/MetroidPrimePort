@@ -47,7 +47,7 @@ constexpr float kTouchButtonInsetDefault = 0.f;
 constexpr float kTouchOpacityDefault = 100.f;
 constexpr float kTouchOpacityMin = 10.f;
 constexpr float kTouchOpacityMax = 100.f;
-constexpr std::size_t kTouchLayoutMaxLen = 4096;
+constexpr std::size_t kTouchLayoutMaxLen = 16384; // 64 added buttons fit (issue #92)
 // SDL_SCANCODE_LSHIFT (SDL3), the default beam-shift key; debug_ui.cpp checks it.
 constexpr int kScancodeLShift = 225;
 // Dead Space Prime's Stasis (port_dead_space.h): how slow a held enemy runs, as a
@@ -58,12 +58,8 @@ constexpr float kStasisSlowDefault = 0.15f;
 constexpr float kStasisDurationMin = 1.f;
 constexpr float kStasisDurationMax = 15.f;
 constexpr float kStasisDurationDefault = 5.f;
-// Dead Space Prime's movement: Samus's top walking speed (and acceleration, so she
-// reaches it as quickly) as a multiple of retail's, and the double-tap dash's
-// speed, and so its length, as a multiple of its own.
-constexpr float kWalkSpeedMin = 1.f;
-constexpr float kWalkSpeedMax = 1.5f;
-constexpr float kWalkSpeedDefault = 1.15f;
+// Dead Space Prime's double-tap dash: its speed, and so its length, as a multiple
+// of its own. (Its faster walk is PortDebug::WalkSpeed, the port's walk_speed.)
 constexpr float kDashSpeedMin = 0.75f;
 constexpr float kDashSpeedMax = 1.5f;
 constexpr float kDashSpeedDefault = 1.3f;
@@ -83,6 +79,7 @@ struct Settings {
   bool twinStick = false;
   bool springBall = false;
   bool swapScanXray = false;
+  bool radialMenus = false;  // Trilogy discs: the Wii's radial beam and visor menus
   bool fastMorph = false;
   bool lockOnToggle = false;
   bool stickyCharge = false;
@@ -96,9 +93,8 @@ struct Settings {
   // points, no aim assist) and dashing on a double-tapped movement key; off.
   bool manualAim = false;
   bool doubleTapDash = false;
-  // Dead Space Prime: a faster walk, the gun's sway and faster Power Beam shots, on by default,
-  // and the dash's speed.
-  float walkSpeed = kWalkSpeedDefault;
+  // Dead Space Prime: the gun's sway and faster Power Beam shots, on by default, and the
+  // dash's speed.
   float dashSpeed = kDashSpeedDefault;
   float gunSway = kGunSwayDefault;
   float powerBeamSpeed = kPowerBeamSpeedDefault;
@@ -115,11 +111,15 @@ struct Settings {
   int gyroMode = 0;
   int gyroSource = 0;
   float gyroSensitivity = 2.f;
+  // With gyroSplit on, gyroSensitivityY drives the pad's pitch and gyroSensitivity only the yaw.
+  bool gyroSplit = false;
+  float gyroSensitivityY = 2.f;
   // Which turn of the pad steers yaw (PortGyro::Space: 0 local yaw, 1 player,
   // 2 world, 3 local roll, 4 local yaw and roll); and whether the gyro's drift
   // is measured while the pad is still.
   int gyroSpace = 1;
-  bool gyroAutoCalibrate = true;
+  // Auto calibration: 0 off, 1 always, 2 only in menus (paused, a frontend screen or F1 open).
+  int gyroAutoCalibrate = 1;
   // Gyro smoothing and tightening thresholds in deg/s (0 = off; see PortGyro::Filter).
   float gyroSmoothing = 0.f;
   float gyroTightening = 0.f;
@@ -127,6 +127,9 @@ struct Settings {
   // screen (degrees), and whether the gyro also turns the camera as in direct aim.
   float gyroCursorAngle = kGyroCursorAngleDefault;
   bool gyroCursorCamera = false;
+  // The "Reset aim" action recentres the pointer under pointer aim and levels
+  // the camera without it; on, it does both either way.
+  bool resetAimBoth = false;
   // An old gyro_rate line (aim pixels per rad/s, scaled by the mouse sensitivity)
   // and whether gyro_sensitivity was read since the last PostLoad, which turns the
   // first into the second when only it was there.
@@ -139,6 +142,9 @@ struct Settings {
   bool touchFloatingStick = true;  // the left stick appears where the left half is touched
   bool touchAim = true;
   float touchAimSpeed = 2.25f;
+  // With touchAimSplit on, touchAimSpeedY drives vertical touch aim and touchAimSpeed only the horizontal.
+  bool touchAimSplit = false;
+  float touchAimSpeedY = 2.25f;
   bool touchMapTap = true;
   bool touchWheels = true;
   bool touchClassic = false;       // classic GameCube layout
@@ -151,15 +157,29 @@ struct Settings {
   // How visible the gameplay controls are, in percent; the Android view reads it
   // each draw, so it is atomic like the margins.
   std::atomic< float > touchOpacity{kTouchOpacityDefault};
+  // Off, the Android view draws and handles only its MENU and START buttons.
+  std::atomic< bool > touchControls{true};
   bool mouseInvertX = false;
   bool mouseInvertY = false;
+  bool mapInvertX = false; // map rotate left/right
+  bool mapInvertY = false; // map rotate up/down
   bool mouseButtons = true;
   bool mouseCrosshair = true;
   int crosshairSize = kCrosshairSizeDefault;
   bool pointerAim = false; // the mouse moves a pointer; the view turns past the dead box
   int pointerAimBox = kPointerAimBoxDefault;
   int pointerAimTurn = kPointerAimTurnDefault;
-  float mouseSensitivity = 0.0035f; // radians per count; shown on the Source scale
+  // Lock-on free aim (Remastered): under a combat lock a pointer moves over the view and
+  // shots follow it while the lock steers the view (any direct aim, with or without
+  // pointer aim).
+  bool lockOnFreeAim = false;
+  // Radians per count; shown on the Source scale. Defaults to 3.0 there
+  // (PortMouse::kDefaultSensitivity).
+  float mouseSensitivity = 0.00115192f;
+  // With mouseSensitivitySplit on, mouseSensitivityY (radians per count) drives vertical mouse
+  // aim and mouseSensitivity only the horizontal.
+  bool mouseSensitivitySplit = false;
+  float mouseSensitivityY = 0.00115192f;
   int mouseDpi = 800;               // only for the cm/360 readout
   // What each mouse button does under mouse aim (PortInputMap::EMouseAction).
   int mouseActions[PortInputMap::kMouseButtonCount] = {

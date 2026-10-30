@@ -118,6 +118,10 @@ const CFactoryFnReturn FParticleElectricDataFactory(const SObjectTag&, CInputStr
                                                     const CVParamTransfer&);
 const CFactoryFnReturn FProjectileWeaponDataFactory(const SObjectTag&, CInputStream&,
                                                     const CVParamTransfer&);
+#ifdef TARGET_PC
+const CFactoryFnReturn FVectorFieldFactory(const SObjectTag&, CInputStream&,
+                                           const CVParamTransfer&);
+#endif
 const CFactoryFnReturn RGuiFrameFactoryInGame(const SObjectTag&, CInputStream&,
                                               const CVParamTransfer&);
 const CFactoryFnReturn FRasterFontFactory(const SObjectTag&, CInputStream&, const CVParamTransfer&);
@@ -405,7 +409,7 @@ CRasterFont* CGameGlobalObjects::LoadDefaultFont() {
   std::vector< uint8_t > fontData, fontTexture;
   // PAL's has other bytes (FONT v4): the font naming the same texture. Looked up
   // first there, so a PAL boot doesn't throw (and log) on the way.
-  const bool palFont = PortDisc::Current() == PortDisc::Version::Pal &&
+  const bool palFont = PortDisc::HasPalData() &&
                        PortFindDolFont(0x6065853f, fontData, fontTexture);
   if (!palFont) {
     try {
@@ -521,7 +525,8 @@ bool CGameArchitectureSupport::UpdateTicks() {
   // variable frame rate is matched exactly); otherwise a fixed 1/SimRate() step
   // catches up with whole ticks.
   double period;
-  if (PortDebug::SimAdaptive() && !PortDebug::Turbo()) {
+  const bool adaptive = PortDebug::SimAdaptive() && !PortDebug::Turbo();
+  if (adaptive) {
     period = static_cast< double >(elapsed);
     if (period < 1.0 / 480.0) {
       period = 1.0 / 480.0;
@@ -535,6 +540,11 @@ bool CGameArchitectureSupport::UpdateTicks() {
   unsigned ticks =
       x7c_tickClock.Advance(elapsed, gpMain->GetScreenFading() || PortDebug::Turbo(),
                             PortDebug::FrameLimitEnabled());
+  // A frame within the clamp is covered by its one step; past it (a hitch)
+  // the remainder is kept so the following frames catch up.
+  if (adaptive && ticks > 0 && elapsed <= 1.f / 30.f) {
+    x7c_tickClock.DropRemainder();
+  }
   if (PortDebug::Turbo() && !gpMain->GetScreenFading()) {
     ticks = PortDebug::TurboTicks();
   }
@@ -683,6 +693,13 @@ void CGameGlobalObjects::AddPaksAndFactories() {
   CResFactory& factory = *gpResourceFactory;
   CGraphics::SetViewPointMatrix(CTransform4f::Identity());
   CGraphics::SetModelMatrix(CTransform4f::Identity());
+  // Trilogy's DOL mounts RS5.pak (the Wii scan ring, bracket and cursor models) and
+  // Strings.pak first. Strings.pak holds the text of IDs whose NoARAM.pak copies are
+  // empty, such as STRG_Credits; ARAM paks are searched before NoARAM.pak.
+  if (PortDisc::IsTrilogy(PortDisc::Current())) {
+    factory.GetResLoader().AddPakFileAsync(rstl::string_l("aram:RS5"), false, false);
+    factory.GetResLoader().AddPakFileAsync(rstl::string_l("aram:Strings"), false, false);
+  }
   factory.GetResLoader().AddPakFileAsync(rstl::string_l("aram:Tweaks"), false, false);
   factory.GetResLoader().AddPakFileAsync(rstl::string_l("NoARAM"), false, false);
   // Mod resources that did not fit in NoARAM.pak (2 GiB file limit).
@@ -764,6 +781,9 @@ void CGameGlobalObjects::AddPaksAndFactories() {
   factory.GetFactoryMgr().AddFactory('DGRP', FDependencyGroupFactory);
   factory.GetFactoryMgr().AddFactory('SAVW', FSaveWorldFactory);
   factory.GetFactoryMgr().AddFactory('HINT', FHintFactory);
+#ifdef TARGET_PC
+  factory.GetFactoryMgr().AddFactory('VECF', FVectorFieldFactory);
+#endif
 }
 
 void CMain::FillInAssetIDs() {
@@ -1064,7 +1084,7 @@ int CMain::RsMain(int argc, const char* const* argv) {
               (PortPhoto::Active() ? PortPhoto::MouseLook()
                                    : PortDebug::MouseAim() && PortDebug::MouseGameplayActive() &&
                                          !PortPhoto::PanelWantsCursor()) &&
-              !PortDebug::Visible() && !resumePrompt && focused;
+              !PortDebug::Visible() && !PortDebug::TouchEditing() && !resumePrompt && focused;
 #ifdef __ANDROID__
           // A free (hidden) cursor flung to the screen edge brings up the nav bar
           // or taskbar, so keep the pointer captured unless the overlay is open.
@@ -1076,7 +1096,8 @@ int CMain::RsMain(int argc, const char* const* argv) {
 #else
           // Morph ball has no mouse aim, but its bombs are on the mouse buttons:
           // keep the pointer locked so a click can't land outside the window.
-          const bool wantLock = !pointerMenu &&
+          // The touch layout editor drags its controls with the pointer.
+          const bool wantLock = !pointerMenu && !PortDebug::TouchEditing() &&
                                 (wantRelative ||
                                  (PortDebug::MouseAim() && MorphBallHoldsMouse() && !PortDebug::Visible() &&
                                   !PortPhoto::PanelWantsCursor() && !resumePrompt && focused));
@@ -1135,7 +1156,7 @@ int CMain::RsMain(int argc, const char* const* argv) {
       dt = archSupport->GetTickPeriod();
       // Advance the animation clock with simulation ticks so draw-time
       // animations stay real-time at any presentation frame rate.
-      CGraphics::TickRenderTimings(sTicksAdvanced);
+      CGraphics::TickRenderTimings(sTicksAdvanced, static_cast< float >(dt));
       double t1 = archSupport->GetStopwatch2().GetElapsedTime();
       AddFrameTime(xf0_tickTimes, t1 / dt);
       x118_averageTickTime = xf0_tickTimes.GetAverage().data();
@@ -1161,14 +1182,16 @@ int CMain::RsMain(int argc, const char* const* argv) {
           interpolation = 0.f;
         else if (interpolation > 1.f)
           interpolation = 1.f;
-        if (PortDebug::FrameLimitEnabled())
+        // Adaptive steps end on the present time: show the current state, as
+        // the leftover the clock keeps is not a fraction between two ticks.
+        if (PortDebug::FrameLimitEnabled() || (PortDebug::SimAdaptive() && !PortDebug::Turbo()))
           interpolation = -1.f;
         PortDebug::PresentOverride(interpolation);
         CCameraManager::SetPresentationInterpolation(interpolation);
-        // The render clock steps 1/60 s per tick (TickRenderTimings above).
+        // The render clock advances dt per tick (TickRenderTimings above).
         CGraphics::SetRenderTimePresentLag(
             interpolation >= 0.f && interpolation < 1.f && PortDebug::ParticleInterpolation()
-                ? (1.f - interpolation) / 60.f
+                ? static_cast< float >((1.f - interpolation) * dt)
                 : 0.f);
         aurora::phase::set(aurora::phase::Main, "game draw");
         archSupport->GetIOWinManager().Draw();
@@ -1183,7 +1206,11 @@ int CMain::RsMain(int argc, const char* const* argv) {
         x11c_averageDrawTime = x104_drawTimes.GetAverage().data();
 
         uint idleMicros;
-        double idleTime = (dt - (t1 + (t2 - beginSceneWait))) - 0.00075;
+        // Adaptive dt is the last frame's length: budgeting the loader from it
+        // lets loading frames lengthen each other, so use the sim rate's frame.
+        const double idleFrame =
+            PortDebug::SimAdaptive() && !PortDebug::Turbo() ? PortDebug::SimPeriod() : dt;
+        double idleTime = (idleFrame - (t1 + (t2 - beginSceneWait))) - 0.00075;
         if (idleTime > 0)
           idleMicros = idleTime * 1000000;
         else
@@ -1444,6 +1471,12 @@ void CMain::EnsureWorldPakReady(CAssetId id) {
         ++cur;
       }
       if (notInNameList) {
+#ifdef TARGET_PC
+        // Port: the stash frees the PAK's table, which the loader's one-entry
+        // cache may point into (RemovePakFile clears it for the same reason);
+        // a later lookup of that id would read the freed table.
+        resLoader.ClearCache();
+#endif
         pakFile->sub_8036742c();
       } else {
         pakFile->EnsureWorldPakReady();
@@ -1470,6 +1503,11 @@ void CMain::RefreshGameState() {
   u64 cardSerial = gpGameState->CardSerial();
   rstl::vector< uchar > backupBuf = gpGameState->BackupBuf();
   CGameOptions gameOptions = gpGameState->GameOptions();
+#ifdef TARGET_PC
+  uint backupBeamDoors[PortBeamDoors::kWords];
+  for (int i = 0; i < PortBeamDoors::kWords; ++i)
+    backupBeamDoors[i] = gpGameState->PortBackupBeamDoorBits()[i];
+#endif
   x128_gameGlobalObjects->GameState() = nullptr;
   gpGameState = nullptr;
   {
@@ -1477,6 +1515,13 @@ void CMain::RefreshGameState() {
     x128_gameGlobalObjects->GameState() = rs_new CGameState(stream, saveIdx);
   }
   gpGameState = x128_gameGlobalObjects->GameState().get();
+#ifdef TARGET_PC
+  // The open beam doorways aren't in the buffer (#174: a continue after death
+  // lost them all): back to the ones of the save it holds.
+  for (int i = 0; i < PortBeamDoors::kWords; ++i)
+    gpGameState->PortBeamDoorBits()[i] = backupBeamDoors[i];
+  gpGameState->PortBackUpBeamDoors();
+#endif
   gpGameState->SystemState() = systemState;
   gpGameState->GameOptions() = gameOptions;
   gpGameState->GameOptions().EnsureOptions();

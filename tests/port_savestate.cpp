@@ -1,6 +1,7 @@
 #include "port_savestate.h"
 #include "port_test.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
@@ -91,6 +92,66 @@ int main() {
     std::vector< uint8_t > outBlob;
     REQUIRE(PortSaveState::Decode(PortSaveState::Encode(longLabel, blob), out, outBlob));
     REQUIRE(out.room.size() == 256);
+  }
+
+  // Script message journal: what is kept, dedupe and cap, payload round trip.
+  {
+    using namespace PortSaveState;
+    REQUIRE(JournalsScriptMsg(19) && JournalsScriptMsg(14) && JournalsScriptMsg(5));
+    REQUIRE(!JournalsScriptMsg(1) && !JournalsScriptMsg(4) && !JournalsScriptMsg(17));  // active flag
+    REQUIRE(!JournalsScriptMsg(0) && !JournalsScriptMsg(8));                           // Arrived, Next
+    REQUIRE(!JournalsScriptMsg(22) && !JournalsScriptMsg(40));                         // notifications
+
+    std::vector< ScriptMsgEntry > journal;
+    REQUIRE(AppendScriptMsg(journal, {19, 0x00180074}));
+    REQUIRE(!AppendScriptMsg(journal, {19, 0x00180074}));  // a repeat of the last one
+    REQUIRE(AppendScriptMsg(journal, {14, 0xFFFFFFFFu}));
+    REQUIRE(AppendScriptMsg(journal, {19, 0x00180074}));   // not the last one: kept
+    REQUIRE(journal.size() == 3);
+    std::vector< ScriptMsgEntry > full;
+    for (size_t i = 0; i < kMaxScriptMsgs; ++i)
+      REQUIRE(AppendScriptMsg(full, {static_cast< uint8_t >(i % 2 ? 5 : 7), static_cast< uint32_t >(i)}));
+    REQUIRE(!AppendScriptMsg(full, {19, 1}) && full.size() == kMaxScriptMsgs);
+
+    std::vector< ScriptMsgEntry > out;
+    const std::string payload = EncodeScriptMsgs(journal);
+    REQUIRE(payload.size() == 1 + 5 * 3);
+    REQUIRE(DecodeScriptMsgs(payload, out) && out.size() == 3);
+    REQUIRE(out[0].msg == 19 && out[0].sender == 0x00180074 && out[1].msg == 14 &&
+            out[1].sender == 0xFFFFFFFFu && out[2].msg == 19);
+    REQUIRE(DecodeScriptMsgs(EncodeScriptMsgs(full), out) && out.size() == kMaxScriptMsgs);
+    REQUIRE(DecodeScriptMsgs(EncodeScriptMsgs({}), out) && out.empty());
+
+    // Truncated, padded, oversized and unjournalled payloads leave `out` alone.
+    out = journal;
+    for (size_t len = 0; len < payload.size(); ++len)
+      REQUIRE(!DecodeScriptMsgs(payload.substr(0, len), out) && out.size() == 3);
+    REQUIRE(!DecodeScriptMsgs(payload + "x", out));
+    std::string bad = payload;
+    bad[0] = static_cast< char >(kMaxScriptMsgs + 1);
+    REQUIRE(!DecodeScriptMsgs(bad, out));
+    bad = payload;
+    bad[1] = 1;  // Activate is never journalled
+    REQUIRE(!DecodeScriptMsgs(bad, out) && out.size() == 3);
+
+    // The generated and messages blocks survive the room section round trip.
+    Header withMsgs = in;
+    withMsgs.roomState.areas = {36};
+    withMsgs.roomState.present = {0x0024001A};
+    RoomObject wasp;
+    wasp.editorId = 0x0024001A;
+    wasp.active = true;
+    wasp.blocks.push_back({10, payload});
+    RoomObject copy = wasp;
+    copy.blocks = {{9, std::string()}};
+    withMsgs.roomState.objects = {wasp, copy};
+    Header got;
+    std::vector< uint8_t > gotBlob;
+    REQUIRE(Decode(Encode(withMsgs, blob), got, gotBlob) && got.roomState.objects.size() == 2);
+    const RoomBlock* m = FindBlock(got.roomState.objects[0], 10);
+    REQUIRE(m != nullptr && m->data == payload && FindBlock(got.roomState.objects[0], 9) == nullptr);
+    const RoomBlock* g = FindBlock(got.roomState.objects[1], 9);
+    REQUIRE(g != nullptr && g->data.empty() && got.roomState.objects[1].editorId == 0x0024001A);
   }
 
   // Room state: round trip, skipping of unknown tags and versions, old files.
@@ -327,6 +388,49 @@ int main() {
     REQUIRE(DecideAreaRestore(out.roomState, 2, script.data(), script.size()) ==
             RoomAreaRestore::kSkipUnreadable);
 
+    // Spawn layers (RMST version 3, issue #161): one entry per area in the same
+    // order, the mask of layers the area spawned with, and an unobserved area stays
+    // unknown with no mask. The version-2 file of the same state still parses and
+    // reports no spawn layers.
+    Header layered = in;
+    layered.roomState = saved;
+    layered.roomState.spawnLayersRecorded = true;
+    layered.roomState.spawnLayers = {{2, true, 0x2Bull | (1ull << 40)}, {5, false, 0}};
+    const std::string layeredFile = Encode(layered, blob);
+    // Written as version 4: version 3 with 16-bit block lengths.
+    REQUIRE(static_cast< uint8_t >(layeredFile[data.size() + 4]) == 4);
+    REQUIRE(Decode(layeredFile, out, outBlob));
+    REQUIRE(outBlob == blob && out.roomState.areas == saved.areas);
+    REQUIRE(out.roomState.fingerprintsRecorded && out.roomState.fingerprints.size() == 2);
+    REQUIRE(out.roomState.spawnLayersRecorded && out.roomState.spawnLayers.size() == 2);
+    REQUIRE(out.roomState.spawnLayers[0].area == 2 && out.roomState.spawnLayers[0].known &&
+            out.roomState.spawnLayers[0].mask == (0x2Bull | (1ull << 40)));
+    REQUIRE(out.roomState.spawnLayers[1].area == 5 && !out.roomState.spawnLayers[1].known &&
+            out.roomState.spawnLayers[1].mask == 0);
+    // A block past 255 bytes (an enemy's kTagFields) survives version 4; one of 64 KiB
+    // or more is still dropped.
+    Header wide = layered;
+    RoomObject big;
+    big.editorId = 0x00020001;
+    big.blocks = {{13, std::string(1700, 'f')}, {3, std::string(8, 'h')}, {14, std::string(1u << 16, 'x')}};
+    wide.roomState.present = {big.editorId};
+    wide.roomState.objects = {big};
+    REQUIRE(Decode(Encode(wide, blob), out, outBlob));
+    REQUIRE(out.roomState.objects.size() == 1 && out.roomState.objects[0].blocks.size() == 2);
+    REQUIRE(out.roomState.objects[0].blocks[0].tag == 13 &&
+            out.roomState.objects[0].blocks[0].data == std::string(1700, 'f'));
+    REQUIRE(out.roomState.objects[0].blocks[1].tag == 3 &&
+            out.roomState.objects[0].blocks[1].data == std::string(8, 'h'));
+    REQUIRE(Decode(file, out, outBlob));  // the version 2 file from above
+    REQUIRE(out.roomState.fingerprintsRecorded && !out.roomState.spawnLayersRecorded &&
+            out.roomState.spawnLayers.empty());
+    // Entries that do not line up one per area fail closed, as fingerprints do.
+    Header crooked = layered;
+    crooked.roomState.spawnLayers = {{2, true, 3}};
+    REQUIRE(Encode(crooked, blob).size() == data.size());
+    crooked.roomState.spawnLayers = {{5, true, 3}, {2, true, 3}};
+    REQUIRE(Encode(crooked, blob).size() == data.size());
+
     // Little-endian builders, so a hand-written trailer can carry bodies the
     // writer never produces.
     const auto le32 = [](uint32_t v) {
@@ -454,6 +558,9 @@ int main() {
     other = meta;
     other.identity.clear();
     REQUIRE(!PortSaveState::ResumeMatches(meta, other));
+    PortSaveState::ResumeMeta noCard = meta;
+    noCard.cardSerial = 0;
+    REQUIRE(!PortSaveState::ResumeMatches(noCard, noCard));
   }
 
   // Quick resume skip rules.
@@ -509,6 +616,11 @@ int main() {
         {{false, true, false, true}, "\0\5"},    // ... asked for by another door
         {{false, false, true, false}, "\0\2"},   // a refused opening
         {{false, false, false, true}, "\0\4"},   // only the block on opening again
+        // open, with its side of the door pair (issue #201)
+        {{true, false, false, false, DoorSaveState::kPartnerNone}, "\1\x08"},
+        {{true, false, false, false, DoorSaveState::kPartnerLeads}, "\1\x10"},
+        {{true, false, false, false, DoorSaveState::kPartnerFollows}, "\1\x18"},
+        {{true, false, false, true, DoorSaveState::kPartnerLeads}, "\1\x14"},
     };
     for (const Case& c : cases)
       REQUIRE(EncodeDoorSaveState(c.state) == std::string(c.bytes, 2));
@@ -518,7 +630,7 @@ int main() {
       REQUIRE(DecodeDoorSaveState(EncodeDoorSaveState(c.state), got));
       REQUIRE(got.open == c.state.open && got.pendingClose == c.state.pendingClose &&
               got.refusedClosePending == c.state.refusedClosePending &&
-              got.doClose == c.state.doClose);
+              got.doClose == c.state.doClose && got.partner == c.state.partner);
     }
     DoorSaveState out;
     // The mid-close payload an earlier build of this lane wrote (normal close, no
@@ -540,8 +652,10 @@ int main() {
         std::string(),                 // empty
         std::string("\2", 1),          // open flag not 0/1
         std::string("\3", 1),          // ... and above the flag range
-        std::string("\0\x08", 2),      // unknown flag bit
+        std::string("\0\x08", 2),      // a pair side on a closed door
+        std::string("\0\x18", 2),      // ... any side
         std::string("\0\x80", 2),      // unknown flag bit
+        std::string("\1\x20", 2),      // unknown flag bit
         std::string("\1\1", 2),        // open with a normal close in flight
         std::string("\1\2", 2),        // open with a refused close in flight
         std::string("\0\3", 2),        // both close paths owed at once
@@ -611,6 +725,27 @@ int main() {
     const RoomObject& got = out.roomState.objects[0];
     REQUIRE(got.active && got.blocks.size() == 64);
     REQUIRE(got.blocks.back().tag == 63 && got.blocks.back().data == std::string(1, '\x3f'));
+  }
+
+  // Saved platforms are restored after every platform that carries them, whatever
+  // order the snapshot lists them in, and a cycle is refused.
+  {
+    using PortSaveState::PlatformRestoreOrder;
+    const auto before = [](const std::vector< size_t >& order, size_t a, size_t b) {
+      return std::find(order.begin(), order.end(), a) < std::find(order.begin(), order.end(), b);
+    };
+    std::vector< size_t > order;
+    REQUIRE(PlatformRestoreOrder({}, order) && order.empty());
+    // 2 carries 0, 0 carries 1, 3 is alone.
+    REQUIRE(PlatformRestoreOrder({{2}, {0}, {}, {}}, order));
+    REQUIRE(order.size() == 4);
+    REQUIRE(before(order, 2, 0) && before(order, 0, 1));
+    // Two parents of one child.
+    REQUIRE(PlatformRestoreOrder({{1, 2}, {}, {}}, order));
+    REQUIRE(order.size() == 3 && before(order, 1, 0) && before(order, 2, 0));
+    REQUIRE(!PlatformRestoreOrder({{1}, {2}, {0}}, order) && order.empty());
+    REQUIRE(!PlatformRestoreOrder({{0}}, order) && order.empty());
+    REQUIRE(!PlatformRestoreOrder({{5}}, order) && order.empty());
   }
 
   std::puts("savestate tests passed");

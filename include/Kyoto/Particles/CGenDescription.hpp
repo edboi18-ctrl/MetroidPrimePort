@@ -14,6 +14,7 @@
 
 #ifdef TARGET_PC
 #include <memory>
+#include <optional>
 #include <vector>
 #endif
 
@@ -82,6 +83,18 @@ struct CPortVfxData {
   std::vector< float > meshV;
   std::vector< u16 > meshIdx16;
   std::vector< u32 > meshIdx32;
+  // VMSH v2: 16 floats per vertex (pos, normal, uv, tangent, colour; normal and tangent raw, the
+  // tangent's w the handedness with the conversion's mirror folded in), meshFlags bit 0 a real
+  // tangent, bit 1 a real colour, and the conversion port = meshOrient x Remastered + meshOffset.
+  u32 meshStride = 8, meshFlags = 0;
+  float meshOrient[9] = {1.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 1.f};
+  float meshOffset[3] = {0.f, 0.f, 0.f};
+  // VPRM: the shader's NMAP slot (v2: and TCH0 env slot) and its CCHn uniforms (the MATI's), which
+  // VSMT targets kPortVfxParamTarget.. override.
+  s32 normalSlot = -1;
+  s32 envSlot = -1;
+  u32 paramCount = 0;
+  float params[7][4] = {};
   CPortVfxData() = default;
   CPortVfxData(const CPortVfxData&) = delete;
   CPortVfxData& operator=(const CPortVfxData&) = delete;
@@ -137,25 +150,180 @@ public:
   std::unique_ptr< CPortVfxData > xPortVfx;
   // port-only XFMD (EPortXfmd); kept outside xPortVfx, which a bad VMAT block drops
   u8 xPortXfmd = kPortXfmdRetail;
+  // port-only PMRF: Remastered PMRB/PMCF. 0 = retail (orientation * PMRT, PMOP turned by the
+  // orientation), 1 = PMRT alone, 2 = orientation * PMRT; for 1 and 2 PMOP turns with the model.
+  u8 xPortPmrqFrame = 0;
+  // port-only PEMV (Remastered EMRV, var 0x16): the description reads the per-tick system
+  // velocity. 0 none, 1 the external (global + local) translation, 2 the local translation.
+  u8 xPortPemv = 0;
   // port-only PIRN: a converted Remastered effect, whose nested IRND elements are stable per particle
   bool xPortIrnd = false;
-  // Exact-source nested Remastered point-light metadata (PHDR/PIR0/POR0). The
+  // port-only PVSD/PVSN/PVSM: Remastered's visor effect data (any VE* property) and its splat
+  // size range VESN/VESM, read by the VisorGoo splat manager (PortVisorGoo).
+  bool xPortVisorData = false;
+  float xPortVisorMinScale = 1.4f;
+  float xPortVisorMaxScale = 2.1f;
+  // port-only PVSC/PVMC/PVTC/PVBS/PVDT: VESC/VEMC/VETC, VEBS and VEDT (ticks, -1 = never
+  // expires), read by the visor effect override manager (PortVisorOverrides). Owned here.
+  CColorElement* xPortVisorStartColor = nullptr;
+  CColorElement* xPortVisorMidColor = nullptr;
+  CColorElement* xPortVisorEndColor = nullptr;
+  CRealElement* xPortVisorBlend = nullptr;
+  int xPortVisorTicks = -1;
+  // port-only PGID: the first word of a converted Remastered PART's GUID (CElementGen::PortChildSeed)
+  u32 xPortGuidWord = 0;
+  // Nested Remastered point-light metadata (PHDR/PIR0/POR0/PHFO). The
   // radius elements are owned here and evaluated by the live generator.
   bool xPortNestedHdrLight = false;
   CRealElement* xPortNestedLightInnerRadius = nullptr;
   CRealElement* xPortNestedLightOuterRadius = nullptr;
+  // port-only PHFO: the authored LFOT (CLight::EPortHdrFalloff 0..3); absent = smooth
+  u8 xPortNestedLightFalloff = 3;
+  // port-only PLIX: Remastered's LIXP, LINT at the static inverse exposure (PortRoomEnv::ParticleLightGain)
+  bool xPortNestedLightInverseExposure = false;
+  // port-only PINS: Remastered's INTS, the system scale in place of the external one (EXTS still
+  // reads the external scale; CElementGen::PortSystemScale). Owned here; null = the external scale.
+  CVectorElement* xPortIntScale = nullptr;
+  // port-only PINR/PINT: Remastered's INTR/INTT, the system orientation (an Euler vector in the
+  // port's space, as PMRT's) and translation in place of the external ones (EXTR/EXTT still read
+  // the external ones; CElementGen::PortApplyIntFrame). Owned here; null = the external one.
+  CVectorElement* xPortIntRotation = nullptr;
+  CVectorElement* xPortIntTranslation = nullptr;
   // port-only PVRT: Remastered particle variables (names, types, defaults)
   std::unique_ptr< CPortVarTable > xPortVars;
-  // port-only PFCM: each model particle is turned to face the camera before PMRT
-  bool xPortFaceCamera = false;
+  // port-only: the PKPR elements (per-particle KPIN latches), latched at birth in this order;
+  // owned by the element trees
+  std::vector< const CREPortKeep* > xPortKeeps;
+  // port-only: an EMTR CODE (desc[0x2fa] bit 4): the rate-driven spawn (GRTE) is skipped, particles
+  // come only from code (CElementGen::TickSystem_Node 0x24a16c)
+  bool xPortCodeSpawn = false;
+  // port-only PADO: the order ADV1..8 are evaluated in (0-based), when it is not 1..8
+  std::vector< u8 > xPortAdvOrder;
+  // port-only PPVR: ADV1..9 and IAV0..3 in Remastered's sorted order with constant-after-start
+  // flags; supersedes PADO (CElementGen::UpdateAdvanceAccessParameters).
+  std::unique_ptr< CPortPartVars > xPortPartVars;
+  // Port-only PSYS: the system variables (CElementGen::PortEvalSys).
+  std::unique_ptr< CPortSys > xPortSys;
   // port-only PSHP: Remastered SSHP sprite mesh (0 quad; 3 triangle, 4 pentagon, 5 hexagon, 6 octagon)
   u8 xPortSpriteShape = 0;
+  // GPSM primitive, independent of TEXR/MTIN/PMDL; 255 denotes a retail PART.
+  u8 xPortPrimitive = 255;
+  // port-only PBDM: Remastered's blend row where the alpha blend stands in for it
+  // (CElementGen::PortBlendSrc/Dst). 0 = retail alpha, 1 premultiplied, 3 opaque; 2 is AAPH.
+  u8 xPortBlend = 0;
+  // port-only PDFG: Remastered's DFOG 1, the static render state's "no fog" flag (0x8000): the
+  // particles are not volumetric-fogged whatever their blend (PortFx::RenderScope)
+  bool xPortUnfogged = false;
+  // port-only PZTS: Remastered's ZTES 0 (static render state ctor 0x28c2fc: depth compare 1, which
+  // the GPU table 0x1d0c3a8 maps to ALWAYS, instead of 4 = LEQUAL). The depth test passes everywhere;
+  // writes (ZBUF) are as authored.
+  bool xPortNoZTest = false;
+  // port-only PIVS: Remastered's IVSE 0 (desc+0x2fa bit 2 clear, CreateNewParticles 0x24a9fc): the
+  // emitter's velocity is not turned by the system orientation (retail always turns it).
+  bool xPortNoIvse = false;
+  // VMPC: run the complete velocity program once at birth (CreateNewParticles 0x24abd0).
+  bool xPortVelocityAtCreation = false;
+  // VGD1..4 select world-space modifiers; VMD true switches the same slot back to emitter space.
+  bool xPortVelocityGlobal[4] = {};
+  // DVVN: defaults version for the missing-EMTR velocity; zero preserves retail behavior.
+  u8 xPortDefaultValuesVersion = 0;
+  // DVVN and IEXP update this in stream order. The marker supersedes legacy VMAT exposure pins.
+  bool xPortExposurePolicy = false;
+  bool xPortInverseExposure = false;
+  // port-only PISV: Remastered's ISVF, the factor of the system's per-tick translation change
+  // (PEMV's delta, no time step) added to a new particle's velocity. Owned here; null = none.
+  CRealElement* xPortInheritVel = nullptr;
+  // port-only PITP: Remastered's ITPE 1: with several particles born in a tick and a moving system,
+  // their positions are spread back along the change of translation (CreateNewParticles 0x24a630).
+  bool xPortSpread = false;
+  // port-only PDBS: Remastered's DBIS (desc+0xd4), the depth bias in world units, negative toward the
+  // camera (CPortParticleDepthBias). 0 = none.
+  float xPortDepthBias = 0.f;
+  // port-only PSHM: Remastered's SHTM, what a shutdown does (CParticleGen::DoShutdownBehavior
+  // 0x27b88c): 0 stops emission, 1 also destroys the live particles. Other values do neither.
+  u8 xPortShutdownMode = 0;
+  // port-only PSHT: Remastered's SHTT, the shutdown countdown in ticks (ShutdownEffect 0x27a66c,
+  // UpdateCountdownTimerForShutdown 0x27b864). Owned; null = a shutdown acts at once.
+  CIntElement* xPortShutdownTime = nullptr;
+  // port-only PISD 0: Remastered's ISDT (desc+0x6c bit 1), on by default. On, a shutdown reaches the
+  // children as DoShutdownBehavior(mode) (their own SHTM at once, no SHTT); off, as ShutdownEffect.
+  bool xPortChildShutdownByMode = true;
+  // port-only PBLT 1: Remastered's BLIT (static-state bit 0x4000). A lit sprite takes the room's baked
+  // probe only with it (CParticleSceneNode::AppendBakedLightingIfRequested 0x2b12a8).
+  bool xPortBakedLighting = false;
+  // port-only PMOV/PMPV: Remastered's per-particle model orientation direction and pivot offset
+  // (SolveParticleTransform 0x246f14), in the port's space. Owned; null = none.
+  CVectorElement* xPortPmov = nullptr;
+  CVectorElement* xPortPmpv = nullptr;
   // port-only PSWX: swooshes started beyond SSWH's one, each with its start frame
   struct PortExtraSwoosh {
     TCachedToken< CSwooshDescription > swoosh;
     int frame;
   };
   std::vector< PortExtraSwoosh > xPortExtraSwooshes;
+  // port-only PKSM: Remastered's spawn tables as its CSpawnSystemKeyframeData keeps them
+  // (ctor 0x293350; run by CElementGen::PortSpawnTables). Replaces KSSM when present.
+  struct PortKssmSpawn {
+    u32 type = 0; // 'PART', 'SWHC' or 'ELSC'
+    // Only the one of `type` is set: a default CToken has no reference, which its
+    // assignment and destructor would dereference.
+    std::optional< TCachedToken< CGenDescription > > part;
+    std::optional< TCachedToken< CSwooshDescription > > swoosh;
+    std::optional< TCachedToken< CElectricDescription > > electric;
+    CIntElement* instances = nullptr; // GetNumInstances (0x2940fc), evaluated at the current frame
+    u32 component = ~0u; // its SEVT component in PortKssm::components; ~0u places it as the parent
+  };
+  // A node of a component's expression trees (pos, rot, the gravity): op is its fourcc, args index
+  // PortKssm::nodes. CNST reals keep `value`; VARF keeps the variable in `slot`; KPIN and IRND keep
+  // their per-instance latch (3 floats or 1) at `slot` of PortKssmChild::latches.
+  struct PortKssmNode {
+    u32 op = 0;
+    u32 args[5] = {};
+    u32 argCount = 0;
+    float value = 0.f;
+    u32 slot = 0;
+    bool loop = false; // KEYE
+    u32 loopStart = 0;
+    std::vector< float > keys;
+  };
+  // An SEVT(SMOV) component: the pos node, the constant delta, the rot node (~0u for NONE) and the
+  // GRAV vector node (~0u for none); `latches` floats per instance. liveExtt: pos reads EXTT
+  // outside any KPIN, so the child follows the emitter.
+  struct PortKssmComponent {
+    u32 pos = 0;
+    float delta[3] = {};
+    u32 rot = ~0u;
+    u32 grav = ~0u;
+    u32 latches = 0;
+    bool liveExtt = false;
+  };
+  struct PortKssmEntry {
+    u32 frame = 0;
+    std::vector< PortKssmSpawn > spawns;
+  };
+  struct PortKssmTable {
+    u32 start = 0;
+    bool periodConst = true; // the period attribute's type is 0 (a constant)
+    s32 period = 0; // its value when constant
+    CIntElement* periodElement = nullptr;
+    std::vector< PortKssmEntry > entries;
+  };
+  struct PortKssm {
+    u32 end = 0;
+    std::vector< PortKssmTable > tables;
+    std::vector< PortKssmNode > nodes;
+    std::vector< PortKssmComponent > components;
+    PortKssm() = default;
+    PortKssm(const PortKssm&) = delete;
+    PortKssm& operator=(const PortKssm&) = delete;
+    ~PortKssm();
+  };
+  std::unique_ptr< PortKssm > xPortKssm;
+  // port-only PSMV: XFMD 4's SMVR mover (CSimpleMoverElement, build/mpr/vfx/RESOLVED-xfmd.md)
+  // as one component in the PKSM node format, or no component for an XFMD 4 with no SMVR (the
+  // emitter's transform unused). Absent for the identity SMOV(EXTT, 0, EXTR), which is the
+  // emitter's own frame.
+  std::unique_ptr< PortKssm > xPortMover;
 #endif
   CVectorElement* x58_PMOP;
   CVectorElement* x5c_PMRT;

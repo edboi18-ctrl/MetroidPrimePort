@@ -179,6 +179,7 @@ void DrawGameAudio() {
   }
   ImGui::EndDisabled();
   ImGui::SetItemTooltip("These audio options are saved globally and persist across restarts.");
+  DrawFlaahgraTheme();
 }
 
 void DrawOriginalSection() {
@@ -186,13 +187,12 @@ void DrawOriginalSection() {
   if (ImGui::Checkbox("Original experience", &original)) {
     SetOriginalExperience(original);
   }
-  ItemHelp("Plays the game as on the GameCube: 640x480 at 4:3, 60 Hz with no interpolation, no "
-           "mods, the retail HUD, font, button icons, FOV and cutscenes, and none of the gameplay extras (spring ball, "
-           "fast morph, charge and lock-on options, turbo fire, unlocks, Dead Space's Stasis, "
-           "manual aim, double-tap dash, the faster walk, gun sway and the faster Power Beam). "
-           "The other settings keep "
-           "their values and come back when it's turned off. Controls, cheats, save states, the "
-           "randomizer, Archipelago and the timer still work.");
+  ItemHelp("Plays the game as on the GameCube: 4:3, 60 Hz, no mods, retail HUD and cutscenes, and "
+           "none of the gameplay extras (spring ball, fast morph, charge and lock-on options, "
+           "turbo fire, unlocks, Dead Space's Stasis, manual aim, double-tap dash, the faster "
+           "walk, gun sway and the faster Power Beam). Other settings return when it's turned "
+           "off. Controls, cheats, save states, the randomizer, Archipelago and the timer still "
+           "work.");
 }
 
 void DrawGameTab() {
@@ -268,6 +268,7 @@ void DrawSystemTab() {
   PortDataFolder::DrawPanel();
 #endif
   DrawLogSection();
+  DrawDiscCheckSection();
   DrawDiscordSection();
   DrawUpdateSection();
   ImGui::SeparatorText("About");

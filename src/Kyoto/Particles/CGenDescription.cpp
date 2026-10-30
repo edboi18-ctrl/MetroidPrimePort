@@ -110,5 +110,29 @@ CGenDescription::~CGenDescription() {
 #ifdef TARGET_PC
   delete xPortNestedLightInnerRadius;
   delete xPortNestedLightOuterRadius;
+  delete xPortVisorStartColor;
+  delete xPortVisorMidColor;
+  delete xPortVisorEndColor;
+  delete xPortVisorBlend;
+  delete xPortIntScale;
+  delete xPortInheritVel;
+  delete xPortIntRotation;
+  delete xPortIntTranslation;
+  delete xPortShutdownTime;
+  delete xPortPmov;
+  delete xPortPmpv;
 #endif
 }
+
+#ifdef TARGET_PC
+CGenDescription::PortKssm::~PortKssm() {
+  for (PortKssmTable& table : tables) {
+    delete table.periodElement;
+    for (PortKssmEntry& entry : table.entries) {
+      for (PortKssmSpawn& spawn : entry.spawns) {
+        delete spawn.instances;
+      }
+    }
+  }
+}
+#endif

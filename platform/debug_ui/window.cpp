@@ -15,6 +15,7 @@
 
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
 
+#include <aurora/aurora.h>
 #include <aurora/gfx.h>
 #include <aurora/imgui.h>
 #include <dolphin/vi.h>
@@ -63,6 +64,8 @@ struct TouchScroll {
   float velocity = 0.f; // pixels per second, positive scrolls down
 };
 TouchScroll sTouchScroll;
+
+bool TouchScrolling() { return sTouchScroll.dragging; }
 
 void UpdateTouchScroll() {
   ImGuiContext& g = *ImGui::GetCurrentContext();
@@ -310,7 +313,7 @@ bool DrawDesktopWindow() {
 void DrawUI() {
   EnsureInitialized();
   if (!sAudioSettingsApplied) {
-    // Apply persisted audio mutes once the backends are alive.
+    // Apply the startup audio switches (MP_DISABLE_AI_AUDIO) once the backends are alive.
     sAudioSettingsApplied = true;
     SetAiAudioEnabled(sAiAudioEnabled);
     SetMusyxAudioEnabled(sMusyxAudioEnabled);
@@ -322,6 +325,9 @@ void DrawUI() {
     aurora_enable_vsync(sVsyncEnabled && !sTurbo);
     // The saved upscale sharpening, which nothing else sends until the scale changes.
     ApplyPresentSharpness();
+    // Saved per-pixel lighting: AuroraConfig has no field for it, and the setters
+    // only send it on change.
+    aurora_set_per_pixel_lighting(sPerPixelLighting && !sOriginalExperience);
   }
   if (sFullscreenHotkey.exchange(false, std::memory_order_acq_rel)) {
     SetFullscreen(!VIGetWindowFullscreen());
@@ -350,8 +356,12 @@ void DrawUI() {
   DrawDiscReadFailedAlert();
   DrawShaderCompilationToast();
   DrawUpdateToast();
+  DrawNoteToast();
   DrawPhotoUI();
   DrawResumePrompt();
+#if defined(PORT_TOUCH_OVERLAY)
+  DrawTouchOverlay();
+#endif
   if (sTouchLayoutSavePending.exchange(false, std::memory_order_acq_rel)) {
     MarkDirty();
     SaveSettings();

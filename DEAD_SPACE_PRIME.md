@@ -160,7 +160,8 @@ aim (F1 > Controls > Mouse settings), where the crosshair follows the mouse.
   degrees of it and 60 m, in sight, picked as each is fired (and kept up to
   date while the Wavebuster fires). Locked on in the Scan Visor, they home on
   the lock as before. The Ice Spreader, the Flamethrower and the other beams
-  don't seek. `kSeekAngle` and `kSeekRange` in `platform/port_dead_space.cpp`
+  don't seek, and nor do the extra shots **Stack beams** (F1 > Game > Cutscenes) fires
+  with each one. `kSeekAngle` and `kSeekRange` in `platform/port_dead_space.cpp`
   set the cone.
 - Stasis is thrown along the crosshair at the nearest enemy it points at, before
   any wall, allowing 0.5 m beside its body. Pointed at none, the charge flies to
@@ -208,20 +209,30 @@ out within 0.1 m of that.
 
 ## Walk speed
 
-Samus walks a little faster: **Walk speed** (F1 > Controls > Options > Dead Space) is 115%
-of the original game's by default, from 100% to 150%, saved as `walk_speed`.
-**Original experience** walks at 100%.
+Samus walks a little faster: **Walk speed** (F1 > Game > Cutscenes) is 115% of
+the original game's by default, from 50% to 200%, saved as `walk_speed` in
+percent. **Original experience** walks at 100%.
 
-- It scales the tweak's top walking speed and its acceleration together, for
-  every surface (water, lava and the like stay slower than dry ground) and in
-  the air, in every direction. Morph ball is unchanged.
+- It's the port's own walk speed, which upstream added in v0.33.0
+  (`WalkScale` in `src/MetroidPrime/Player/CPlayerDynamics.cpp`). This branch
+  only makes 115% its default: `kWalkSpeedDefault` in
+  `platform/include/port_debug.h`, with `kWalkSpeedRetail` for **Original
+  experience**. Before the merge of v0.36.0 the branch had a Walk speed of its
+  own (100-150%, in the Dead Space section), which this replaces.
+- It scales the top speed, the acceleration and the friction of walking and
+  strafing together: on every surface (water, lava and the like stay slower
+  than dry ground), in the air, under direct aim and Remastered movement, and
+  for the orbit strafe. Jumps, dashes, turning, the grapple and the morph ball
+  are unchanged.
 - Samus reaches the new speed in the same time as she reaches the original
-  one. Each tick the walking force is the acceleration times the gap between
-  the top speed and her speed, over the top speed, so scaling both by the same
-  factor leaves that rate as it was. Her steady speed works out to retail's
-  `CPlayer::GetActualFirstPersonMaxVelocity`, the top speed less a friction
-  term that doesn't change, so it goes up by 15% of the tweak's top speed: a
-  little more than 15% of her actual speed.
+  one, and her steady speed is exactly 115% of retail's. That speed is
+  `CPlayer::GetActualFirstPersonMaxVelocity`: V - f·m·V/(a·dt) + f for the
+  top speed V, friction f and acceleration a, so scaling all three by k
+  scales it by k. (The branch's own version left friction alone, which came
+  out a little more than 15% faster.)
+- A `walk_speed` the earlier version saved (a multiple, such as `1.15`) isn't
+  a percent the setting takes, so it's ignored and 115% applies. Set it again
+  in F1 if you had changed it.
 
 ## Gun sway
 
@@ -263,6 +274,8 @@ Controls > Options > Dead Space) is 150% of the original game's by default, from
 - Hits are checked along the whole path from the shot's last position to its
   new one, so a faster shot can't skip through a wall or an enemy.
 - Lock-on leads its target for the new speed (`CPlayerGun::GetBeamVelocity`).
+- With **Stack beams** (F1 > Game > Cutscenes) on, the Power Beam shot it adds to another
+  beam's is faster too: both come out of `CGunWeapon::SpawnProjectile`.
 - The other beams, missiles and the Super Missile are unchanged.
 
 ## Passthrough bridge (in progress)
@@ -421,6 +434,8 @@ and the times retail's buckets would have dropped a water surface.
 | `platform/input/port_input_devices.cpp` | Routes the Stasis action and adds its default bindings, and feeds the keyboard's movement keys to the double-tap check. |
 | `platform/include/port_input_settings.h`, `platform/port_input_settings.cpp` | The settings and their `port_settings.ini` lines (covered by `tests/port_input_settings.cpp`). |
 | `platform/include/port_debug.h`, `platform/debug_ui/options.cpp` | The settings' getters and setters. |
+| `platform/include/port_debug.h` (`kWalkSpeedDefault`, `kWalkSpeedRetail`), `docs/SETTINGS.md` | The faster walk: 115% as the default of the port's own `walk_speed`. |
+| `platform/generated/port_entity_schema.inc`, `docs/SAVESTATE_SCHEMA.md` | The save-state field schema with `CPlayer`'s dash and sway fields, made by `tools/gen_entity_schema.py` (clang-19); run it again when a class's fields change, or `port_entity_schema_current` fails. |
 | `platform/debug_ui/input.cpp` | Keeps a Stasis press and a double-tap dash for the game's next tick. |
 | `platform/debug_ui/controls.cpp` | The F1 overlay's Dead Space section. |
 | `platform/debug_ui/cheats.cpp` | Shows the sorted-draw counters under Frame statistics. |
@@ -429,9 +444,9 @@ and the times retail's buckets would have dropped a water surface.
 | `src/MetroidPrime/CStateManager.cpp` | Runs Stasis each tick, scales a held enemy's `PreThink`, `Think` and collision move, and draws the charges after the rooms. |
 | `src/MetroidPrime/Player/CGrappleArm.cpp`, `include/MetroidPrime/Player/CGrappleArm.hpp` | The throw: the grapple animations in order, and the charge let go at the thrust's projectile event. |
 | `src/MetroidPrime/Player/CPlayerOrbit.cpp` | Points the throwing hand at the enemy; manual aim's limits on lock-on and the aim assist. |
-| `src/MetroidPrime/Player/CPlayerDynamics.cpp`, `src/MetroidPrime/Player/CPlayer.cpp`, `include/MetroidPrime/Player/CPlayer.hpp` | The double-tap dash, the walk speed (`PortWalkMaxSpeed`, `PortWalkAcceleration`), and the gun sway (`PortUpdateGunSway`, `PortGunLean`, applied in `UpdateGunTransform`). |
+| `src/MetroidPrime/Player/CPlayerDynamics.cpp`, `src/MetroidPrime/Player/CPlayer.cpp`, `include/MetroidPrime/Player/CPlayer.hpp` | The double-tap dash and the gun sway (`PortUpdateGunSway`, `PortGunLean`, applied in `UpdateGunTransform`). |
 | `src/MetroidPrime/CTargetReticles.cpp` | Leans the crosshair with the gun. |
-| `src/MetaRender/CCubeRenderer.cpp`, `include/MetaRender/CCubeRenderer.hpp` | Bigger sorted-draw buckets, and their counters for F1 > Debug > Rendering. |
+| `src/MetaRender/CCubeRenderer.cpp`, `include/MetaRender/CCubeRenderer.hpp` | Bigger sorted-draw buckets, as much room in the per-area stash Remastered's draw order keeps them in (`StashSlot`), and their counters for F1 > Debug > Rendering. |
 | `platform/include/passthrough_protocol.h`, `platform/include/passthrough_shm.h`, `platform/passthrough_shm.cpp` | The passthrough bridge's wire format, sequence lock and shared memory, plain C++ for the Dead Space plugin too (covered by `tests/port_passthrough.cpp`). |
 | `platform/include/port_passthrough.h`, `platform/port_passthrough.cpp`, `src/MetroidPrime/CStateManager.cpp`, `platform/debug_ui/debug.cpp` | Publishes Samus's state once a tick, reads the host's and its triangle set, the F1 > Debug > Passthrough switches, and the wireframe drawn each frame (called from `platform/debug_ui/window.cpp`). |
 | `src/MetroidPrime/Player/CPlayerDynamics.cpp` (`GetEyeHeight`, `GetUnbiasedEyeHeight`, `GetOwnEyeHeight`) | Samus's eyes at the host player's height while the bridge is linked. |

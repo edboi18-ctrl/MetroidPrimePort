@@ -4,8 +4,11 @@
 #include <string>
 #include <vector>
 
+class CEntity;
 class CStateManager;
 class CInputStream;
+struct PortSchemaClass;
+struct PortSchemaField;
 
 // Save states: save anywhere, load back to the same spot. A state is the
 // retail save data (the same CGameState stream a memory card save holds:
@@ -18,7 +21,8 @@ class CInputStream;
 // savestate_room_state): the live script objects of the areas that were
 // loaded when it was saved, keyed by editor id (enemies with their health,
 // position, velocity; platforms, doors, timers, counters, active flags;
-// which objects existed; not AI state). After the rebuild it is applied on top of the
+// which objects existed; script generator copies; the script commands each enemy
+// was sent; not AI state). After the rebuild it is applied on top of the
 // freshly built objects, so killed enemies stay dead and the rest resume
 // where they were. States without the section, or with it switched off, come
 // back the way a memory card load leaves the room.
@@ -58,6 +62,15 @@ struct AreaFingerprint {
   bool known = false;  // false: nothing was hashed (no readable data)
   uint64_t hash = 0;
 };
+// One captured area's script layer bits as they were when its script objects were
+// spawned (issue #161). Scripts switch layers at runtime without spawning or
+// removing objects, so the live bits the memory card stream holds can differ from
+// the bits the objects in the room came from; a restore spawns with these.
+struct AreaSpawnLayers {
+  int32_t area = 0;
+  bool known = false;  // false: the area's spawn was not observed
+  uint64_t mask = 0;   // bit n: layer n was spawned
+};
 struct RoomState {
   std::vector< int32_t > areas;     // areas captured (loaded, scripts built)
   std::vector< uint32_t > present;  // editor ids that existed in those areas
@@ -68,6 +81,11 @@ struct RoomState {
   // applied.
   bool fingerprintsRecorded = false;
   std::vector< AreaFingerprint > fingerprints;
+  // False for a state written before spawn layers were recorded (RMST version 2
+  // and older), which rebuilds its areas from the live layer bits as it always did.
+  // When true there is one entry per captured area, in the same order.
+  bool spawnLayersRecorded = false;
+  std::vector< AreaSpawnLayers > spawnLayers;
   bool empty() const { return areas.empty(); }
 };
 // Little-endian field writer and reader for the block payloads.
@@ -110,17 +128,33 @@ struct DoorSaveState {
   // bit 2: mDoClose - the close was asked for by another door, which also blocks
   // this door from opening until the close finishes.
   bool doClose = false;
+  // bits 3-4, an open door only: which side of its door pair it is (issue #201).
+  // OpenDoor makes the door that was opened the leader (mPartner2: it sends Open,
+  // which starts its close timer, and closes its partner) and the door it opens
+  // the follower (mPartner1: it sends only MaxReached and accepts Close from its
+  // leader alone). A restore that linked them the other way round leaves the
+  // follower's idle timer as the only thing that could close the pair and the
+  // leader's timer refused: both doors stay open and hold the room's other doors
+  // shut. Unknown is a save written before these bits, linked the old way.
+  enum Partner : uint8_t {
+    kPartnerUnknown = 0,
+    kPartnerNone = 1,
+    kPartnerLeads = 2,
+    kPartnerFollows = 3,
+  };
+  Partner partner = kPartnerUnknown;
 };
 // The flag bits of byte 1: anything else is a payload this build never wrote and
 // is refused.
-constexpr uint8_t kDoorSaveFlagsKnown = 0x7;
+constexpr uint8_t kDoorSaveFlagsKnown = 0x1F;
+constexpr int kDoorSavePartnerShift = 3;
 // The two wire bytes, in the order above (for the save writer and the unit test).
 std::string EncodeDoorSaveState(const DoorSaveState& state);
 // False for a payload this build never writes - empty, longer than two bytes, an
-// open flag above 1, an unknown flag bit, open with a close in flight, or both
-// close paths at once, none of which the door's state machine can produce. `out`
-// is modified only for a payload that passes every check: a caller that keeps its
-// previous value keeps it exactly.
+// open flag above 1, an unknown flag bit, open with a close in flight, both
+// close paths at once, or a pair side on a closed door, none of which the door's
+// state machine can produce. `out` is modified only for a payload that passes
+// every check: a caller that keeps its previous value keeps it exactly.
 bool DecodeDoorSaveState(const std::string& data, DoorSaveState& out);
 
 // Room script fingerprints (pure, port_savestate_format.cpp, so the unit test
@@ -141,6 +175,14 @@ enum class RoomAreaRestore {
 RoomAreaRestore DecideAreaRestore(const RoomState& room, int32_t area, const uint8_t* data, size_t size);
 // One line for the log, e.g. "the room script changed".
 const char* RoomAreaRestoreReason(RoomAreaRestore decision);
+
+// The order the saved platforms of a room are put back in. A platform carries its
+// slaves (effects, props, other platforms) by the distance it moves, so each one is
+// restored after every platform that carries it: the parent drags the child, then
+// the child's own saved pose wins. parents[i] lists the indices that carry platform
+// i. False, with `order` empty, for a cycle, which no room script builds.
+bool PlatformRestoreOrder(const std::vector< std::vector< size_t > >& parents,
+                          std::vector< size_t >& order);
 
 // The fixed header ahead of the game-state blob. Pure, for the unit test.
 struct Header {
@@ -171,10 +213,97 @@ struct RoomApplyStats {
   int removed = 0;
   int unmatched = 0;
   int skipped = 0;  // areas left alone: their loaded room script data differs
+  int replayed = 0;   // journalled script messages sent again
+  int generated = 0;  // script generator copies made again
+  int fields = 0;     // enemy fields set from kTagFields blocks
+  int music = 0;      // music objects playing again from kTagMusic blocks
+  // Saved areas not loaded yet that the last ApplyRoomState call asked the world to
+  // stream in (or found streaming): they get their state when they finish, no longer
+  // held against the restore's end. Set by each call, not summed.
+  int late = 0;
 };
+// Script message journal (boss fights). The room script wakes an enemy with a
+// message (a trigger sends Thardus Action) and then never sends it again, so an
+// enemy rebuilt from disc by a state load would sit in its dormant start state
+// behind doors the save keeps locked. Each scripted enemy keeps the messages the
+// room script's connections delivered to it, in order, and a load replays them.
+// Pure parts here, for the unit test.
+struct ScriptMsgEntry {
+  uint8_t msg = 0;                // EScriptObjectMessage
+  uint32_t sender = 0xFFFFFFFFu;  // the sender's editor id, or none
+};
+// The most entries one enemy keeps (the first ones: what woke it comes first).
+constexpr size_t kMaxScriptMsgs = 32;
+// Whether a message is a command worth replaying. Activation is restored by the
+// active flag, and engine notifications (registration, damage, touches, floor and
+// splash contacts) and patrol traffic (Arrived, Next) are not commands.
+bool JournalsScriptMsg(int msg);
+// Appends `entry` unless it repeats the last entry or the journal is full.
+bool AppendScriptMsg(std::vector< ScriptMsgEntry >& journal, const ScriptMsgEntry& entry);
+// The kTagMessages payload: a count byte, then 5 bytes per entry.
+std::string EncodeScriptMsgs(const std::vector< ScriptMsgEntry >& journal);
+// False, with `out` untouched, for a payload this build never writes.
+bool DecodeScriptMsgs(const std::string& data, std::vector< ScriptMsgEntry >& out);
+
+// Game hooks (CStateManager), game thread only. NoteScriptMsg sees every message
+// a script connection delivers; NoteGenerated marks an object a script generator
+// copied from its template (it shares the template's editor id); NoteRemoved
+// drops what was noted for an object that leaves the world. Ids are raw
+// TUniqueId values (with the version bits).
+void NoteScriptMsg(CStateManager& mgr, uint16_t dest, uint16_t sender, int msg);
+void NoteGenerated(CStateManager& mgr, uint16_t uid);
+void NoteRemoved(CStateManager& mgr, uint16_t uid);
+
 void CaptureRoomState(CStateManager& mgr, RoomState& out);
+// Debug views (port_statedump.cpp): a script generator's copy of an enemy; a timer's or counter's value.
+bool IsScriptGeneratedCopy(const CStateManager& mgr, CEntity& ent);
+// Whether a generated copy of this class is saved and made again on load: enemies,
+// pickups and debris. Others (maze walls, sounds) are left to their generators.
+bool SavesGeneratedCopy(CEntity& ent);
+// Whether the room state says which music was playing (saves before kTagMusic do not).
+bool RoomStateHasMusic(const RoomState& room);
+bool ScriptTimerState(CEntity& ent, float& time, bool& timing);
+bool ScriptCounterState(CEntity& ent, int& current);
 int ApplyRoomState(CStateManager& mgr, const RoomState& room, std::vector< int32_t >& done,
                    RoomApplyStats& stats);
+// Whether the saved room state will be applied to `area` (a saved area, not applied yet,
+// whose room script is the one saved against). CStateManager::AreaLoaded then skips the
+// mailbox: the area's messages were already delivered and played out before the save,
+// and the saved objects carry the result - sending them again fires relays after the
+// restore (a timer started, a point of interest woken that the save had finished with).
+bool RoomRestoreOwnsArea(CStateManager& mgr, int area);
+// The test behind it, for a given room state and list of areas done.
+bool RoomAreaAwaitsRestore(CStateManager& mgr, const RoomState& room,
+                           const std::vector< int32_t >& done, int area);
+// The kTagFields block (port_savestate_fields.cpp): an enemy's own fields through the
+// generated entity schema. Capture returns false for an entity it does not cover; Apply
+// returns how many fields it set (0 for a block of another policy). MP_SAVESTATE_FIELDS=0
+// turns both off.
+bool CaptureEntityFields(const CStateManager& mgr, CEntity& ent, std::string& out);
+int ApplyEntityFields(CStateManager& mgr, CEntity& ent, const std::string& data);
+// Whether the block carries every schema class of `ent` (this build's fingerprints): then
+// the room restore leaves the enemy's state to it and skips the message replay and the
+// per-boss restore, which only older saves and changed classes still need.
+bool EntityFieldsCover(CEntity& ent, const std::string& data);
+// For statedump: whether `ent` gets a kTagFields block, and which schema fields it holds.
+bool EntityFieldsSaved(const CStateManager& mgr, CEntity& ent);
+bool SchemaFieldSaved(const PortSchemaClass& cls, const PortSchemaField& f);
+
+// Spawn layers (issue #161), game thread only. CGameArea::LoadScriptObjects calls
+// NoteAreaSpawn{Begin,End} around spawning an area's script objects: Begin records
+// the layer bits about to be spawned (what CaptureRoomState writes), End puts the
+// live bits back if ArmSpawnLayers overrode them. ArmSpawnLayers runs right after a
+// state's game state is installed: it makes each recorded area of world `worldId`
+// spawn with its recorded bits, remembering the live bits it replaced. Disarm
+// restores any live bits still replaced (an area that never finished loading) and
+// forgets the override. SetSpawnLayersLive(true) puts the live bits back for the
+// areas still armed without forgetting them, so a save taken meanwhile writes the
+// live bits; SetSpawnLayersLive(false) arms them again.
+void NoteAreaSpawnBegin(CStateManager& mgr, int area);
+void NoteAreaSpawnEnd(CStateManager& mgr, int area);
+void ArmSpawnLayers(const RoomState& room, uint32_t worldId);
+void DisarmSpawnLayers();
+void SetSpawnLayersLive(bool live);
 
 // Quick resume: one extra state (resume.mpss, outside the slots) written when
 // the app goes to the background or quits, with which memory card file it

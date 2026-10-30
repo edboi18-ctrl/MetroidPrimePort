@@ -17,9 +17,17 @@ MSVC developer environment/Windows SDK. Older compiler versions are unverified.
 
 Aurora and MusyX are vendored snapshots; a normal clone is sufficient. Aurora
 fetches pinned transitive dependencies on the first configure. On Linux install
-SDL build prerequisites (X11/Wayland, ALSA/PulseAudio, EGL/OpenGL, FreeType, PNG);
-see `.github/workflows/native-linux.yml` for the Ubuntu package list and
-`extern/aurora/docs/building.md` for dependency-provider options.
+SDL build prerequisites (X11/Wayland, ALSA/PulseAudio, EGL/OpenGL, FreeType, PNG).
+On Ubuntu 24.04:
+
+```sh
+sudo apt-get install ninja-build g++-14 libasound2-dev libpulse-dev libx11-dev \
+  libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev \
+  libxtst-dev libwayland-dev libxkbcommon-dev libegl1-mesa-dev libgl-dev \
+  libfreetype-dev libpng-dev
+```
+
+See `extern/aurora/docs/building.md` for dependency-provider options.
 
 ```sh
 cmake -S . -B build/native -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
@@ -108,14 +116,21 @@ image. Otherwise, when no disc is found it opens the platform's file dialog and
 remembers the answer as `disc_path` in the settings file. There is no prompt
 when the port has no window to show one on, or with `MP_NO_DISC_DIALOG=1`
 (for scripted runs that do have a window, as on a build runner). The disc must
-identify as **GM8E01, disc 0, revision 0, 1 or 2** (USA 1.00, 1.01 or 1.02) or **GM8P01** (PAL).
+identify as **GM8E01, disc 0, revision 0, 1 or 2** (USA 1.00, 1.01 or 1.02), **GM8P01** (PAL) or
+**R3ME01** or **R3MP01** (Metroid Prime Trilogy, USA or PAL; experimental). A Trilogy disc runs its Metroid Prime: the
+`MP1` directory is the disc's root (with the rest of the disc still visible) and `rs5mp1_p.dol` its
+DOL. That data is the PAL revision's, so it runs like a PAL disc (PAL skips and script fixes, except
+PAL's extra Main Quarry lock, which Trilogy lacks). The front end plays Trilogy's own Metroid Prime
+menu movies from `fe/Video/mp1`. Saves are an `R3ME` (USA) or `R3MP` (PAL) file, apart from the GameCube ones: PAL's container, with relays, doors and scans in the Trilogy's own order (a GameCube save is converted, not copied). The two
+Trilogy discs have the same Metroid Prime world data; the PAL one differs in its DOL build, its
+`Strings.pak` and some movies.
 PAL support is experimental: a PAL disc runs the same 1.00 code on its own data, at 60 Hz, with every port
 feature (Remastered import, randomizer, Archipelago, cutscene skips) and its
 languages; its saves are kept apart from USA ones. USA 1.01 runs the same
 way; its data differs from 1.00 only in a few rooms' scripts and one credits
 name. USA 1.02 runs the same way (its rooms' scripts differ more, and the
-cutscene skips and the Arboretum gate fix have 1.02 variants); Japanese, Korean and Wii discs
-are rejected. Nod/Aurora supports additional image
+cutscene skips and the Arboretum gate fix have 1.02 variants); Japanese, Korean and other Wii
+discs are rejected. Nod/Aurora supports additional image
 containers, but the same retail content is required.
 
 `metroid_prime_port --version` prints the source revision without initializing
@@ -608,8 +623,8 @@ listener heading) about three times a second, and `MP_MUTE_SMP=65535,93` silence
 voices by sample id so a persistent one can be identified by ear. Streamed
 voices report sample id 65535. `MP_LOG_3D=1` logs any 3D emitter whose Doppler
 factor is not 1. The overlay's Debug > Audio > **Sounds playing** list shows the live voices (loudest
-first) with a per-sample mute checkbox and an "Unmute all" button; the muted ids
-are saved to `voices_muted` in the settings file.
+first) with a per-sample mute checkbox and an "Unmute all" button, which also
+turns both audio paths back on. Mutes are not saved: a relaunch has full sound.
 
 A main-loop iteration that takes longer than 250 ms logs `MP stall: frame N took
 … ms (events, input, tick, draw)`, at most one line every two seconds, and a run

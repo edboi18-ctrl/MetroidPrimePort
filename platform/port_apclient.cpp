@@ -1,4 +1,5 @@
 #include "port_apclient_internal.h"
+#include "port_beam_doors.h"
 
 #include "MetroidPrime/CHealthInfo.hpp"
 #include "MetroidPrime/CScriptLayerManager.hpp"
@@ -245,6 +246,8 @@ void ApplyBuiltinWorld(Runtime& runtime, CStateManager& mgr, CPlayerState& playe
   namespace Prime = MetroidPrime;
   bool unlimitedMissiles = false;
   bool unlimitedPowerBombs = false;
+  // Capacity wanted for missiles and power bombs, or -1 while not known.
+  int ammoTarget[2] = {-1, -1};
   // The disc's values outside a seed's game.
   static const PortApWorld::Layout kNoLayout;
   std::shared_ptr<const PortApWorld::Layout> seedLayout;
@@ -273,6 +276,16 @@ void ApplyBuiltinWorld(Runtime& runtime, CStateManager& mgr, CPlayerState& playe
         runtime.session->ReceivedCount(Prime::kItemBase + Prime::kUnlimitedMissiles) > 0;
     unlimitedPowerBombs =
         runtime.session->ReceivedCount(Prime::kItemBase + Prime::kUnlimitedPowerBombs) > 0;
+    // The capacity the received items add up to, once the whole inventory is in
+    // and nothing is queued for the game. Games that were played against the
+    // official AP world before its item ids were translated never got the
+    // Missile Launcher, and the save's applied index is already past it.
+    if (seedGame && runtime.session->InventoryReceived() && runtime.grants.empty()) {
+      const std::map<int64_t, int64_t>& counts = runtime.session->GetState().progressive;
+      const Protocol::SlotData& options = runtime.session->GetSlotData();
+      ammoTarget[0] = Prime::AmmoCapacity(counts, true, options.requireMissileLauncher);
+      ammoTarget[1] = Prime::AmmoCapacity(counts, false, options.requireMainPowerBomb);
+    }
     if (!runtime.goalWanted && gpGameState->CurrentWorldAssetId() == Prime::kEndOfGameWorld) {
       runtime.goalWanted = true;
       runtime.wake.notify_all();
@@ -283,6 +296,23 @@ void ApplyBuiltinWorld(Runtime& runtime, CStateManager& mgr, CPlayerState& playe
     if (missing > 0)
       player.IncrPickUp(type, missing);
   };
+  // Top-up only: a capacity above the received items' is never lowered.
+  const auto topUpCapacity = [&player](CPlayerState::EItemType type, int target, int limit) {
+    target = std::min(target, limit);
+    const int capacity = player.GetItemCapacity(type);
+    if (target <= capacity)
+      return;
+    const int amountBefore = player.GetItemAmount(type);
+    player.InitializePowerUp(type, target - capacity);
+    player.IncrPickUp(type, target - capacity);
+    PortLog::Write("archipelago: raised %s capacity %d -> %d (amount %d -> %d) to match the received items\n",
+                   PortRandomizer::ItemName(static_cast<int>(type)), capacity, player.GetItemCapacity(type), amountBefore,
+                   player.GetItemAmount(type));
+  };
+  if (ammoTarget[0] >= 0)
+    topUpCapacity(CPlayerState::kIT_Missiles, ammoTarget[0], 999);
+  if (ammoTarget[1] >= 0)
+    topUpCapacity(CPlayerState::kIT_PowerBombs, ammoTarget[1], 99);
   if (unlimitedMissiles)
     topOff(CPlayerState::kIT_Missiles);
   if (unlimitedPowerBombs)
@@ -462,6 +492,7 @@ void Restart(Runtime& runtime) {
   runtime.queuedChecks.clear();
   runtime.notifications.clear();
   runtime.pendingSay.clear();
+  runtime.pendingHintScouts.clear();
   runtime.pendingBounce.clear();
   runtime.syncWanted = false;
   runtime.stateDirty = false;
@@ -1052,6 +1083,39 @@ bool OwnsMemo(uint32_t world, uint32_t area, uint32_t entity) {
   }
 }
 
+bool PickupJingle(uint32_t world, uint32_t area, uint32_t entity, std::string& out) {
+  try {
+    const MetroidPrime::Location* location = MetroidPrime::FindAudio(world, area, entity);
+    if (location == nullptr)
+      return false;
+    if (BuiltinRules()) {
+      int64_t item = 0;
+      bool sameGame = false;
+      {
+        Runtime& runtime = GetRuntime();
+        std::lock_guard<std::mutex> lock(runtime.mutex);
+        if (runtime.enabled && runtime.session != nullptr &&
+            runtime.session->ScoutedAt(location->id, item, sameGame, nullptr)) {
+          out = MetroidPrime::JingleFile(item, sameGame);
+          return true;
+        }
+      }
+    }
+    // No AP item known here: an offline seed may have put another item at
+    // this pickup (CScriptPickup is rewritten at load).
+    int itemType = -1, capacity = 0;
+    if (PortRandomizer::Placed(world, area, location->pickup, itemType, capacity)) {
+      if (const char* file = MetroidPrime::JingleForItemType(itemType)) {
+        out = file;
+        return true;
+      }
+    }
+    return false;
+  } catch (...) {
+    return false;
+  }
+}
+
 void RecordPickup(uint32_t world, uint32_t area, uint32_t entity) {
   try {
     const int bit = CheckedBit(MetroidPrime::FindPickup(world, area, entity));
@@ -1172,6 +1236,23 @@ bool ArtifactHint(int itemType, std::string& out) {
     return !out.empty();
   } catch (...) {
     return false;
+  }
+}
+
+void ArtifactScanned(int itemType) {
+  try {
+    if (itemType < MetroidPrime::kArtifactTruth || itemType > MetroidPrime::kArtifactNewborn ||
+        !BuiltinRules())
+      return;
+    Runtime& runtime = GetRuntime();
+    std::lock_guard<std::mutex> lock(runtime.mutex);
+    if (!runtime.enabled || runtime.session == nullptr || !runtime.session->HandshakeComplete())
+      return;
+    // The session gives each location once, so a totem scanned again sends nothing.
+    int64_t location = 0;
+    if (runtime.session->TakeArtifactScanHint(MetroidPrime::kItemBase + itemType, location))
+      runtime.pendingHintScouts.push_back(location);
+  } catch (...) {
   }
 }
 
@@ -1364,16 +1445,56 @@ void WatchShields(CStateManager& mgr, CGameState::ApProgress& progress) {
   }
 }
 
+namespace {
+
+// The pickups of room `mrea` whose locations are checked, by the session or
+// in the loaded game's record. A death or an older save brings them back
+// while their items stay given.
+std::vector< uint32_t > TakenPickups(uint32_t mrea) {
+  std::vector< uint32_t > taken;
+  if (!BuiltinRules())
+    return taken;
+  size_t count = 0;
+  const MetroidPrime::Location* locations = MetroidPrime::Locations(count);
+  std::vector< int64_t > checked;
+  {
+    Runtime& runtime = GetRuntime();
+    std::lock_guard<std::mutex> lock(runtime.mutex);
+    if (runtime.enabled && runtime.session != nullptr)
+      checked = runtime.session->GetState().checkedLocations;
+  }
+  const CGameState::ApProgress* progress =
+      gpGameState != nullptr && gpGameState->PortApProgress().reconciled ? &gpGameState->PortApProgress()
+                                                                         : nullptr;
+  for (size_t i = 0; i < count; ++i) {
+    if (locations[i].area != mrea)
+      continue;
+    const bool recorded = progress != nullptr && i < 128 && ((progress->checked[i / 32] >> (i % 32)) & 1) != 0;
+    if (recorded || std::find(checked.begin(), checked.end(), locations[i].id) != checked.end())
+      taken.push_back(locations[i].pickup);
+  }
+  return taken;
+}
+
+} // namespace
+
 bool RoomOps(uint32_t mrea, const uint8_t* scly, size_t size, std::vector< uint8_t >& ops) {
   try {
     const std::shared_ptr<const PortApWorld::Layout> seedLayout = SeedLayout();
-    if (seedLayout == nullptr)
+    const std::vector< uint32_t > taken = TakenPickups(mrea);
+    if (seedLayout == nullptr && taken.empty())
       return false;
-    const PortApWorld::Layout& layout = *seedLayout;
     std::vector< PortSkipCutscenes::ScriptObject > objects;
     if (!PortSkipCutscenes::ScanObjects(scly, size, objects))
       return false;
-    ops = PortApWorld::RoomOps(layout, mrea, objects);
+    ops.clear();
+    if (seedLayout != nullptr)
+      ops = PortApWorld::RoomOps(*seedLayout, mrea, objects);
+    const std::vector< uint8_t > pickups = PortApWorld::TakenPickupOps(objects, taken);
+    if (!pickups.empty()) {
+      PortLog::Write("archipelago: room %08X leaves out %zu checked pickup(s)\n", mrea, pickups.size() / 5);
+      ops.insert(ops.end(), pickups.begin(), pickups.end());
+    }
     return !ops.empty();
   } catch (...) {
     return false;
@@ -1386,13 +1507,15 @@ bool DoorOps(uint32_t mrea, const uint8_t* scly, size_t size, std::vector< uint8
       std::lock_guard< std::mutex > lock(PlacedShieldsMutex());
       PlacedShields().erase(mrea);
     }
+    // Without a seed the layout is the disc's, and only the doorways the player
+    // unlocked (the beam doors setting) change.
     const std::shared_ptr<const PortApWorld::Layout> seedLayout = SeedLayout();
-    if (seedLayout == nullptr)
-      return false;
-    const PortApWorld::Layout& layout = *seedLayout;
+    const PortApWorld::Layout disc;
+    const PortApWorld::Layout& layout = seedLayout != nullptr ? *seedLayout : disc;
     uint32_t broken[4];
-    const std::vector< PortApWorld::DoorChange > doors =
-        PortApWorld::Doors(layout, mrea, BrokenShields(broken));
+    uint32_t unlocked[PortApWorld::kBeamDoorWords];
+    const std::vector< PortApWorld::DoorChange > doors = PortApWorld::Doors(
+        layout, mrea, BrokenShields(broken), PortBeamDoors::Unlocked(unlocked));
     std::vector< PortSkipCutscenes::ScriptObject > objects;
     if (doors.empty() || !PortSkipCutscenes::ScanObjects(scly, size, objects))
       return false;
@@ -1419,14 +1542,39 @@ bool MapDoors(uint32_t mapa, std::vector< std::pair< uint32_t, int > >& doors) {
   try {
     doors.clear();
     const std::shared_ptr<const PortApWorld::Layout> seedLayout = SeedLayout();
-    if (seedLayout == nullptr)
-      return false;
-    const PortApWorld::Layout& layout = *seedLayout;
+    const PortApWorld::Layout disc;
+    const PortApWorld::Layout& layout = seedLayout != nullptr ? *seedLayout : disc;
     uint32_t broken[4];
-    for (const PortApWorld::MapDoor& door :
-         PortApWorld::MapDoors(layout, mapa, BrokenShields(broken)))
+    uint32_t unlocked[PortApWorld::kBeamDoorWords];
+    for (const PortApWorld::MapDoor& door : PortApWorld::MapDoors(
+             layout, mapa, BrokenShields(broken), PortBeamDoors::Unlocked(unlocked)))
       doors.emplace_back(door.doorId, door.type);
     return !doors.empty();
+  } catch (...) {
+    return false;
+  }
+}
+
+bool BeamDoorUnlockable(uint32_t mrea, int door) {
+  try {
+    const std::shared_ptr<const PortApWorld::Layout> seedLayout = SeedLayout();
+    const PortApWorld::Layout disc;
+    uint32_t broken[4];
+    return PortApWorld::BeamDoorUnlockable(seedLayout != nullptr ? *seedLayout : disc, mrea, door,
+                                           BrokenShields(broken));
+  } catch (...) {
+    return false;
+  }
+}
+
+bool LockedDoorStyle(int door, PortApWorld::DoorStyle& style,
+                     std::vector< uint8_t >& vulnerability) {
+  try {
+    const std::shared_ptr<const PortApWorld::Layout> seedLayout = SeedLayout();
+    const PortApWorld::Layout disc;
+    uint32_t broken[4];
+    return PortApWorld::LockedDoorStyle(seedLayout != nullptr ? *seedLayout : disc, door,
+                                        BrokenShields(broken), style, vulnerability);
   } catch (...) {
     return false;
   }
@@ -1471,6 +1619,41 @@ bool RandomizedGame() {
     return BuiltinRules();
   } catch (...) {
     return false;
+  }
+}
+
+bool ChargeBeamRule(int beam) {
+  namespace Prime = MetroidPrime;
+  try {
+    Runtime& runtime = GetRuntime();
+    std::lock_guard<std::mutex> lock(runtime.mutex);
+    // Not an AP seed with progressive beams (or its slot_data has not arrived):
+    // owning the Charge Beam is enough, as in retail.
+    if (!runtime.enabled || !runtime.config.builtin || runtime.session == nullptr ||
+        !runtime.session->GetSlotData().received ||
+        !runtime.session->GetSlotData().progressiveBeamUpgrades)
+      return true;
+    // Each beam's second upgrade is its Charge Beam.
+    int64_t item = 0;
+    switch (beam) {
+    case CPlayerState::kBI_Power:
+      item = Prime::kProgressivePowerBeam;
+      break;
+    case CPlayerState::kBI_Ice:
+      item = Prime::kProgressiveIceBeam;
+      break;
+    case CPlayerState::kBI_Wave:
+      item = Prime::kProgressiveWaveBeam;
+      break;
+    case CPlayerState::kBI_Plasma:
+      item = Prime::kProgressivePlasmaBeam;
+      break;
+    default:
+      return true; // the Phazon Beam
+    }
+    return runtime.session->ReceivedCount(Prime::kItemBase + item) >= 2;
+  } catch (...) {
+    return true;
   }
 }
 

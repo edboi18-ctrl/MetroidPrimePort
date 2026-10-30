@@ -14,6 +14,7 @@
 #include "port_gci.h"
 #include "port_mods.h"
 #include "port_remastered_import.h"
+#include "port_dread_samus_mod.h"
 #include "port_remastered_text.h"
 #include "port_discord.h"
 #include "port_savestate.h"
@@ -22,9 +23,11 @@
 #include <imgui_internal.h>
 #include <SDL3/SDL_dialog.h>
 #include <SDL3/SDL_misc.h>
+#include <SDL3/SDL_timer.h>
 
 #if defined(__ANDROID__)
 #include "touch_pad.h"
+#include <unistd.h>
 #include <jni.h>
 #endif
 
@@ -32,6 +35,7 @@
 #include <atomic>
 #include <cctype>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -208,7 +212,7 @@ std::string CardImportDolphin() {
   // Dolphin uses one or the other, per its settings: try the one written last.
   std::error_code ec;
   std::filesystem::file_time_type folderTime = std::filesystem::file_time_type::min();
-  for (const std::filesystem::path& file : PortGci::GameFiles(dolphin.gciFolder)) {
+  for (const std::filesystem::path& file : PortGci::ImportableFiles(dolphin.gciFolder)) {
     folderTime = std::max(folderTime, std::filesystem::last_write_time(file, ec));
   }
   const auto rawTime = dolphin.rawImage.empty() ? std::filesystem::file_time_type::min()
@@ -399,7 +403,16 @@ std::string CardQueueExport(const std::filesystem::path& folder, const std::stri
         sCardExportQueue.clear();
         return "Could not read " + PortGci::PathString(file.filename()) + ".";
       }
-      sCardExportQueue.push_back({PortGci::PathString(file.filename()), std::move(bytes), {}});
+      // Named by the format's game code (a Trilogy disc's keep R3ME/R3MP).
+      PortGci::Header header;
+      std::string error;
+      if (!PortGci::ParseHeader(bytes.data(), bytes.size(), header, error)) {
+        sCardExportQueue.clear();
+        return "Could not read " + PortGci::PathString(file.filename()) + ": " + error;
+      }
+      std::memcpy(bytes.data(), PortGci::GameCodeOf(to), 4);
+      header.game = PortGci::GameCodeOf(to);
+      sCardExportQueue.push_back({PortGci::DiskName(header), std::move(bytes), {}});
     }
     return {};
   }
@@ -530,8 +543,8 @@ void DrawEmulatorCard() {
     OpenCardDialog(kCardPick_Emulator);
   }
   ImGui::EndDisabled();
-  ItemHelp("The Dolphin or PrimeHack user folder, the one that contains GC/. Needed for portable installs; "
-           "otherwise it is found by itself. A GC folder or a card folder works too.");
+  ItemHelp("The Dolphin or PrimeHack user folder (the one containing GC/). Only needed for "
+           "portable installs.");
   ImGui::SameLine();
   ImGui::BeginDisabled(chosen.empty());
   if (ImGui::Button("Auto")) {
@@ -560,8 +573,7 @@ void DrawEmulatorCard() {
       }
       ImGui::EndCombo();
     }
-    ItemHelp("Dolphin and PrimeHack installs found on this computer. Pick one to use it instead of the "
-             "automatic choice.");
+    ItemHelp("Installs found on this computer. Pick one instead of the automatic choice.");
   }
   bool share = PortGci::ShareEmulatorCard();
   ImGui::BeginDisabled(inGame);
@@ -571,17 +583,20 @@ void DrawEmulatorCard() {
     SaveSettings();
   }
   ImGui::EndDisabled();
-  ItemHelp("The port and the emulator read and write the same save files. Never run both at the same time: "
-           "one overwrites the other's saves. GameCube Metroid Prime only; the Wii Trilogy save cannot be "
-           "shared (use Export as Wii Trilogy). Randomizer and Archipelago keep their own cards. Takes "
-           "effect at the title screen.");
+  ItemHelp("The port and the emulator share the same saves: never run both at once. On a Trilogy "
+           "disc the port's card is mirrored with the emulator's Trilogy save instead. Randomizer "
+           "and Archipelago keep their own cards. Takes effect at the title screen.");
   if (!share) {
     return;
   }
   std::string why;
   const std::filesystem::path base = PortGci::SharedCardBase(&why);
   if (base.empty()) {
-    ImGui::TextColored(ThemeWarnColor(), "%s", why.c_str());
+    if (PortGci::TrilogyShareBin().empty()) {
+      ImGui::TextColored(ThemeWarnColor(), "%s", why.c_str());
+    } else {
+      ImGui::TextWrapped("%s", why.c_str());
+    }
     return;
   }
   ImGui::BeginDisabled(inGame || sCardDialogOpen);
@@ -600,8 +615,8 @@ void DrawEmulatorCard() {
     }
   }
   ImGui::EndDisabled();
-  ItemHelp("Copies the saves of the port's own card into the shared card; the shared card's own saves move to "
-           "_replaced first.");
+  ItemHelp("Copies the port's own card saves into the shared card; the shared card's own saves "
+           "move to _replaced first.");
 }
 #endif
 } // namespace
@@ -625,9 +640,9 @@ void DrawMemoryCard() {
   if (ImGui::Button("Import file...")) {
     OpenCardDialog(kCardPick_Import);
   }
-  ItemHelp("Dolphin .gci saves, a whole card image (.raw) or a Wii Trilogy data.bin/save.bin. Saves of the "
-           "other release (USA/PAL) or the Trilogy are converted to this disc's format. An import replaces "
-           "the card's saves; the old ones move to _replaced in the card folder.");
+  ItemHelp(
+      "Dolphin .gci saves, a card image (.raw) or a Wii Trilogy data.bin/save.bin, converted from "
+      "the other release if needed. Replaces the card's saves; the old ones move to _replaced.");
 #if !defined(__ANDROID__)
   ImGui::SameLine();
   if (ImGui::Button("Import from Dolphin/PrimeHack")) {
@@ -637,6 +652,24 @@ void DrawMemoryCard() {
             "/Card A, GC/MemoryCardA." + PortGci::CardRegion() + ".raw).")
                .c_str());
 #endif
+  // Saves another disc left on the card (each release keeps its own files).
+  // Rescanned every two seconds: it reads every file's header.
+  static std::vector<PortGci::OtherRelease> sOthers;
+  static Uint64 sOthersNext = 0;
+  if (SDL_GetTicks() >= sOthersNext) {
+    sOthers = PortGci::OtherReleaseSaves();
+    sOthersNext = SDL_GetTicks() + 2000;
+  }
+  for (size_t i = 0; i < sOthers.size(); ++i) {
+    ImGui::PushID(static_cast<int>(i));
+    if (ImGui::Button(("Restore from " + sOthers[i].label).c_str())) {
+      sCardStatus = "From " + sOthers[i].label + ": " + PortGci::RestoreFrom(sOthers[i]).Summary("Restored");
+      sOthersNext = 0;
+    }
+    ItemHelp("Copies that version's save onto this disc's card, converted; this card's saves move to "
+             "_replaced first, and the other version's saves are left as they are.");
+    ImGui::PopID();
+  }
   ImGui::EndDisabled();
   ImGui::BeginDisabled(busy || saves == 0);
   const std::string asIs = std::string("As on the card (") +
@@ -645,12 +678,9 @@ void DrawMemoryCard() {
                            "Wii Trilogy (save.bin)"};
   ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
   ImGui::Combo("Export as", &sCardExportChoice, choices, IM_ARRAYSIZE(choices));
-  ItemHelp("The release the exported save is for. A save of another release is converted from the newest "
-           "save on the card; it replaces that release's saves at the destination. The Trilogy's save is "
-           "written into an existing save.bin (Dolphin's, or one exported from a Wii and decrypted): the "
-           "newest save replaces the Metroid Prime game the Trilogy shows (start one there and save once "
-           "first); Echoes and Corruption are kept. A Wii's data.bin is signed by the console, so it "
-           "cannot be made here.");
+  ItemHelp("The release to export for; saves of another release are converted. For the Trilogy, "
+           "start a Metroid Prime game in an existing save.bin and save once first: that game is "
+           "replaced. A Wii's signed data.bin can't be made here.");
   const char* format = kCardExportWords[sCardExportChoice];
   const bool trilogy = CardExportFormat(format) == PortGci::ExportFormat::WiiSave;
 #if defined(__ANDROID__)
@@ -712,6 +742,8 @@ std::mutex sRemasteredPickMutex;
 std::vector<std::pair<int, std::string>> sRemasteredPicks;
 // Which 2 of the same picker: a PAL image for its languages (DrawLanguageSection).
 std::string sPalLanguagesPick;
+std::string sFlaahgraPick;
+std::string sDreadPick;
 
 #if defined(__ANDROID__)
 // Not SDL_ShowOpenFileDialog: Android often kills the game behind the picker
@@ -763,6 +795,10 @@ void OpenRemasteredDialog(int which) {
       const int which = int(reinterpret_cast< intptr_t >(userdata));
       if (which == kPalLanguagesPick) {
         sPalLanguagesPick = files[0];
+      } else if (which == kFlaahgraPick) {
+        sFlaahgraPick = files[0];
+      } else if (which == kDreadPick) {
+        sDreadPick = files[0];
       } else {
         sRemasteredPicks.emplace_back(which, files[0]);
       }
@@ -774,7 +810,7 @@ void OpenRemasteredDialog(int which) {
       {"GameCube images (.iso, .gcm, .rvz, .wia, .gcz, .ciso, .wbfs, .tgc)", "iso;gcm;rvz;wia;gcz;ciso;wbfs;tgc"},
       {"All files", "*"}};
   SDL_ShowOpenFileDialog(done, reinterpret_cast< void* >(static_cast< intptr_t >(which)), window,
-                         which == 0 ? imageFilters : which == 1 ? keyFilters : discFilters, 2, nullptr, false);
+                         which == 0 || which == kDreadPick ? imageFilters : which == 1 ? keyFilters : discFilters, 2, nullptr, false);
 }
 #endif
 
@@ -784,7 +820,10 @@ void OpenRemasteredDialog(int which) {
 // opened here and the import reads it through the descriptor ("fd:<n>", see
 // SourceFile). One descriptor per field, closed when another file is picked.
 std::string OpenRemasteredPick(int which, const std::string& uri) {
-  static int sHeld[2] = {-1, -1};
+  static int sHeld[kDreadKeysSlot + 1] = {-1, -1, -1, -1, -1, -1};
+  if (which < 0 || which > kDreadKeysSlot) {
+    return {};
+  }
   if (sHeld[which] >= 0) {
     close(sHeld[which]);
     sHeld[which] = -1;
@@ -832,12 +871,14 @@ void DrawModReloadMessage() {
 static bool sImportWatched = false;
 bool sImportUnloadedMods = false;
 static bool sImportInstallStarted = false;
+// The mod the running import makes, switched on when it ends.
+static std::string sImportModName = PortRemastered::kImportModName;
 // A reload is refused where the game can't save (a cutscene, say), so these
 // are asked again every two seconds until one runs.
 static int sReloadAwaited = -1;
 static double sReloadRetry = 0.0;
 
-static void ReloadUntilDone() {
+void ReloadUntilDone() {
   sReloadAwaited = PortSaveState::ModReloads();
   sReloadRetry = ImGui::GetTime() + 2.0;
   PortSaveState::RequestModReload();
@@ -855,7 +896,24 @@ bool StartRemasteredImport(const std::string& image, const std::string& keys) {
   if (!started) {
     return false;
   }
+  sImportModName = PortRemastered::kImportModName;
   sImportWatched = true;
+  const PortMods::Status& status = PortMods::CurrentStatus();
+  if (std::any_of(status.mods.begin(), status.mods.end(), [](const PortMods::ModInfo& mod) { return mod.enabled; })) {
+    PortMods::SetSuspended(true);
+    ReloadUntilDone();
+    sImportUnloadedMods = true;
+  }
+  return true;
+}
+
+bool StartDreadSamusImport(const std::string& image, const std::string& keys) {
+  if (!PortRemastered::StartDreadSamusImport(image, keys)) {
+    return false;
+  }
+  sImportModName = PortDreadSamus::kModName;
+  sImportWatched = true;
+  // Its old files are replaced at the end: nothing of the mods may be open meanwhile.
   const PortMods::Status& status = PortMods::CurrentStatus();
   if (std::any_of(status.mods.begin(), status.mods.end(), [](const PortMods::ModInfo& mod) { return mod.enabled; })) {
     PortMods::SetSuspended(true);
@@ -907,7 +965,7 @@ void FinishRemasteredImport() {
   if (state.ok) {
     // A mod just imported is wanted, even if it was switched off to import.
     std::vector<std::string> disabled = PortMods::SplitDisabled(sModsDisabled);
-    const auto kept = std::remove(disabled.begin(), disabled.end(), std::string(PortRemastered::kImportModName));
+    const auto kept = std::remove(disabled.begin(), disabled.end(), sImportModName);
     if (kept != disabled.end()) {
       disabled.erase(kept, disabled.end());
       SetModsDisabled(PortMods::JoinDisabled(disabled));

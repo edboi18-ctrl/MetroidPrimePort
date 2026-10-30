@@ -9,11 +9,14 @@
 #include "port_gyro_motion.h"
 #include "port_dynamic_res.h"
 #include "port_photo.h"
+#include "port_third_person.h"
 #include "port_pointer.h"
 #include "port_hd_font.h"
 #include "port_log.h"
 #include "port_paths.h"
 #include "port_mods.h"
+#include "port_ball_looks.h"
+#include "port_suit_colours.h"
 #include "port_remastered_text.h"
 #include "port_discord.h"
 #include "port_savestate.h"
@@ -28,7 +31,7 @@
 #include <SDL3/SDL_dialog.h>
 #include <SDL3/SDL_timer.h>
 
-#if defined(__ANDROID__)
+#if defined(PORT_TOUCH_CONTROLS)
 #include "touch_pad.h"
 #endif
 
@@ -42,6 +45,10 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+
+namespace aurora {
+bool frame_buffer_size_for_scale(float scale, uint32_t* width, uint32_t* height) noexcept;
+} // namespace aurora
 
 namespace PortDebug {
 
@@ -138,6 +145,12 @@ static float sCaptureScale = 0.f;
 float EffectiveRenderScale() {
   return sCaptureScale > 0.f ? sCaptureScale : sOriginalExperience ? 1.f : sRenderScale;
 }
+// The most dynamic resolution draws at: the scale set, or with auto render scale the
+// window's own (BaseRenderScale), which follows the window as it is resized.
+float DynamicResTop() {
+  const float scale = EffectiveRenderScale();
+  return scale > 0.f ? scale : BaseRenderScale();
+}
 int EffectiveMsaa() { return sOriginalExperience ? 1 : sMsaa; }
 static int EffectiveAnisotropy() { return sOriginalExperience ? 1 : sAnisotropy; }
 
@@ -146,7 +159,7 @@ static int EffectiveAnisotropy() { return sOriginalExperience ? 1 : sAnisotropy;
 void ApplyPresentSharpness() {
   float amount = 0.f;
   if (!sOriginalExperience && sSharpenAmount > 0) {
-    const bool lowered = sDynScale > 0.f && sDynScale < EffectiveRenderScale();
+    const bool lowered = sDynScale > 0.f;
     if (sSharpenMode == 2 || (sSharpenMode == 1 && lowered)) {
       amount = static_cast< float >(sSharpenAmount) / 100.f;
     }
@@ -195,7 +208,7 @@ void WantGpuTimes(unsigned user, bool on) {
 }
 
 void ResetDynamicRes() {
-  sDynController.Reset(EffectiveRenderScale());
+  sDynController.Reset(DynamicResTop());
   sDynGpuMs = -1.0;
   if (sDynScale > 0.f) {
     sDynScale = 0.f;
@@ -211,9 +224,13 @@ static void UpdateDynamicRes(double fps, unsigned frames) {
   if (sCaptureScale > 0.f) {
     return;
   }
-  const float top = EffectiveRenderScale();
+  const float top = DynamicResTop();
   const float bottom = std::min(sDynamicResMin, top);
   const bool active = sDynamicRes && !sOriginalExperience && top > bottom && !sTurbo;
+  // Auto's top moves with the window: start over from the new one.
+  static float sDynTop = 0.f;
+  const bool topMoved = sDynTop != top;
+  sDynTop = top;
   // MP_DYNRES_GPU_TIMES=0 steers on the frame rate alone, as on a GPU without timestamps.
   static const bool gpuTimesAllowed = port::EnvFlag("MP_DYNRES_GPU_TIMES", true);
   const bool gpuTimes = gpuTimesAllowed && GXPortGpuTimesSupported() == GX_TRUE;
@@ -225,7 +242,7 @@ static void UpdateDynamicRes(double fps, unsigned frames) {
     }
     return;
   }
-  if (!sDynActive) {
+  if (!sDynActive || topMoved) {
     sDynActive = true;
     ResetDynamicRes();
   }
@@ -233,6 +250,9 @@ static void UpdateDynamicRes(double fps, unsigned frames) {
   sample.fps = fps;
   sample.frames = frames;
   sample.targetFps = DynamicResTargetFps();
+  AuroraPipelineStats pipelines{};
+  aurora_get_pipeline_stats(&pipelines);
+  sample.compiling = pipelines.pending > 0;
   sample.top = top;
   sample.bottom = bottom;
   if (gpuTimes) {
@@ -245,8 +265,9 @@ static void UpdateDynamicRes(double fps, unsigned frames) {
   sDynGpuMs = sample.gpuMs;
   const PortDynamicRes::Decision decision = sDynController.Update(sample);
   if (decision.changed) {
-    sDynScale = decision.scale;
-    VISetFrameBufferScale(decision.scale);
+    // Back at the top draws as the setting does (auto: the window's exact size).
+    sDynScale = decision.scale < top ? decision.scale : 0.f;
+    VISetFrameBufferScale(sDynScale > 0.f ? sDynScale : EffectiveRenderScale());
     ApplyPresentSharpness();
     PortLog::Write("port: dynamic resolution %.2fx (%.0f fps, target %.0f, GPU %.1f ms): %s\n", decision.scale,
                    fps, sample.targetFps, sample.gpuMs, PortDynamicRes::ReasonText(decision.reason));
@@ -313,8 +334,12 @@ void SetVsyncEnabled(bool enabled) {
   // Always re-apply: the stored value can match while the surface still has the
   // previous present mode (e.g. the persisted value applied before the first
   // frame), which made the first toggle a no-op.
-  sVsyncEnabled = enabled;
-  aurora_enable_vsync(enabled);
+  if (sVsyncEnabled != enabled) {
+    sVsyncEnabled = enabled;
+    MarkDirty();
+  }
+  // Turbo keeps vsync off until it ends, as the first-frame apply does.
+  aurora_enable_vsync(enabled && !sTurbo);
 }
 
 bool Fullscreen() { return Loaded(sFullscreen); }
@@ -355,13 +380,28 @@ float BaseRenderScale() {
   if (sRenderScale > 0.f) {
     return sRenderScale;
   }
-  // Auto draws at the window's pixel size; as a multiple of the 480-line base.
-  int width = 0, height = 0;
+  // Auto draws at the window's pixel size, fitted to the game's aspect when that is
+  // narrower than the window's (16:9 in a 4:3 window); as a multiple of what 1x draws,
+  // the render mode's EFB height (480 lines NTSC, 528 PAL).
+  uint32_t width = 0, native = 0, base = 0;
+  if (aurora::frame_buffer_size_for_scale(0.f, &width, &native) &&
+      aurora::frame_buffer_size_for_scale(1.f, &width, &base) && native > 0 && base > 0) {
+    return static_cast< float >(native) / static_cast< float >(base);
+  }
+  int w = 0, h = 0;
   SDL_Window* window = MainWindow();
-  if (window != nullptr && SDL_GetWindowSizeInPixels(window, &width, &height) && height > 0) {
-    return static_cast< float >(height) / 480.f;
+  if (window != nullptr && SDL_GetWindowSizeInPixels(window, &w, &h) && h > 0) {
+    return static_cast< float >(h) / 480.f;
   }
   return 1.f;
+}
+
+int DrawnLines(float scale) {
+  uint32_t width = 0, height = 0;
+  if (aurora::frame_buffer_size_for_scale(scale, &width, &height)) {
+    return static_cast< int >(height);
+  }
+  return static_cast< int >(std::lround(scale * 480.f));
 }
 
 void SetCaptureRenderScale(float scale) {
@@ -403,9 +443,31 @@ bool CinemaBars() {
   return sCinemaBars || sOriginalExperience;
 }
 
+bool PhazonShell() {
+  EnsureInitialized();
+  return sPhazonShell;
+}
+
 bool SharpScanWindow() {
   EnsureInitialized();
   return sSharpScanWindow && !sOriginalExperience;
+}
+
+bool GeneratedBallLooks() {
+  EnsureInitialized();
+  return sGeneratedBallLooks && !sOriginalExperience;
+}
+
+void SetGeneratedBallLooks(bool enabled) {
+  EnsureInitialized();
+  if (sGeneratedBallLooks == enabled) {
+    return;
+  }
+  sGeneratedBallLooks = enabled;
+  MarkDirty();
+  if (PortBallLooks::Requested() != GeneratedBallLooks() && !PortMods::Suspended()) {
+    PortSaveState::RequestModReload();
+  }
 }
 
 const char* PromptGlyphs() {
@@ -438,6 +500,23 @@ void SetScanSpread(int percent) {
 bool AutoAim() {
   EnsureInitialized();
   return sAutoAim || sOriginalExperience;
+}
+
+float HintDelaySeconds() {
+  EnsureInitialized();
+  return sOriginalExperience ? 0.f : static_cast< float >(sHintDelay) * 60.f;
+}
+
+static bool sShowHintRequested = false;
+
+void RequestShowHint() {
+  sShowHintRequested = true;
+}
+
+bool ConsumeShowHintRequest() {
+  const bool requested = sShowHintRequested;
+  sShowHintRequested = false;
+  return requested;
 }
 
 float ScanSpeed() {
@@ -485,6 +564,17 @@ int CrosshairOpacity() {
   return sOriginalExperience ? kCrosshairOpacityMax : sCrosshairOpacity;
 }
 
+ECrosshairStyle CrosshairStyle() {
+  EnsureInitialized();
+  return sOriginalExperience ? kCrosshairStyle_Classic : sCrosshairStyle;
+}
+
+void SetCrosshairStyle(ECrosshairStyle style) {
+  EnsureInitialized();
+  sCrosshairStyle = style;
+  MarkDirty();
+}
+
 bool CrosshairColor(float rgb[3]) {
   EnsureInitialized();
   if (!sCrosshairCustomColor || sOriginalExperience) {
@@ -496,7 +586,7 @@ bool CrosshairColor(float rgb[3]) {
 
 bool HideHelmet() {
   EnsureInitialized();
-  return (sHideHelmet || PortPhoto::Active()) && !sOriginalExperience;
+  return (sHideHelmet || PortPhoto::Active() || PortThirdPerson::Active()) && !sOriginalExperience;
 }
 
 void SetHideHelmet(bool enabled) { StoreSetting(sHideHelmet, enabled); }
@@ -552,6 +642,31 @@ bool SkippableCutscenes() {
 }
 
 void SetSkippableCutscenes(bool enabled) { StoreSetting(sSkippableCutscenes, enabled); }
+
+bool BeamDoorsStayUnlocked() {
+  EnsureInitialized();
+  return sBeamDoorsStayUnlocked && !sOriginalExperience;
+}
+
+void SetBeamDoorsStayUnlocked(bool enabled) { StoreSetting(sBeamDoorsStayUnlocked, enabled); }
+
+bool StackBeams() {
+  EnsureInitialized();
+  return sStackBeams && !sOriginalExperience;
+}
+
+void SetStackBeams(bool enabled) { StoreSetting(sStackBeams, enabled); }
+
+int WalkSpeed() {
+  EnsureInitialized();
+  return sOriginalExperience ? kWalkSpeedRetail : sWalkSpeed;
+}
+
+void SetWalkSpeed(int percent) {
+  EnsureInitialized();
+  sWalkSpeed = std::clamp(percent, kWalkSpeedMin, kWalkSpeedMax);
+  MarkDirty();
+}
 
 bool Revision100Compatibility() { return Loaded(sRevision100Compatibility); }
 void SetRevision100Compatibility(bool enabled) { StoreSetting(sRevision100Compatibility, enabled); }
@@ -730,6 +845,14 @@ void BeginDriverWorkarounds(const std::string& userFolder, std::string& enable, 
     if (bits & (1u << i)) {
       append(enable, kDriverWorkarounds[i].enable);
       append(disable, kDriverWorkarounds[i].disable);
+      if (const char* var = kDriverWorkarounds[i].env; var != nullptr && port::EnvString(var) == nullptr) {
+#ifdef _WIN32
+        _putenv_s(var, "1");
+#else
+        setenv(var, "1", 1);
+#endif
+        PortLog::Write("port: driver workaround %s sets %s=1\n", kDriverWorkarounds[i].key, var);
+      }
     }
   }
   // A run on MP_DRIVER_WORKAROUNDS says nothing about the ticked boxes: it leaves the marker alone.
@@ -821,7 +944,7 @@ void SetMouseAim(bool enabled) {
 }
 
 bool TouchDirectAim() {
-#if defined(__ANDROID__)
+#if defined(PORT_TOUCH_CONTROLS)
   return !sInput.touchClassic && sTouchActive.load(std::memory_order_acquire) && !Visible();
 #else
   return false;
@@ -829,7 +952,7 @@ bool TouchDirectAim() {
 }
 
 bool TouchActive() {
-#if defined(__ANDROID__)
+#if defined(PORT_TOUCH_CONTROLS)
   return sTouchActive.load(std::memory_order_acquire) && !Visible();
 #else
   return false;
@@ -842,7 +965,7 @@ bool DirectAim() { return MouseAim() || TwinStick() || TouchDirectAim(); }
 // touch overlay always does what its buttons say. The F1 menu (Visible) sees the stored values.
 bool TwinStick() {
   EnsureInitialized();
-#if defined(__ANDROID__)
+#if defined(PORT_TOUCH_CONTROLS)
   // Touch has its own twin stick (the right stick aims), apart from the pad preset.
   if (TouchActive()) {
     return sInput.touchTwinStick;
@@ -852,6 +975,15 @@ bool TwinStick() {
 }
 
 bool PadTwinStick() { return Loaded(sInput.twinStick); }
+
+int PadShiftBinding() { return Loaded(sInput.shiftBindings[2]); }
+
+bool PadSwapScanXray() { return Loaded(sInput.swapScanXray); }
+
+int StoredPadAltButton(int bit) {
+  EnsureInitialized();
+  return bit >= 0 && bit < kPadAltCount ? sInput.padAltButtons[bit] : -1;
+}
 
 void SetTwinStick(bool enabled) { StoreSetting(sInput.twinStick, enabled); }
 
@@ -912,18 +1044,6 @@ bool DoubleTapDash() {
 
 void SetDoubleTapDash(bool enabled) { StoreSetting(sInput.doubleTapDash, enabled); }
 
-float WalkSpeed() {
-  EnsureInitialized();
-  return sOriginalExperience ? 1.f : sInput.walkSpeed;
-}
-
-void SetWalkSpeed(float scale) {
-  EnsureInitialized();
-  if (!std::isfinite(scale)) return;
-  sInput.walkSpeed = std::clamp(scale, PortInput::kWalkSpeedMin, PortInput::kWalkSpeedMax);
-  MarkDirty();
-}
-
 float DashSpeed() { return Loaded(sInput.dashSpeed); }
 
 void SetDashSpeed(float scale) {
@@ -964,6 +1084,13 @@ bool SwapScanXray() {
 }
 
 void SetSwapScanXray(bool enabled) { StoreSetting(sInput.swapScanXray, enabled); }
+
+bool RadialMenus() {
+  EnsureInitialized();
+  return sInput.radialMenus && !sOriginalExperience;
+}
+
+void SetRadialMenus(bool enabled) { StoreSetting(sInput.radialMenus, enabled); }
 
 int TurboBinding(int slot) {
   EnsureInitialized();
@@ -1074,13 +1201,20 @@ void SetOriginalExperience(bool enabled) {
   ResetDynamicRes();
   VISetFrameBufferScale(EffectiveRenderScale());
   ApplyGraphicsQuality();
-  if (PortMods::CurrentStatus().active != ModsEnabled() && !PortMods::Suspended()) {
+  if ((PortMods::CurrentStatus().active != ModsEnabled() ||
+       PortBallLooks::Requested() != GeneratedBallLooks() || PortSuitColours::Pending(!sOriginalExperience)) &&
+      !PortMods::Suspended()) {
     PortSaveState::RequestModReload();
   }
 }
 
 std::string ModsDisabled() { return Loaded(sModsDisabled); }
 void SetModsDisabled(const std::string& list) { StoreSetting(sModsDisabled, list); }
+std::string RemasteredHidden() {
+  const char* env = std::getenv("MP_REMASTERED_HIDE");
+  return env != nullptr ? std::string(env) : Loaded(sRemasteredHide);
+}
+void SetRemasteredHidden(const std::string& list) { StoreSetting(sRemasteredHide, list); }
 
 bool Invulnerable() {
   EnsureInitialized();
@@ -1093,6 +1227,9 @@ void SetInvulnerable(bool enabled) {
   sInvulnerableRun = -1;
   MarkDirty();
 }
+
+bool PhazonBeamCheat() { return Loaded(sPhazonBeamCheat); }
+void SetPhazonBeamCheat(bool enabled) { StoreSetting(sPhazonBeamCheat, enabled); }
 
 bool LogFile() { return Loaded(sLogFile); }
 void SetLogFile(bool enabled) { StoreSetting(sLogFile, enabled); }
@@ -1179,9 +1316,13 @@ void AddStickAim(float x, float y, float dt) {
   if (gpGameState != nullptr && gpGameState->GameOptions().GetInvertYAxis()) {
     y = -y;
   }
-  // x right / y up; the aim state expects SDL-style right/down positive.
-  const float travelX = x * sInput.stickAimRate * dt;
-  const float travelY = -y * (sInput.stickAimSplit ? sInput.stickAimRateY : sInput.stickAimRate) * dt;
+  // x right / y up; the aim state expects SDL-style right/down positive. The travel
+  // turns (and moves the pointer) by the mouse sensitivity, so divide that out: a stick
+  // pixel turns kAimPixelRadians whatever the mouse is set to (issue #209).
+  const float sensitivity = MouseSensitivity();
+  const float travelX = PortMouse::AimPixelsAsCounts(x * sInput.stickAimRate * dt, sensitivity);
+  const float travelY = PortMouse::AimPixelsAsCounts(
+      -y * (sInput.stickAimSplit ? sInput.stickAimRateY : sInput.stickAimRate) * dt, sensitivity);
   sMouseFrameX += travelX;
   sMouseFrameY += travelY;
   sStickFrameX += travelX;

@@ -3,6 +3,7 @@
 
 #include "types.h"
 #ifdef TARGET_PC
+#include "port_beam_doors.h"
 #include "port_map_marks.h"
 #endif
 
@@ -104,6 +105,20 @@ public:
   // The rooms the player marked on the map (PortMapMarks), the "RMMK" trailer
   // after the "PKSN" one.
   PortMapMarks::List& PortMapMarkList() { return xpc_mapMarks; }
+  // The beam doorways this save has had opened (PortBeamDoors), one bit per
+  // PortApWorld::BeamDoorwayBit. Not in the slot: the card keeps them in a side
+  // file (port_beam_doors.h), so a game state streamed in starts with none.
+  uint* PortBeamDoorBits() { return xpc_beamDoors; }
+  // The doorways as they were when the backup buffer was written: the slot
+  // can't carry them, so CMain::RefreshGameState (a continue after death) puts
+  // these back over the state it rebuilds from the buffer.
+  uint* PortBackupBeamDoorBits() { return xpc_backupBeamDoors; }
+  // After the live doorways were put back over a state just streamed in (whose
+  // backup buffer that state wrote, with none): the backup takes them too.
+  void PortBackUpBeamDoors() {
+    for (int i = 0; i < PortBeamDoors::kWords; ++i)
+      xpc_backupBeamDoors[i] = xpc_beamDoors[i];
+  }
 #endif
 
 private:
@@ -127,6 +142,8 @@ private:
   ApProgress xpc_apProgress;
   uint xpc_seenPickups[kPortSeenWords];
   PortMapMarks::List xpc_mapMarks;
+  uint xpc_beamDoors[PortBeamDoors::kWords];
+  uint xpc_backupBeamDoors[PortBeamDoors::kWords];
 #endif
 };
 CHECK_SIZEOF(CGameState, 0x230)

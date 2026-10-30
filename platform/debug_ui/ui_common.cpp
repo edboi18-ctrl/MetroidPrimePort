@@ -29,7 +29,7 @@
 #include <SDL3/SDL_timer.h>
 #include <SDL3/SDL_events.h>
 
-#if defined(__ANDROID__)
+#if defined(PORT_TOUCH_CONTROLS)
 #include "touch_pad.h"
 #endif
 
@@ -49,7 +49,7 @@ std::atomic< bool > sToggleRequested{false};
 // back to the old floating tabbed window (System > Overlay as a floating
 // window); MP_TOUCH_UI forces the page layout regardless.
 bool PageLayout() {
-#if defined(__ANDROID__)
+#if defined(PORT_TOUCH_CONTROLS)
   return true;
 #else
   static const bool sForced = port::EnvFlag("MP_TOUCH_UI");
@@ -471,6 +471,9 @@ void UpdateControllerNav() {
   if (!sEventWatchRegistered) {
     sEventWatchRegistered = true;
     SDL_AddEventWatch(debug_event_watch, nullptr);
+#if defined(PORT_TOUCH_OVERLAY)
+    InstallTouchOverlay();
+#endif
   }
   UpdateUiScale();
   ApplyThemeIfChanged();
@@ -523,7 +526,8 @@ void UpdateControllerNav() {
   // own pad polling off): a second one that disagrees about a key, as the
   // backend did with a stick held as a d-pad or with another pad than the
   // player's, queues two changes a frame where ImGui applies one.
-  SDL_Gamepad* pad = PADGetSDLGamepadForIndex(0);
+  const s32 padIndex = PADGetIndexForPort(PAD_CHAN0);
+  SDL_Gamepad* pad = PADGetSDLGamepadForIndex(padIndex >= 0 ? static_cast< u32 >(padIndex) : 0);
   // While the Controls tab captures a pad input, the pad binds instead of
   // navigating (releasing everything here also ends any nav press in progress).
   // A pad that went away releases everything the same way.

@@ -1,6 +1,9 @@
 #include "Kyoto/Particles/CParticleElectricDataFactory.hpp"
 
 #include "Kyoto/CRandom16.hpp"
+#ifdef TARGET_PC
+#include "Kyoto/Particles/CPortParticleParseScope.hpp"
+#endif
 #include "Kyoto/Particles/CElectricDescription.hpp"
 #include "Kyoto/Particles/CParticleDataFactory.hpp"
 #include "Kyoto/Streams/CInputStream.hpp"
@@ -52,6 +55,9 @@ void CParticleElectricDataFactory::LoadELSMTokens(CElectricDescription* desc) {
 bool CParticleElectricDataFactory::CreateELSM(CElectricDescription* desc, CInputStream& in,
                                               CSimplePool* pool) {
   bool done = false;
+#ifdef TARGET_PC
+  CPortParticleParseScope parseScope;
+#endif
   CRandom16 random(99);
   while (!done) {
     CGlobalRandom globalRandom(random);
@@ -196,6 +202,12 @@ bool CParticleElectricDataFactory::CreateELSM(CElectricDescription* desc, CInput
     case 'NCLR':
       desc->xPortNCLR = CParticleDataFactory::GetColorElement(in);
       break;
+    // Port-only Remastered transform mode; only 3 (bolts follow the emitter) is written.
+    case 'XFMD': {
+      CParticleDataFactory::GetClassID(in);
+      desc->xPortXfmdFollow = in.ReadLong() == 3;
+      break;
+    }
     case 'LLRD':
       desc->xPortLLRD = CParticleDataFactory::GetBool(in);
       break;

@@ -31,6 +31,7 @@
 #include "MetroidPrime/HUD/CHudDecoInterface.hpp"
 #include "MetroidPrime/HUD/CHudEnergyInterface.hpp"
 #include "MetroidPrime/HUD/CHudFreeLookInterface.hpp"
+#include "MetroidPrime/HUD/CHudRadialSelect.hpp"
 #include "MetroidPrime/HUD/CHudHelmetInterface.hpp"
 #include "MetroidPrime/HUD/CHudMissileInterface.hpp"
 #include "MetroidPrime/HUD/CHudRadarInterface.hpp"
@@ -38,6 +39,8 @@
 #include "MetroidPrime/HUD/CHudVisorBeamMenu.hpp"
 #include "MetroidPrime/Player/CGameState.hpp"
 #include "MetroidPrime/Player/CPlayer.hpp"
+#include "MetroidPrime/Player/CPlayerGun.hpp"
+#include "MetroidPrime/Player/CPlayerState.hpp"
 #include "MetroidPrime/Player/CPlayerCameraBob.hpp"
 #include "MetroidPrime/SFX/UI.h"
 #include "MetroidPrime/ScriptObjects/CScriptTrigger.hpp"
@@ -51,6 +54,8 @@
 #ifdef TARGET_PC
 #include "MetroidPrime/CActor.hpp"
 #include "port_debug.h"
+#include "port_disc.h"
+#include "port_radial.h"
 #endif
 
 #include <float.h>
@@ -479,6 +484,15 @@ CSamusHud::CSamusHud(const CStateManager& mgr)
 , x5a4_videoBands(4, SVideoBand())
 , x5d8_guiLights(4, nullptr)
 , x7ac_profileInfo(15, SProfileInfo()) {
+#ifdef TARGET_PC
+  // @ fn_801C5694: Trilogy's HUD panes read their text from STRG_Hud. It takes
+  // STRG_HudEngOnly instead when bit 4 of lbl_805C2768+0x20 is set (fn_800C9DEC). That flag is
+  // set outside the HUD and is not ported. Loaded before UpdateStateTransition builds the HUD.
+  if (PortDisc::IsTrilogy(PortDisc::Current())) {
+    xPortHudStrings = rs_new TLockedToken< CStringTable >(gpSimplePool->GetObj("STRG_Hud"));
+    sPortHudStrings = **xPortHudStrings;
+  }
+#endif
   UpdateStateTransition(1.f, mgr);
   spSamusHud = this;
   for (int i = 0; i < 16; ++i) {
@@ -541,7 +555,28 @@ CSamusHud::~CSamusHud() {
     CSfxManager::SfxStop(x50c_staticSfxLo);
   }
   spSamusHud = nullptr;
+#ifdef TARGET_PC
+  sPortHudStrings = nullptr;
+#endif
 }
+
+#ifdef TARGET_PC
+const CStringTable* CSamusHud::sPortHudStrings = nullptr;
+
+const wchar_t* CSamusHud::PortHudString(int mainIdx) {
+  if (sPortHudStrings != nullptr) {
+    return sPortHudStrings->GetString(mainIdx - 1);
+  }
+  return gpStringTable->GetString(mainIdx);
+}
+
+const wchar_t* CSamusHud::PortHudStringAt(int idx) {
+  if (sPortHudStrings != nullptr) {
+    return sPortHudStrings->GetString(idx);
+  }
+  return gpStringTable->GetString(idx);
+}
+#endif
 
 bool CSamusHud::CheckLoadComplete(const CStateManager& mgr) {
   switch (x4_loadPhase) {
@@ -753,7 +788,12 @@ void CSamusHud::UpdateEnergy(float dt, const CStateManager& mgr, bool init) {
         const float maxEnergy = mgr.GetTotalBossEnergy();
         const rstl::wstring name =
             rstl::wstring_l(gpStringTable->GetString(mgr.GetBossStringIdx()));
+#ifdef TARGET_PC
+        // @ fn_801C95A0: Trilogy hides the boss bar while a radial menu is open.
+        x2b4_bossEnergyIntf->SetBossParams(PortRadialOpen() <= 0.f, name, bossEnergy, maxEnergy);
+#else
         x2b4_bossEnergyIntf->SetBossParams(true, name, bossEnergy, maxEnergy);
+#endif
       } else {
         x2b4_bossEnergyIntf->SetBossParams(false, rstl::wstring_l(L""), 0.f, 0.f);
       }
@@ -1058,6 +1098,10 @@ void CSamusHud::UpdateHudDamage(float dt, const CStateManager& mgr, uint helmetV
       x3f4_damageFilterAmt > peak
           ? (x3f0_damageFilterAmtInit - x3f4_damageFilterAmt) / (x3f0_damageFilterAmtInit - peak)
           : x3f4_damageFilterAmt / peak;
+#ifdef TARGET_PC
+  // Remastered's s10: the ramp before the gain, capped at 0.05 (fcsel 0xcad8a4).
+  const float overrideMix = rstl::min_val(colorGain, 0.05f);
+#endif
   colorGain *= x3f8_damageFilterAmtGain;
   colorGain = CMath::Clamp(0.f, colorGain, 1.f);
 #ifdef TARGET_PC
@@ -1096,8 +1140,35 @@ void CSamusHud::UpdateHudDamage(float dt, const CStateManager& mgr, uint helmetV
       filterColor = filterColor.WithAlphaModulatedBy(0.75f);
     }
 #endif
+#ifdef TARGET_PC
+    // Remastered: a visor effect override (steam, goo, Burrower...) turns the damage filter into
+    // the radial fan, its colours mixed towards the damage colour by s10. s11 adds the pulser
+    // (hud+0x234, read as x3ec (unverified)) to the clamped gain.
+    const PortVisorOverrides::State& vo = mgr.PortVisorOverrideManager();
+    const float s11 = CMath::Clamp(0.f, colorGain + x3ec_damageLightPulser, 1.f);
+    if (remasteredTint && s11 != 1.f && PortVisorOverrides::HasDamageTintOverride(vo)) {
+      const float dmg[4] = {filterColor.GetRed(), filterColor.GetGreen(), filterColor.GetBlue(),
+                            filterColor.GetAlpha()};
+      float c0[4];
+      float c1[4];
+      for (int i = 0; i < 4; ++i) {
+        c0[i] = dmg[i] * overrideMix + vo.live[1][i] * (1.f - overrideMix);
+        c1[i] = dmg[i] * overrideMix + vo.live[0][i] * (1.f - overrideMix);
+      }
+      x3a8_camFilter.PortSetRadialFilter(CCameraFilterPass::kFT_Add, CColor::White(), c0, c1,
+                                         vo.live[2]);
+    } else
+#endif
     x3a8_camFilter.SetFilter(CCameraFilterPass::kFT_Add, CCameraFilterPass::kFS_Fullscreen, 0.f,
                              filterColor, kInvalidAssetId);
+#ifdef TARGET_PC
+  } else if (remasteredTint &&
+             PortVisorOverrides::HasDamageTintOverride(mgr.PortVisorOverrideManager())) {
+    // Not damaged: the override alone, as a Multiply fan {c0 VEMC, c1 VESC, c2 VETC}.
+    const PortVisorOverrides::State& vo = mgr.PortVisorOverrideManager();
+    x3a8_camFilter.PortSetRadialFilter(CCameraFilterPass::kFT_Multiply, CColor::White(),
+                                       vo.live[1], vo.live[0], vo.live[2]);
+#endif
   } else {
     x3a8_camFilter.DisableFilter(0.f);
   }
@@ -1402,6 +1473,17 @@ void CSamusHud::Update(float dt, const CStateManager& mgr, uint helmetVis, bool 
   if (!x2b4_bossEnergyIntf.null()) {
     x2b4_bossEnergyIntf->SetAlpha(1.f - messageTextAlpha);
   }
+#ifdef TARGET_PC
+  // @ fn_801C95A0 801C9BA8..801C9CBC: Trilogy also fades the energy warning under a message,
+  // by min(1 - message alpha, deco text alpha - radial menu alpha), the radial alpha being the
+  // larger open fraction of the two menus.
+  if (!x28c_energyIntf.null()) {
+    x28c_energyIntf->SetAlpha(PortDisc::IsTrilogy(PortDisc::Current())
+                                  ? rstl::min_val(1.f - messageTextAlpha,
+                                                  rstl::max_val(0.f, allTextAlpha - PortRadialOpen()))
+                                  : 1.f);
+  }
+#endif
   if (!x550_hudMemoString.null() && x550_hudMemoString->IsLoaded()) {
     SetMessage(rstl::wstring((**x550_hudMemoString)->GetString(x554_hudMemoIdx)),
                x548_hudMemoParms);
@@ -1534,6 +1616,34 @@ void CSamusHud::Update(float dt, const CStateManager& mgr, uint helmetVis, bool 
     x2a8_beamMenu->Update(dt, false);
   }
 #endif
+#ifdef TARGET_PC
+  // Trilogy: the radial menus update after the other HUD parts, visor then beam (fn_801C95A0).
+  {
+    const bool radial = PortDisc::IsTrilogy(PortDisc::Current()) && PortDebug::RadialMenus();
+    if (radial) {
+      for (int i = 0; i < 2; ++i) {
+        if (xPortRadial[i].null()) {
+          xPortRadial[i] = rs_new CHudRadialSelect(static_cast< CHudRadialSelect::EType >(i));
+        }
+        xPortRadial[i]->Update(dt, mgr);
+      }
+    } else {
+      xPortRadial[0] = nullptr;
+      xPortRadial[1] = nullptr;
+    }
+    PortRadial::SetState(radial, radial && xPortRadial[0]->IsOpen(),
+                         radial && xPortRadial[1]->IsOpen());
+    // fn_80075B58 (running, first-person camera) + fn_801878D4. The input tick reads this one
+    // HUD update late; the retail check runs in the same frame.
+    const CPlayer& player = *mgr.GetPlayer();
+    const bool ready = radial && mgr.GetGameState() == CStateManager::kGS_Running &&
+                       mgr.GetCameraManager()->IsInFPCamera() &&
+                       player.GetMorphballTransitionState() == CPlayer::kMS_Unmorphed &&
+                       player.GetPlayerGun()->PortTriRadialReady();
+    PortRadial::SetEligible(ready, ready && mgr.GetPlayerState()->GetActiveVisor(mgr) !=
+                                                CPlayerState::kPV_Scan);
+  }
+#endif
   UpdateCameraDebugSettings();
   if (!x29c_decoIntf.null()) {
     x29c_decoIntf->Update(dt, mgr);
@@ -1619,6 +1729,41 @@ void CSamusHud::DrawHelmet(const CStateManager& mgr, float camYOff) {
   }
 }
 
+#ifdef TARGET_PC
+bool CSamusHud::sPortTintFolded = false;
+
+void CSamusHud::PortSetTintFolded(bool folded) { sPortTintFolded = folded; }
+
+bool CSamusHud::PortCompositeRemastered() const {
+  // The Remastered HUD frames are the "Remastered mode" test (see UpdateHudDamage).
+  const bool remastered =
+      (x274_loadedFrmeBaseHud != nullptr && x274_loadedFrmeBaseHud->PortHasHudInterference()) ||
+      (x288_loadedSelectedHud != nullptr && x288_loadedSelectedHud->PortHasHudInterference());
+  return remastered && x2bc_nextState != kHS_None;
+}
+
+bool CSamusHud::PortCompositeTint(float rgba[4]) const {
+  CColor color;
+  if (!PortCompositeRemastered() || !x3a8_camFilter.PortAddColor(color)) {
+    return false;
+  }
+  // Slot A: UberPost material 0007259 adds clamp(c).rgb * clamp(c).a in the composite (kb:
+  // build/mpr/kb/topic/visorfx-damage-tint-steam-overrides.md). Slot B, the radial fan, is
+  // PortCompositeRadial.
+  rgba[0] = color.GetRed();
+  rgba[1] = color.GetGreen();
+  rgba[2] = color.GetBlue();
+  rgba[3] = color.GetAlpha();
+  return true;
+}
+
+bool CSamusHud::PortCompositeRadial(float c0[4], float c1[4], float c2[4]) const {
+  // Slot B: the radial filter (shape 0xd, the VE overrides' gradient) is always consumed by the
+  // UberPost composite (shader 00075d2); Remastered never draws it on its own.
+  return PortCompositeRemastered() && x3a8_camFilter.PortRadialGradient(c0, c1, c2);
+}
+#endif
+
 void CSamusHud::Draw(const CStateManager& mgr, float alpha, uint helmetVis, bool hudVis,
                      bool targetingManager) const {
   if (x2bc_nextState == kHS_None) {
@@ -1631,7 +1776,18 @@ void CSamusHud::Draw(const CStateManager& mgr, float alpha, uint helmetVis, bool
   } portDyinReset;
 #endif
   const CPlayer::EPlayerMorphBallState ballState = mgr.GetPlayer()->GetMorphballTransitionState();
+#ifdef TARGET_PC
+  CColor foldedTint;
+  float foldedRadial[3][4];
+  if (!(sPortTintFolded &&
+        (x3a8_camFilter.PortAddColor(foldedTint) ||
+         x3a8_camFilter.PortRadialGradient(foldedRadial[0], foldedRadial[1], foldedRadial[2])))) {
+    x3a8_camFilter.Draw();
+  }
+  sPortTintFolded = false;
+#else
   x3a8_camFilter.Draw();
+#endif
   if (ballState == CPlayer::kMS_Unmorphed) {
     DrawAttachedEnemyEffect(mgr);
     x51c_camFilter2.Draw();
@@ -1717,6 +1873,14 @@ void CSamusHud::Draw(const CStateManager& mgr, float alpha, uint helmetVis, bool
     }
     gpRender->SetDepthReadWrite(true, true);
   }
+#ifdef TARGET_PC
+  // Trilogy draws the radial menus last.
+  for (int i = 0; i < 2; ++i) {
+    if (!xPortRadial[i].null()) {
+      xPortRadial[i]->Draw();
+    }
+  }
+#endif
   x7ac_profileInfo[14].x8_drawUsec = timer.GetElapsedMicros();
 }
 
@@ -2074,3 +2238,15 @@ void CSamusHud::SetMessage(const rstl::wstring& text, const CHUDMemoParms& info)
     }
   }
 }
+
+#ifdef TARGET_PC
+float CSamusHud::PortRadialOpen() const {
+  float open = 0.f;
+  for (int i = 0; i < 2; ++i) {
+    if (!xPortRadial[i].null()) {
+      open = rstl::max_val(open, xPortRadial[i]->GetOpenFraction());
+    }
+  }
+  return open;
+}
+#endif

@@ -50,6 +50,9 @@ constexpr uint32_t kRoomController = 0x83cc17aa;
 constexpr uint32_t kTonemap = 0xddea916d;
 constexpr uint32_t kReflectionProbe = 0x27807e39;
 constexpr uint32_t kAutoExposureHint = 0x98694074;
+constexpr uint32_t kAutoExposureHintMP1 = 0x451c85b6;  // CAutoExposureHintMP1GOC: swaps two hints on the visor
+constexpr uint32_t kLinkExposureHintA = 0x9ea1739d;     // its link to the hint for the normal view
+constexpr uint32_t kLinkExposureHintB = 0x4ff221ac;     // its link to the thermal one
 constexpr uint32_t kBloomEffect = 0x7dcaf170;
 constexpr uint32_t kColorGrade = 0x6b091e44;
 constexpr uint32_t kColorGradeHint = 0xa36cd908;
@@ -108,6 +111,8 @@ constexpr uint32_t kPropRegionColor = 0xc35e3f33;
 constexpr uint32_t kPropLightType = 0x932dd7d8;
 constexpr uint32_t kPropLightColor[2] = {0xb73ed9c3, 0x8f421907};
 constexpr uint32_t kPropLightIntensity[2] = {0xc3eabcbf, 0xbdfc8a9e};
+// SLdrLightFlags (35b27754): byte 0, a103d675, is the cast bit (kb func/light-dynamic.md).
+constexpr uint32_t kPropLightFlags[2] = {0x35b27754, 0xa103d675};
 constexpr uint32_t kLightDirectional = 1;
 constexpr uint32_t kLightPoint = 2;
 constexpr uint32_t kLightSpot = 3;
@@ -191,12 +196,20 @@ constexpr uint32_t kPropFogWindVec = 0x0ad3c808;
 constexpr uint32_t kPropFogWindOn = 0x33c69fd5;
 constexpr uint32_t kPropHintMin = 0x682f8a1f;
 constexpr uint32_t kPropHintMax = 0x839d334c;
-constexpr uint32_t kPropHintMode = 0x590d6843;
+constexpr uint32_t kPropExposureHintPriority = 0x590d6843;
+constexpr uint32_t kPropHintMode = 0xa9aef33e;
+// LdrToEnum_AutoExposureFluidVisibilityEnum 0x89e9a0, table 0x1d16b5c.
+inline uint8_t ExposureHintMode(uint32_t value) {
+  return value == 0xe1fee72e ? 1 : value == 0xabccc097 ? 2 : 0;
+}
 constexpr uint32_t kPropHintBias = 0x038f85da;
 constexpr uint32_t kPropHintSigma = 0x3dace129;
 constexpr uint32_t kPropHintStaticLerp = 0xb9f6606a;
 constexpr uint32_t kPropModConMcon = 0xa8e2ba93;
 constexpr uint32_t kPropActorModel = 0xcb1c52f6;
+constexpr uint32_t kPlatformComponent = 0xa12967fb;
+constexpr uint32_t kPropPlatformModel = 0xf8b4c8da;
+constexpr uint32_t kPropPlatformAnim = 0xcee67c05;
 // Unnamed in retrotool's templates; what they mean is read off which actors carry them.
 constexpr uint32_t kPropActorAdded = 0x9a25df3b;
 // The actor's animation: a character (CHPR) and the name of the animation it plays, as an
@@ -487,7 +500,10 @@ public:
   // property list is a nested group, which is not a top level key.
   std::map<uint32_t, Span> Flat(const Component& c) const;
   // A property inside nested groups, named by the groups' ids and then its own.
-  bool Nested(const Component& c, std::initializer_list<uint32_t> path, Span& out) const;
+  bool Nested(const Component& c, std::initializer_list<uint32_t> path, Span& out) const {
+    return Nested(c, path.begin(), path.size(), out);
+  }
+  bool Nested(const Component& c, const uint32_t* path, size_t count, Span& out) const;
   // The `size` bytes at `offset` in the room's string pool (STRP); false when they lie outside it.
   bool String(uint32_t offset, uint32_t size, std::string& out) const {
     if (offset > m_strings.size || size > m_strings.size - offset) {
@@ -498,6 +514,8 @@ public:
   }
   // Where each resource id in the load units' lists (HEAD/LUNT/LRES) sits, in property byte order.
   const std::vector<size_t>& Listed() const { return m_listed; }
+  // The META chunk of the trailing form (FOOT) after the root one; size 0 when there is none.
+  const Span& Meta() const { return m_meta; }
   // Whether these 16 bytes occur anywhere in the room besides `at`.
   bool NamedElsewhere(size_t at) const {
     const uint8_t* id = m_d->data() + at;
@@ -523,6 +541,7 @@ private:
   std::vector<Component> m_comps;
   std::map<Id16, size_t> m_byGuid;
   Span m_strings;
+  Span m_meta;
   std::vector<size_t> m_listed;
   Blit m_blit;
 };
@@ -535,13 +554,25 @@ bool PropList(const uint8_t* b, size_t len, std::vector<Prop>* out);
 
 // A retail script object (SCLY), as far as matching Remastered's entities to it needs.
 struct ScriptObject {
+  // One connection: the state it is sent in and the message, as the enums in
+  // MetroidPrime/CEntityInfo.hpp number them, and the editor id it reaches.
+  struct Link {
+    uint32_t state = 0;
+    uint32_t message = 0;
+    uint32_t target = 0;
+  };
   uint32_t id = 0;  // editor id, layer bits included
   uint8_t type = 0;
   int layer = 0;    // the SCLY layer it is in
   uint32_t propCount = 0;
   std::vector<uint32_t> targets;  // of its connections
+  std::vector<Link> links;        // the same connections, with their state and message
   bool hasPos = false;            // the three floats after its name, for any type
   Vec3 pos{};
+  // The six floats after those: an editor transform's rotation (degrees) and scale for the
+  // types that start with one, anything for the others.
+  bool hasXf = false;
+  Vec3 rot{}, scale{};
   std::vector<uint8_t> props;     // from the end of its name on: what names its model
 };
 
@@ -575,6 +606,7 @@ constexpr uint32_t kActionDeactivate = 0xdd169ff3;
 constexpr uint32_t kActionIncrement = 0xd5883f10;
 constexpr uint32_t kActionDecrement = 0x767a0969;
 constexpr uint32_t kActionToggleActive = 0xcdeb03ba;
+constexpr uint32_t kActionAction = 0xd5be6778;  // Action (19): every Timer/Trigger -> SpecialFunction link
 // What an Entity is told to do with itself and every component it holds.
 constexpr uint32_t kActionEntityActivate = 0x41435456;    // 'ACTV'
 constexpr uint32_t kActionEntityDeactivate = 0x49435456;  // 'ICTV'
@@ -605,12 +637,41 @@ constexpr uint32_t kEventRelayFired = 0xb4a0c8c1;
 constexpr uint32_t kActionCounterIncrement = 0x787f7b2b;
 constexpr uint32_t kActionCounterDecrement = 0x93c513fb;
 constexpr uint32_t kActionRelayFire = 0xd432447e;
-constexpr uint32_t kActionTriggerActivate = 0x3067f115;
-constexpr uint32_t kActionTriggerDeactivate = 0xb5dd4543;
+// The EnvironmentFX colour intensity: CEnvFxDensityControllerMP1GOC applies its float property
+// kPropEnvFxIntensity (default 1) to CEnvFxManagerMP1 on the script action kActionEnvFxApply;
+// a RelayAutoFire fires its links when its layer loads (kb topic/rain-snow-splash-render.md (3)).
+constexpr uint32_t kEnvFxDensityController = 0x3c832ec7;
+constexpr uint32_t kRelayAutoFire = 0x7f6d1cba;
+constexpr uint32_t kPropEnvFxIntensity = 0x19da7ec9;
+constexpr uint32_t kActionEnvFxApply = 0x582c90b4;
+// ActorIceDarkenerMP1: on kActionIceDarken (AcceptScriptMsg 0xf79090) ApplyIceDarkeningFactor
+// 0xf798e0 gives every physics actor present its float kPropIceDarkeningFactor (props+8) through
+// SetIceDarkeningFactor 0xc4d200; kPropIceDarkenEveryFrame (props+0xc) makes Think 0xf796c4 do it
+// every frame instead. A TimerMP1 (kTimerMP1) starts itself when kPropTimerAutostart is set; a
+// ScriptRelayMP1 (kScriptRelayMP1) passes on kActionScriptRelayFire.
+constexpr uint32_t kIceDarkener = 0x427c6c50;
+constexpr uint32_t kActionIceDarken = 0xe63b4292;
+constexpr uint32_t kPropIceDarkeningFactor = 0x160e1c00;
+constexpr uint32_t kPropIceDarkenEveryFrame = 0x35a2afcb;
+constexpr uint32_t kTimerMP1 = 0x25c6d2a3;
+constexpr uint32_t kPropTimerAutostart = 0xd0ecc8ea;
+constexpr uint32_t kActionTimerStart[2] = {0xd63b8f04, 0x55193b90};
+constexpr uint32_t kScriptRelayMP1 = 0x1b78f9a4;
+constexpr uint32_t kActionScriptRelayFire = 0x379d362e;
+// A trigger's own Activate / Deactivate (CTriggerMP1GOC::TranslateScriptActionToMessage 0xf3e434:
+// msg 1 / msg 4; kb topic/triggermp1-active-state.md).
+constexpr uint32_t kActionTriggerActivate = 0xb5dd4543;
+constexpr uint32_t kActionTriggerDeactivate = 0x3067f115;
 // An ActorKeyframe's Play (retail kSS_Play) tells its actor to play the keyframe's
 // animation (property kPropKeyframeAnim, a name in STRP; kPropKeyframeLoop: it loops).
 constexpr uint32_t kActorKeyframeMP1 = 0x3ce6630a;
 constexpr uint32_t kActionPlayAnim = 0x7ae20cd8;
+// The same Play sent to a PlatformMP1: action hashes are per target type (the Watery Hall
+// gate's keyframe; ActorRotateMP1 drives platforms with it too).
+constexpr uint32_t kActionPlatformPlayAnim = 0x511ddd00;
+constexpr bool IsKeyframePlay(uint32_t action) {
+  return action == kActionPlayAnim || action == kActionPlatformPlayAnim;
+}
 constexpr uint32_t kPropKeyframeAnim = 0x589ff022;
 constexpr uint32_t kPropKeyframeLoop = 0x3c3ec403;
 // What turns a ColorGradeHint's request on and off, and the senders of it retail has no
@@ -622,6 +683,12 @@ constexpr uint32_t kActionHintOff = 0x332214ff;  // OffRequest
 // AcceptScriptMsg ignores every action but these, QueryHintState and (de)activation.
 constexpr uint32_t kActionHintRemove = 0x3580a822;
 constexpr uint32_t kActionHintDelete = 0x5844454c;  // 'DLEX'
+// What a VolumetricFogHint takes instead (CVolumetricFogHintGOC::AcceptScriptMsg 0x6b8c04):
+// AddHintRequest, RemoveHintRequest, and ReallyRemoveHint (as DLEX); also QueryHintState
+// (0x20c4c0f9) and (de)activation.
+constexpr uint32_t kActionFogHintOn = 0xb1766945;
+constexpr uint32_t kActionFogHintOff = 0xd8d934c6;
+constexpr uint32_t kActionFogHintRemove = 0x1c67758f;
 // What a VolumetricFogRegionTransition takes (its AcceptScriptMsg): Start, ResetAndStart,
 // Stop, DLEX and (de)activation, the entity's and the component's own.
 constexpr uint32_t kActionTransitionStart = 0x6c4d551c;
@@ -637,6 +704,14 @@ constexpr uint32_t kEventCameraWaterIn = 0x99655851;
 constexpr uint32_t kEventCameraWaterOut = 0x5b16cc17;
 constexpr uint32_t kEventCounterUp = 0x40e54906;
 constexpr uint32_t kEventCounterDown = 0xc163beb5;
+// SpecialFunctionMP1: the function (5, InventoryActivator) and its item (an EItemType); on
+// Action it sends Zero if the player has the item, MaxReached if not.
+constexpr uint32_t kSpecialFunction = 0x71337f4f;
+constexpr uint32_t kPropSpecialFunctionType = 0x0d86d1bf;
+constexpr uint32_t kPropSpecialFunctionItem = 0x04fc7524;
+constexpr uint32_t kSpecialFunctionInventoryActivator = 5;
+constexpr uint32_t kEventSpecialFunctionZero = 0x58951d90;
+constexpr uint32_t kEventSpecialFunctionMaxReached = 0x52583665;
 constexpr double kMatchTolerance = 0.02;
 constexpr double kMatchNear = 2.0;
 // A model carried over from retail, in a room's byte order (EffectRetailId); the last
@@ -645,6 +720,11 @@ constexpr uint8_t kRetailIdPrefix[12] = {0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x0
 constexpr uint8_t kRetailActor = 0x00;
 // How far Remastered moved a scenery actor off the retail one it stands for (0.38 at most).
 constexpr double kRetailActorNear = 0.5;
+// ChozoLore_Mat_B, the lore statues' glow sheet (port_remastered_convert_material.cpp's kShaderChozoLore).
+constexpr uint32_t kShaderChozoLoreSheet = 0x9D53CF06;
+// How far outside a Remastered stand-in model's world box a dropped retail Actor's origin
+// may lie and still be hidden with it (WriteGeometry): a floor's box is a few cm thick.
+constexpr double kStandinMargin = 0.25;
 // Retail's debris: what a scenery actor that breaks apart is made of, shown when it does.
 constexpr uint8_t kRetailDebris = 0x1B;
 constexpr uint8_t kRetailDebrisExtended = 0x45;
@@ -666,10 +746,64 @@ struct Connection {
   uint32_t event;
   uint32_t action;
   Id16 target;  // a component's guid
+  // The payload blocks: an IntCompareEventCriteria (kEnvCriteria: kPropCriteriaValue, kPropCriteriaOp)
+  // and an EnvironmentVarModifier's int (kEnvModifierPayload: kPropModifierPayloadValue), 0 when absent.
+  bool hasCriteria = false;
+  int32_t criteriaValue = 0;
+  uint32_t criteriaOp = 0;
+  bool hasPayload = false;
+  int32_t payloadValue = 0;
 };
+
+// Environment variables (kb topic/environment-var-query.md): an EnvironmentVarModifier sets, adds
+// to or subtracts from a world variable; an EnvironmentVarQuery sends kEventEnvQueryTrue on each
+// link whose criteria hold, on load and on change.
+constexpr uint32_t kEnvQuery = 0x4c183ebb;     // CEnvironmentVarQueryGOC
+constexpr uint32_t kEnvModifier = 0xf05bc9c3;  // EnvironmentVarModifier
+constexpr uint32_t kEnvCriteria = 0x96bcd2cf;  // IntCompareEventCriteria
+constexpr uint32_t kEnvModifierPayload = 0xc2add041;
+constexpr uint32_t kPropCriteriaValue = 0x68922137;
+constexpr uint32_t kPropCriteriaOp = 0x7ed94084;
+constexpr uint32_t kPropModifierPayloadValue = 0xe845edf4;
+constexpr uint32_t kPropModifierVar = 0xf2ccf18b;
+constexpr uint32_t kPropModifierValue = 0x789cebf4;
+constexpr uint32_t kPropQueryVar = 0xb11580e1;
+constexpr uint32_t kPropQueryOnLoad = 0x6bdef762;
+constexpr uint32_t kPropQueryOnChange = 0xdbe12b90;
+constexpr uint32_t kPropQuerySkipUnchanged = 0x7600c5bb;
+constexpr uint32_t kEventEnvQueryTrue = 0xfddbd7d4;
+// The modifier's actions: with the payload's value, or with its own (kPropModifierValue).
+constexpr uint32_t kActionEnvSetPayload = 0xf375af0f;
+constexpr uint32_t kActionEnvAddPayload = 0x1f0bf742;
+constexpr uint32_t kActionEnvSubPayload = 0xe39dfd33;
+constexpr uint32_t kActionEnvSet = 0xd00fd1eb;
+constexpr uint32_t kActionEnvAdd = 0xdd131cd6;
+constexpr uint32_t kActionEnvSub = 0x1e431630;
+// The op a connection into an EnvironmentVarModifier (`modifier`) asks for; false when its action
+// is none of the modifier's or the modifier names no variable.
+bool EnvModifierOp(const Room& room, const Component& modifier, const Connection& c, PortRoomEnv::EnvOp& op);
+// The world master's declared variables (the trailing form's META chunk); empty when it has none
+// or they do not read.
+std::vector<PortRoomEnv::EnvVar> ReadEnvVars(const Room& room);
 
 std::vector<Connection> ReadConnections(const Room& room);
 std::vector<int> ReadEntityLinks(const Room& room, size_t i);
+// The same links with their link ids: (u32 id, linked component or -1).
+std::vector<std::pair<uint32_t, int>> ReadEntityLinkIds(const Room& room, size_t i);
+// The EnvironmentFX colour intensity the room sets when it loads: the density controller (kEnvFxDensityController)
+// that a RelayAutoFire reaches, through Relays, with kActionEnvFxApply, else 1. A controller
+// nothing reaches at load (fired by a trigger, or by nothing) is left out, and noted in `notes`.
+float EnvFxIntensity(const Room& room, std::vector<std::string>& notes);
+// The ice darkeners the room fires at load (kb topic/frozen-enemy-icy-render.md): an
+// ActorIceDarkenerMP1 (kIceDarkener) told kActionIceDarken by an autostart TimerMP1 or a
+// RelayAutoFire, through non-autostart Timers (their start actions) and ScriptRelayMP1s. Each is
+// its factor (kPropIceDarkeningFactor, default 1) and the seconds after load the timers add. One
+// fired by anything else (a trigger, a camera) is left out, and noted in `notes`.
+struct IceDarkenerAtLoad {
+  float factor;
+  float delay;
+};
+std::vector<IceDarkenerAtLoad> IceDarkeners(const Room& room, std::vector<std::string>& notes);
 double MaxAbs(const Vec3& a, const Vec3& b);
 
 // What drives the scenery actors of a room.
@@ -680,6 +814,8 @@ struct SceneryScripts {
   std::map<int, std::string> unresolvedHow;              // a grade hint's: sender type/event/action
   std::map<std::string, std::pair<size_t, std::set<int>>> missStats;  // MP_REMASTERED_MISS: class -> connections, entities
   std::map<int, const ScriptObject*> platform;           // by entity: the platform carrying it
+  std::map<int, const ScriptObject*> platformTransform;  // own/co-driven retail platform, full transform
+  std::map<int, size_t> retail;                           // by entity: the retail object it matched
   size_t entities = 0, matched = 0;
   // Remastered's own objects in between (camera volumes, counters, relays) and the
   // entities they show and hide, by group number.
@@ -690,6 +826,14 @@ struct SceneryScripts {
   // in component order, which is the order the clips are written in.
   std::map<int, std::vector<size_t>> keyframes;
   size_t scriptUnresolved = 0;    // connections into the script not traced
+  // The room's own TriggerMP1s that switch its hints (kSenderRoomVolume + index), area space.
+  std::vector<PortRoomEnv::RoomVolume> roomVolumes;
+  // Environment variable ops (a room's: its room volumes' senders; the master's: world volumes'),
+  // and the master's query branches (kSenderEnvQuery + index) and declared variables.
+  std::vector<PortRoomEnv::EnvOp> envOps;
+  std::vector<PortRoomEnv::EnvBranch> envBranches;
+  std::vector<PortRoomEnv::EnvVar> envVars;
+  size_t envUnresolved = 0;  // connections into a modifier not traced (a Relay's, say)
   // A float driver of a material variable (see kRealNumberDriver): by the entity of each actor it
   // feeds. The importer checks that the actor's model binds the variable to a parameter it can
   // drive; the start links are in `links` under `driverStart`.
@@ -701,10 +845,50 @@ struct SceneryScripts {
   std::map<int, std::vector<Driver>> drivers;
 };
 
+// Remastered's own particle effect actors (port_remastered_room_effects.cpp).
+constexpr uint32_t kEffectMP1 = 0xb421cdcb;
+// The room's EffectMP1 actors the disc has no object for, as "<MREA id>.roomfx"
+// (port_room_effects.h); a line for the log, empty when there is nothing to say.
+std::string WriteRoomEffects(const std::string& name, const Room& room, uint32_t mrea, const Area& area,
+                             const SceneryScripts& scripts, const RoomIO& io);
+// The GENPs (in a pak's byte order) those actors are for: the room's unconnected ones, and the
+// barrier's ten when its graph validates.
+std::vector<std::array<uint8_t, 16>> RoomEffectGenpsOf(const Room& room);
+// The entities (their Entity components) that some connection in the room reaches.
+std::set<int> ConnectedEntities(const Room& room);
+
+// The Parasite Queen barrier's Remastered graph, which the import validates as a whole before
+// it treats the ten effects as anything but connected actors (port_queen_barrier_assets.h has
+// the ids). By ring, in the table's order: the PlatformMP1 whose component guid the table names,
+// the two EffectMP1s it has Active links to (the two-variable refraction family and the
+// one-variable glow one), and the WaypointMP1 its Play link names.
+struct BarrierRingRefs {
+  size_t platform = 0;
+  size_t refraction = 0;
+  size_t glow = 0;
+  size_t waypoint = 0;
+};
+struct BarrierGraph {
+  size_t controller = 0;  // the SpecialFunctionMP1 whose function is the ring controller
+  float duration = 0;     // seconds, its fourth float
+  std::array<BarrierRingRefs, 5> rings{};
+};
+// Whether the room ships that graph whole and unambiguous: one main controller, exactly its
+// fifteen links (five platforms, ten effects), each platform's two effects and one waypoint,
+// and one type 19 follower per platform-effect pair (unlinked ones are allowed). False for a
+// partial, mutated or ambiguous graph, and then nothing is admitted.
+bool BarrierGraphOf(const Room& room, BarrierGraph& out, std::string* why = nullptr);
+// The GENP (in a pak's byte order) of an EffectMP1 component, or an all-zero id when it has none.
+Id16 EffectGenpOf(const Room& room, size_t component);
+
 bool SingleDriverStart(const std::vector<PortRoomGeo::Link>& starts, PortRoomGeo::Link& first);
 int DriverSlot(const std::vector<PortRemastered::ModelMaterial>& materials, const SceneryScripts::Driver& d);
 std::map<int, std::vector<SceneryScripts::Driver>> FindMaterialDrivers(const Room& room, std::set<int>& driverStarts);
 SceneryScripts MatchScripts(const Room& room, const Area& area);
+uint32_t FluidSender(const Room& room, const std::map<int, std::vector<const Connection*>>& incoming,
+                     const Connection& c, int& state);
+void CameraBox(const Vec3& pos, const Vec3& rot, const Vec3& scale, float centre[3], float half[3], float axes[9]);
+SceneryScripts MasterScripts(const Room& room, const Vec3& shift, std::vector<PortRoomEnv::WorldVolume>& volumes);
 
 }  // namespace RoomDetail
 }  // namespace PortRemastered

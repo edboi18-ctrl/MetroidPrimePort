@@ -9,6 +9,7 @@
 #include "Kyoto/Graphics/CLight.hpp"
 #include "Kyoto/Math/CAABox.hpp"
 #include "Kyoto/Math/CMatrix3f.hpp"
+#include "Kyoto/Math/CQuaternion.hpp"
 #include "Kyoto/Math/CTransform4f.hpp"
 #include "Kyoto/Math/CVector3f.hpp"
 #include "Kyoto/Particles/CParticleGen.hpp"
@@ -19,7 +20,10 @@ class CModVectorElement;
 
 #pragma cpp_extensions on
 #ifdef TARGET_PC
+#include "Kyoto/Particles/CGenDescription.hpp" // PortKssmChild points at a CGenDescription::PortKssm
 #include "Kyoto/Particles/CPortVfxConstants.hpp"
+#include "Kyoto/Particles/PortParticleMath.hpp"
+#include <utility>
 #include <vector>
 struct CPortVfxMeshBatch;
 #endif
@@ -75,6 +79,7 @@ public:
     float xPortColor[4];   // COLR unclamped (HDR), for the VFX paths; x34_color is the clamped one
     float xPortVpmt[4][4]; // VPMT rows
     CVector3f xPortLaunchDir; // unit launch velocity (zero if it launched at rest), for VORN 1
+    SPortKeep xPortKeep;      // KPIN values latched at birth (CREPortKeep)
 #endif
 
     CParticle()
@@ -89,11 +94,17 @@ public:
     , xPortColor{1.f, 1.f, 1.f, 1.f}
     , xPortVpmt{}
     , xPortLaunchDir(CVector3f::Zero())
+    , xPortKeep{}
 #endif
     {}
   };
   struct CAdvancedValues {
+#ifdef TARGET_PC
+    // 0..8 ADV1..9 (ADV9 is Remastered's), 9..12 the bits of IAV0..3 (Remastered's int variables).
+    float values[13] = {};
+#else
     float values[8];
+#endif
   };
 
   CElementGen();
@@ -110,10 +121,30 @@ public:
   virtual void SetGlobalScale(const CVector3f& scale) override;
   virtual void SetLocalScale(const CVector3f& scale) override;
   virtual void SetParticleEmission(const bool emission) override;
+#ifdef TARGET_PC
+  // SHTM/SHTT (PSHM/PSHT). ShutdownEffect starts the countdown if the description has one, else
+  // acts at once; PortDoShutdownBehavior(0xff) uses the description's mode.
+  void ShutdownEffect() override;
+  void PortDoShutdownBehavior(u32 mode) override;
+  void PortSetSpawnSpread(const CVector3f& spread, const CVector3f& origin) override;
+  // SDTR: the countdown's remaining over its total, 1 when none is running.
+  float PortShutdownTimeRemaining() const;
+#endif
   virtual void SetModulationColor(const CColor& col) override;
   virtual void SetGeneratorRate(float rate) override;
+#ifdef TARGET_PC
+  // With INTR/INTT the owner reads back what it set, as Remastered's getters return the external
+  // vars (0x24d880/0x24d8ac); the system's own are PortSystemRotation/PortSystemTranslation.
+  virtual const CTransform4f& GetOrientation() const override {
+    return xPortIntFrame ? xPortExtOrientation : x1d8_orientation;
+  }
+  virtual const CVector3f& GetTranslation() const override {
+    return xPortIntFrame ? xPortExtTranslation : xdc_translation;
+  }
+#else
   virtual const CTransform4f& GetOrientation() const override { return x1d8_orientation; }
   virtual const CVector3f& GetTranslation() const override { return xdc_translation; }
+#endif
   virtual const CTransform4f& GetGlobalOrientation() const override;
   virtual const CVector3f& GetGlobalTranslation() const override;
   virtual const CVector3f& GetGlobalScale() const override { return x100_globalScale; }
@@ -142,7 +173,7 @@ public:
 
   bool InternalUpdate(double dt);
   void UpdateLightParameters();
-  void UpdateAdvanceAccessParameters(int, int);
+  void UpdateAdvanceAccessParameters(int, int, bool spawn = false);
   bool UpdateVelocitySource(int, int, CParticle&);
   void UpdateExistingParticles();
   void CreateNewParticles(int);
@@ -169,6 +200,9 @@ public:
   bool IsIndirectTextured()
       const; // { return x28_loadedGenDesc->x54_x40_TEXR && x28_loadedGenDesc->x58_x44_TIND; }
   void SetExternalVar(int index, float val);
+#ifdef TARGET_PC
+  const float* PortExternalVars() const { return xPortExternalSet ? x9c_externalVars : nullptr; }
+#endif
   float GetExternalVar(int index) const;
 
   static void Initialize();
@@ -218,17 +252,59 @@ public:
                      globalTranslation.GetZ() + transformed.GetZ());
   }
   static void PortSetNestedHdrCarrier(CLight& light, const float sourceRgba[4], float intensity,
-                                      float innerRadius, float outerRadius) {
+                                      float innerRadius, float outerRadius,
+                                      u8 falloff = CLight::kPHF_Smooth) {
     const float linearColor[3] = {sourceRgba[0] * intensity, sourceRgba[1] * intensity,
                                   sourceRgba[2] * intensity};
     const CVector3f noOffset = CVector3f::Zero();
     light.SetPosition(noOffset);
-    light.SetPortHdr(linearColor, noOffset, innerRadius, outerRadius, CLight::kPHF_Smooth);
+    // Draws without PBR (TEV) take the retail light: GetLight's custom light carries the raw LINT
+    // (up to 256) as its angle constant over 1/d^2, which whites out everything near it. Give it
+    // the same intensity, bounded at the source and at half strength halfway to the outer radius.
+    const float half = outerRadius > 0.f ? 0.5f * outerRadius : 1.f;
+    light.SetAttenuation(1.f, 0.f, 1.f / (half * half));
+    light.SetAngleAttenuation(intensity, 0.f, 0.f);
+    light.SetPortHdr(linearColor, noOffset, innerRadius, outerRadius,
+                      static_cast< CLight::EPortHdrFalloff >(falloff & 3));
     light.SetPortHdrBoundsRadius(outerRadius);
   }
   CVector3f PortSystemOrigin() const { return PortWorldFromLocal(xdc_translation); }
+  // Remastered's external translation/rotation/scale (EXTT/EXTR/EXTS, system vars 0xb/0xc/0xa):
+  // what the owner hands CParticleGen::SetExternalDataSet 0x27b3d8. Remastered has one translation,
+  // one rotation and no local scale; the port's retail split is folded into them. With INTT/INTR
+  // (PINT/PINR) they are what the owner set, not the system's own (PortApplyIntFrame).
+  CVector3f PortExternalTranslation() const {
+    return xe8_globalTranslation + (xPortIntFrame ? xPortExtTranslation : xdc_translation);
+  }
+  CQuaternion PortExternalRotation() const {
+    return xPortIntFrame ? CQuaternion::FromMatrix(xPortExtGlobalOrientation * xPortExtOrientation)
+                         : PortSystemRotation();
+  }
+  // The system translation/rotation (Compile 0x289af0 +0x3c/+0x38): INTT/INTR's when authored,
+  // else the external ones.
+  CVector3f PortSystemTranslation() const { return xe8_globalTranslation + xdc_translation; }
+  CQuaternion PortSystemRotation() const {
+    return CQuaternion::FromMatrix(x22c_globalOrientation * x1d8_orientation);
+  }
+  CVector3f PortExternalScale() const {
+    return CVector3f(xPortExternalScale.GetX() * x16c_localScale.GetX(),
+                     xPortExternalScale.GetY() * x16c_localScale.GetY(),
+                     xPortExternalScale.GetZ() * x16c_localScale.GetZ());
+  }
+  // The global frame T_g/Q_g/S_g (desc +0xa8/+0xac/+0xb0, SetupTransformMode 0x2887d8) for the
+  // XFMD mode: 2 = zero/identity/external scale, 3 = the external T/Q/S, 4 = the mover's
+  // position and rotation (the external T/Q for the identity SMVR the converter drops) at unit scale.
+  void PortGlobalFrame(CVector3f& t, CQuaternion& q, CVector3f& s) const;
   // True for a converted Remastered PART (its PIRN marker).
   bool PortIsRemastered() const;
+  // Remastered _CreateNewParticlesAtPositions / ...IncludingChildren (0x24c0dc / 0x24bfd0): n
+  // particles at the given local positions, at rest, the PART children first.
+  void PortCreateParticlesAtPositions(int n, const CVector3f* pos);
+  const CGenDescription* PortDesc() const { return x28_loadedGenDesc; }
+  // The PART id this system was built from (Remastered compares a generator's desc id).
+  CAssetId PortDescId() const { return x1c_genDesc.GetTag().GetId(); }
+  int PortCurFrame() const { return x74_curFrame; }
+  void PortCreateParticlesAtPositionsIncludingChildren(int n, const CVector3f* pos);
   // Remastered particle variables (PVRT): a handle is looked up once and then binds are cheap.
   // Binds are generator-wide, persist until rebound, and are no-ops when the variable is absent.
   u16 PortGetRealHandle(const PortGuid& g) const { return xPortVars.Find(g, EPortVarType::Real); }
@@ -249,11 +325,21 @@ public:
   void PortBindVector(const PortGuid& g, const CVector3f& v) {
     xPortVars.BindVector(PortGetVectorHandle(g), v);
   }
+  void PortBindExternal(const SPortExternalVar& v) { xPortVars.BindExternal(v); }
   const CPortVarMemory& PortVars() const { return xPortVars; }
   // The global translation just set is already the presented one (placed from
   // the presented camera on every drawn frame): draw it as is, unblended.
   void PortGlobalIsPresented();
-  void PortCollectNestedLightSnapshots(std::vector< CPortNestedLightSnapshot >& out) const;
+  // A Remastered HUD billboard's scene: the local scale is in camera axes and model particles are
+  // pushed out from the eye by eyeScale (CHUDBillboardEffect::PreRender). 0 = a world effect.
+  void PortSetHudScene(float eyeScale);
+  // The lights of the active nested child generators (PHDR); not this generator's own, which the
+  // host carries as the retail root light.
+  void PortCollectNestedLightSnapshots(std::vector< CPortNestedLightSnapshot >& out) const {
+    PortCollectNestedLightSnapshots(out, false);
+  }
+  void PortCollectNestedLightSnapshots(std::vector< CPortNestedLightSnapshot >& out,
+                                       bool includeSelf) const;
 #endif
 
 private:
@@ -275,6 +361,11 @@ private:
   short x94_randomSeed;
   float x98_generatorRate;
   float x9c_externalVars[16];
+#ifdef TARGET_PC
+  // port-only: SetExternalVar was called (Remastered's external data block exists); a PMXV reads
+  // x9c_externalVars then, else its fallback
+  bool xPortExternalSet = false;
+#endif
   CVector3f xdc_translation;
   CVector3f xe8_globalTranslation;
   CVector3f xf4_POFS;
@@ -315,6 +406,12 @@ private:
   };
   CRandom16 x27c_randState;
   CModVectorElement* x280_VELSources[4];
+#ifdef TARGET_PC
+  bool xPortVelFinalizes = false;
+  bool xPortVelocityGlobal[4] = {}; // packed alongside x280_VELSources, as Fixup 0x292ed4
+  int xPortShutdownCountdown = -1; // ticks to the delayed shutdown, -1 = not counting
+  int xPortShutdownTotal = 0;
+#endif
   rstl::vector< CParticleGen* > x290_activePartChildren;
   int x2a0_CSSD;
   int x2a4_SISY;
@@ -379,6 +476,98 @@ private:
   float xPortNestedHdrColor[4];
   float xPortNestedHdrInnerRadius, xPortNestedHdrOuterRadius;
   bool xPortNestedHdrRadiiValid;
+  // A converted Remastered system keeps its seed as 32 bits (x94 is 16): the SEED value, else the
+  // seed it was built with (sPortChildSeed for a Remastered child, else sSeed).
+  uint xPortSeed;
+  // The seed a Remastered parent gives the child it constructs next; consumed by that ctor.
+  static uint sPortChildSeed;
+  static bool sPortChildSeedSet;
+  uint PortChildSeed(const CGenDescription& child) const;
+  // Remastered's CElementGen::SpawnChildSystems (0x249bd8) for a converted effect, and its
+  // spawn tables (PKSM); xPortKssmPeriods are the tables' period slots (their CVars).
+  std::vector< int > xPortKssmPeriods;
+  void PortSpawnChildSystems();
+  void PortSpawnTables();
+  void PortSpawnTableEntry(size_t table, int frame);
+  void PortAddChild(CParticleGen* child);
+  // A child a spawn table placed with an SEVT(SMOV) component: its own frame, the pos slot and
+  // the mover's velocity, the rot it ended on, and the KPIN/IRND latches. `placed` is the world
+  // position the child is held at (child T = placed - its GT); with hasRot its orientation is
+  // held at `rot` the same way. The parent's propagation leaves what the component holds alone.
+  // The tree runs in Remastered's particle space (CVEPortBasis): remPos and vel are in it, pos,
+  // rot and rotQuat are remPos and the tree's rotation taken to the port's.
+  struct PortKssmChild {
+    const CGenDescription::PortKssm* kssm = nullptr; // holds its component and nodes
+    CParticleGen* child = nullptr;
+    u32 component = 0;
+    int frame = 0;
+    CVector3f remPos = CVector3f::Zero();
+    CVector3f pos = CVector3f::Zero();
+    CVector3f vel = CVector3f::Zero();
+    CTransform4f rot = CTransform4f::Identity();
+    CQuaternion rotQuat = CQuaternion::NoRotation();
+    bool hasRot = false;
+    std::vector< float > latches;
+  };
+  std::vector< PortKssmChild > xPortKssmChildren;
+  PortKssmChild* PortFindKssmChild(const CParticleGen* child);
+  float PortKssmReal(PortKssmChild& state, u32 node);
+  CVector3f PortKssmVector(PortKssmChild& state, u32 node);
+  CQuaternion PortKssmRotation(PortKssmChild& state, u32 node);
+  void PortKssmEvaluate(PortKssmChild& state);
+  void PortKssmPlace(const PortKssmChild& state);
+  // XFMD 4's SMVR (CGenDescription::xPortMover), a system-scoped mover: initialised by the first
+  // Update, stepped at the start of each tick. Its pos/rot are T_g/Q_g.
+  PortKssmChild xPortMover;
+  bool xPortMoverInit = false;
+public:
+  // PLNV's index shufflers, one per element (CIndexShuffler's bitset lives in the generator's
+  // variable memory); created zeroed on first use.
+  std::vector< std::pair< const void*, PortParticleMath::IndexShuffler > > xPortShufflers;
+  PortParticleMath::IndexShuffler& PortShuffler(const void* element) {
+    for (auto& entry : xPortShufflers) {
+      if (entry.first == element) {
+        return entry.second;
+      }
+    }
+    xPortShufflers.emplace_back(element, PortParticleMath::IndexShuffler());
+    return xPortShufflers.back().second;
+  }
+  // PEMV (Remastered EMRV, var 0x16, CVEVelocityCalc): the change of the system translation (over
+  // its scale, per component) since the previous tick, 0 on the first. Updated once per tick.
+  CVector3f xPortPemvPrev = CVector3f::Zero();
+  CVector3f xPortPemvDelta = CVector3f::Zero();
+  bool xPortPemvStarted = false;
+  void PortStepPemv();
+  const CVector3f& PortEmitterVelocity() const { return xPortPemvDelta; }
+  // PZTS (Remastered ZTES 0): the depth test passes everywhere (static render state compare 1 = ALWAYS)
+  bool PortNoZTest() const { return x28_loadedGenDesc->xPortNoZTest; }
+
+private:
+  bool PortHasMover() const;
+  void PortInitMover();
+  void PortEvalSys(bool init);
+  void PortStepMover();
+  // The system scale: INTS (PINS) evaluated when authored, else the external scale.
+  CVector3f PortSystemScale();
+  void PortSetSystemScale(const CVector3f& scale);
+  // The scale the owner (or parent) set, which EXTS reads; x100_globalScale is the system's.
+  CVector3f xPortExternalScale{1.f, 1.f, 1.f};
+  // The system orientation and translation: INTR (PINR) and INTT (PINT) evaluated, applied as
+  // x22c = identity, x1d8 = INTR and xdc = INTT - xe8 (xe8 stays the owner's), and handed to the
+  // children. force = the external values changed; otherwise only a changed value is applied.
+  void PortApplyIntFrame(bool force);
+  // A PINR or PINT outside XFMD 4 (whose mover overrides them): the setters keep the owner's
+  // orientations and local translation here, which EXTR/EXTT and the getters read.
+  bool xPortIntFrame = false;
+  CVector3f xPortSpawnSpread{1.f, 1.f, 1.f};
+  float xPortHudEyeScale = 0.f;
+  CVector3f PortSpreadSpawn(const CVector3f& rel) const;
+  CTransform4f xPortExtOrientation = CTransform4f::Identity();
+  CTransform4f xPortExtGlobalOrientation = CTransform4f::Identity();
+  CVector3f xPortExtTranslation{0.f, 0.f, 0.f};
+  CVector3f xPortIntEuler{0.f, 0.f, 0.f};
+  CVector3f xPortIntTranslation{0.f, 0.f, 0.f};
   void PortVfxUpdateSystem();
   // XFMD 3/4: the spawn-baked part of the emitter's transform, and moving the live particles from
   // one such frame to the next.
@@ -386,6 +575,7 @@ private:
   CTransform4f PortEmitterFrame() const;
   void PortFollowEmitter(const CTransform4f& before);
   void PortRenderParticlesVfx();
+  void PortRenderPlanarVfx(const CParticle& particle, int frame);
   void PortRenderMeshesVfx(CPortVfxMeshBatch& batch);
 #endif
 

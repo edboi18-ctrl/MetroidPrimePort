@@ -136,7 +136,7 @@ in `assets/`, and no `.iso`, `.pak` or `.strg` is in the package. An earlier
 revision of this section recorded the signer as `d8814c79…` and six notices; both
 were wrong.
 
-The port targets `versionName "0.28.1"` and `versionCode 32`. A version bump
+The port targets `versionName "0.36.0"` and `versionCode 44`. A version bump
 also adds a `<release>` entry (newest first) to
 `packaging/io.github.odrannnn.metroidprimeport.metainfo.xml`, which is the
 version Flatpak reports; `tools/make_flatpak.sh` stops if the two differ.
@@ -152,19 +152,34 @@ version Flatpak reports; `tools/make_flatpak.sh` stops if the two differ.
      `gh run download <id> -n metroid_prime_port-linux`. Rename the tarball to
      `metroid-prime-port-X-linux-x86_64.tar.gz` (its top directory stays
      unversioned); the AppImage keeps the name `MetroidPrime-x86_64.AppImage`.
+     The same run's `metroid_prime_port-linux-aarch64` artifact gives
+     `metroid-prime-port-X-linux-aarch64.tar.gz` and `MetroidPrime-aarch64.AppImage`
+     the same way. Each artifact also holds the binary's split-off debug info,
+     `metroid-prime-port-linux-<arch>.debug`: attach it as
+     `metroid-prime-port-X-linux-<arch>.debug`, so a crash log's
+     `metroid_prime_port+0x…` offsets stay readable with
+     `addr2line -fCi -e metroid-prime-port-X-linux-<arch>.debug 0x…`.
    - Windows: run `windows.yml`, `gh run download <id> -n metroid_prime_port-windows`,
      drop CI's `user/` folder (log, `dawn_cache.db`, `pipeline_cache.db`), and zip
-     the rest as `metroid-prime-port-X-windows-x86_64.zip`.
+     the rest as `metroid-prime-port-X-windows-x86_64.zip`. The same run's
+     `metroid_prime_port-windows-arm64` artifact becomes
+     `metroid-prime-port-X-windows-arm64.zip` the same way.
    - macOS: run `macos.yml`, download its artifact and zip `Metroid Prime Port.app`
      and `licenses/` as `metroid-prime-port-X-macos-arm64.zip`.
    - Flatpak: `tools/make_flatpak.sh` (committed `port` branch), shipped as
      `MetroidPrimePort.flatpak`.
    - Android: the signed APK, staged as `metroid-prime-port-X-android-arm64.apk`.
+   - iOS: run `ios.yml`, `gh run download <id> -n metroid_prime_port-ios`, and ship
+     the unsigned `MetroidPrimePort.ipa` under that name (`docs/IOS.md` points at it).
 
-   Every release ships all six assets (AppImage, tarball, Flatpak, Windows,
-   macOS, APK); start all the builds together.
-3. Check each artefact's version string, then `git tag -a vX` and `git push user vX`.
-4. `gh release create vX --notes-file …` with every asset passed explicitly, and
+   Every release ships all ten assets (AppImage and tarball, each x86_64 and
+   aarch64, Flatpak, Windows x86_64 and arm64, macOS, APK, IPA), plus the two
+   Linux `.debug` files; start all the builds together.
+3. Crash soak the release commit before tagging:
+   `python3 tools/mpsoak.py --evidence-dir build/s-release-<date>/soak`; every
+   row in `summary.tsv` must be `ok` (a `warn` only after reading it), exit 0.
+4. Check each artefact's version string, then `git tag -a vX` and `git push user vX`.
+5. `gh release create vX --notes-file …` with every asset passed explicitly, and
    confirm with `gh release view vX --json assets`. Base the notes on the
    previous release's.
 
@@ -173,10 +188,11 @@ version Flatpak reports; `tools/make_flatpak.sh` stops if the two differ.
 | Platform | Builds from | Produces | State |
 |---|---|---|---|
 | Linux | `cmake -S . -B build/port-gcc` | executable | works; tests green. `cmake --install` also produces a complete tree, verified by running it |
-| Linux | `.github/workflows/linux-release.yml` | AppImage + tarball | manual trigger; builds on AlmaLinux 9 and runs `tools/make_appimage.sh`. Use these for releases, not a desktop build |
+| Linux | `.github/workflows/linux-release.yml` | AppImage + tarball, x86_64 and aarch64 | manual trigger; builds on AlmaLinux 9 and runs `tools/make_appimage.sh`. Use these for releases, not a desktop build. aarch64 builds natively on `ubuntu-24.04-arm`, never run on real arm64 Linux hardware |
 | Linux | `tools/make_flatpak.sh` | Flatpak | manifest installs a working tree and collects notices; builds (`tools/make_flatpak.sh` writes `build/flatpak/MetroidPrimePort.flatpak`). The app id is `io.github.odrannnn.metroidprimeport`, with AppStream metainfo shipped |
-| Windows | `.github/workflows/windows.yml` | zipped `dist/` | weekly (Mondays) and manual trigger; green when run, artifact uploaded, packaged startup checked |
+| Windows | `.github/workflows/windows.yml` | zipped `dist/`, x64 and arm64 | weekly (Mondays) and manual trigger; green when run, artifact uploaded, packaged startup checked. arm64 builds natively on `windows-11-arm` with vcpkg's OpenSSL, never run on a real Windows on Arm machine |
 | macOS | `.github/workflows/macos.yml` | ad-hoc signed `.app` (arm64) + `licenses/` | experimental; weekly and manual trigger; builds, tests and packaged startup checked in CI, never run on a real Mac |
+| iOS | `.github/workflows/ios.yml` | unsigned `.ipa` (arm64, iOS 16+) | manual trigger; device build only, never run on a real iPhone or iPad (`docs/IOS.md`) |
 | Android | `tools/android_apk.sh :app:assembleRelease` | APK | builds, signed with this project's own key; runs on-device (POCO F8 Ultra, 60 FPS), touch/Continue-load still unverified |
 
 The Linux binary is the only one with a test suite attached: 54 `port`-labelled

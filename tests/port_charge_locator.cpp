@@ -45,12 +45,6 @@ struct CGeneratorRecorder {
     out[2] = translation[2] + rotation[6] * x + rotation[7] * y + rotation[8] * z;
   }
 
-  float Determinant() const {
-    return rotation[0] * (rotation[4] * rotation[8] - rotation[5] * rotation[7]) -
-           rotation[1] * (rotation[3] * rotation[8] - rotation[5] * rotation[6]) +
-           rotation[2] * (rotation[3] * rotation[7] - rotation[4] * rotation[6]);
-  }
-
   bool remastered;
   int orientationCalls;
   int translationCalls;
@@ -67,138 +61,63 @@ const CTransform4f SampledPowerLocator(0.999993f, 0.003689f, -0.000819f, 0.00705
                                        -0.003690f, 0.999992f, -0.001245f, 1.28631f,
                                        0.000815f, 0.001248f, 0.999999f, 0.00166f);
 
-// An exact, trig-free rotated sample, a quarter turn about the third axis, with a
-// translation: distinct from the muzzle basis, so composing it and passing it through give
-// visibly different matrices.
+// An exact, trig-free rotated sample, a quarter turn about the third axis, with a translation.
 const CTransform4f QuarterTurnLocator(0.f, -1.f, 0.f, 0.5f,
                                       1.f, 0.f, 0.f, -0.25f,
                                       0.f, 0.f, 1.f, 0.f);
 
-void TestConvertedChargeEffectGetsMuzzleBasis() {
-  CGeneratorRecorder generator(true);
-  NPortChargeFxDetail::SetLocalLocator(generator, IdentityLocator, true);
+// A general Rz * Ry sample: every column nontrivial.
+const CTransform4f RotatedLocator(0.48f, -0.8f, 0.36f, -2.5f,
+                                  0.64f, 0.6f, 0.48f, 3.75f,
+                                  -0.6f, 0.f, 0.8f, -0.125f);
 
-  CHECK_MSG(generator.orientationCalls == 1, "converted charge effect receives an orientation");
-  CHECK_MSG(generator.translationCalls == 1, "converted charge effect receives a translation");
-  // Rx(+90): columns (1,0,0), (0,0,1), (0,-1,0), i.e. rows (1,0,0), (0,0,-1), (0,1,0).
-  const float expected[9] = {1.f, 0.f, 0.f, 0.f, 0.f, -1.f, 0.f, 1.f, 0.f};
+void TestConvertedTakesTheSampledLocator(const CTransform4f& locator) {
+  CGeneratorRecorder generator(true);
+  NPortChargeFxDetail::SetLocalLocator(generator, locator);
+  CHECK_MSG(generator.orientationCalls == 1 && generator.translationCalls == 1,
+            "converted effect receives exactly one full locator");
+  const float sampled[9] = {locator.Get00(), locator.Get01(), locator.Get02(),
+                            locator.Get10(), locator.Get11(), locator.Get12(),
+                            locator.Get20(), locator.Get21(), locator.Get22()};
+  const float translation[3] = {locator.Get03(), locator.Get13(), locator.Get23()};
   for (int i = 0; i < 9; ++i) {
-    CHECK_MSG(Near(generator.rotation[i], expected[i]), "muzzle basis entry matches Rx(+90)");
+    CHECK_MSG(generator.rotation[i] == sampled[i], "converted effect keeps the sampled rotation");
   }
-  CHECK_MSG(Near(generator.Determinant(), 1.f), "muzzle basis determinant is +1 (a rotation)");
-  const float column1[3] = {expected[1], expected[4], expected[7]};
-  const float column2[3] = {expected[2], expected[5], expected[8]};
-  CHECK_MSG(Near(expected[0], 1.f) && Near(expected[3], 0.f) && Near(expected[6], 0.f),
-            "local +X stays the gun's X (right)");
-  CHECK_MSG(Near(column1[0], 0.f) && Near(column1[1], 0.f) && Near(column1[2], 1.f),
-            "local +Y becomes the gun's +Z (up)");
-  CHECK_MSG(Near(column2[0], 0.f) && Near(column2[1], -1.f) && Near(column2[2], 0.f),
-            "local +Z becomes the gun's -Y (back along the barrel)");
-}
-
-void TestSampledTranslationIsUnchanged() {
-  CGeneratorRecorder generator(true);
-  NPortChargeFxDetail::SetLocalLocator(generator, SampledPowerLocator, true);
-  CHECK_MSG(Near(generator.translation[0], 0.00705f) && Near(generator.translation[1], 1.28631f) &&
-                Near(generator.translation[2], 0.00166f),
-            "muzzle-frame compose keeps the sampled locator translation");
-  CHECK_MSG(Near(generator.Determinant(), 1.f), "composed sampled rotation stays a +1 rotation");
-}
-
-void TestAuthoredSourceOffsetMapsBackAlongBarrel() {
-  // The Power charge tree's authored EMTR (0, 0, 0.15) at global scale 2 = (0, 0, 0.30) in
-  // the generator's local frame; the fix must put it 0.30 back down the barrel (gun-local -Y).
-  CGeneratorRecorder generator(true);
-  NPortChargeFxDetail::SetLocalLocator(generator, SampledPowerLocator, true);
-  float out[3];
-  generator.ChildOffset(0.f, 0.f, 0.15f * 2.f, out);
-  // The offset from the locator, so the pose-dependent translation cancels; the sampled
-  // rotation's ~0.2 deg tilt shows up only as a sub-millimetre lateral term.
-  const float delta[3] = {out[0] - generator.translation[0], out[1] - generator.translation[1],
-                          out[2] - generator.translation[2]};
-  CHECK_MSG(delta[0] > -0.002f && delta[0] < 0.002f && Near(delta[1], -0.30f) && delta[2] > -0.002f &&
-                delta[2] < 0.002f,
-            "authored (0,0,.15)*2 offset maps to gun-local (0,-0.30,0)");
-  CHECK_MSG(Near(out[1], 1.28631f - 0.30f), "the offset lands 0.30 back down the barrel, not up");
-}
-
-void TestRotatedSampleLocatorComposes() {
-  // With a rotated sample the basis is composed on the locator's own side: the result's
-  // columns are the locator's (col0, col2, -col1).
-  CGeneratorRecorder generator(true);
-  NPortChargeFxDetail::SetLocalLocator(generator, QuarterTurnLocator, true);
-  const float expected[9] = {0.f, 0.f, 1.f, 1.f, 0.f, 0.f, 0.f, 1.f, 0.f};
-  for (int i = 0; i < 9; ++i) {
-    CHECK_MSG(Near(generator.rotation[i], expected[i]),
-              "composed rotated sample matches locator x Rx(+90)");
+  for (int row = 0; row < 3; ++row) {
+    CHECK_MSG(generator.translation[row] == translation[row],
+              "converted effect keeps the sampled translation");
   }
-  CHECK_MSG(Near(generator.Determinant(), 1.f), "composed rotated sample keeps determinant +1");
-  CHECK_MSG(Near(generator.translation[0], 0.5f) && Near(generator.translation[1], -0.25f) &&
-                Near(generator.translation[2], 0.f),
-            "composed rotated sample keeps its translation");
+  // The Power charge disc's EMTR, Remastered (0,0,.15), is the port's (0,.15,0) after the
+  // import: at scale 2 it lands .30 along the sampled forward (+Y) axis.
   float out[3];
-  generator.ChildOffset(0.f, 0.f, 0.30f, out);
-  CHECK_MSG(Near(out[0], 0.5f + 0.30f) && Near(out[1], -0.25f) && Near(out[2], 0.f),
-            "the authored offset follows the sample (its back is the sample's +X)");
-}
-
-void TestConvertedNonChargeEffectKeepsTheSampledLocator() {
-  // The normal muzzle flash shares this call site but is out of scope: it must receive the
-  // locator exactly as sampled, not composed with the muzzle basis.
-  CGeneratorRecorder generator(true);
-  NPortChargeFxDetail::SetLocalLocator(generator, QuarterTurnLocator, false);
-  CHECK_MSG(generator.orientationCalls == 1, "converted non-charge effect receives an orientation");
-  const float sampled[9] = {0.f, -1.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f};
-  for (int i = 0; i < 9; ++i) {
-    CHECK_MSG(Near(generator.rotation[i], sampled[i]),
-              "converted non-charge effect keeps the sampled locator rotation");
+  generator.ChildOffset(0.f, 0.15f * 2.f, 0.f, out);
+  for (int row = 0; row < 3; ++row) {
+    CHECK_MSG(Near(out[row] - translation[row], sampled[row * 3 + 1] * 0.30f),
+              "the converted disc offset goes .30 along the sampled forward axis");
   }
-  CHECK_MSG(Near(generator.translation[0], 0.5f) && Near(generator.translation[1], -0.25f) &&
-                Near(generator.translation[2], 0.f),
-            "converted non-charge effect keeps the locator translation");
-
-  float out[3];
-  generator.ChildOffset(0.f, 0.f, 0.25f, out);
-  CHECK_MSG(Near(out[0], 0.5f) && Near(out[1], -0.25f) && Near(out[2], 0.25f),
-            "converted non-charge child +Z offset follows the sampled locator frame numerically");
 }
 
-void TestRetailKeepsLegacyTranslationOnly() {
+void TestRetailKeepsTranslationOnly(const CTransform4f& locator) {
   CGeneratorRecorder generator(false);
-  NPortChargeFxDetail::SetLocalLocator(generator, QuarterTurnLocator, false);
-
+  NPortChargeFxDetail::SetLocalLocator(generator, locator);
   CHECK_MSG(generator.orientationCalls == 0, "retail effect does not receive locator orientation");
   CHECK_MSG(generator.translationCalls == 1, "retail effect keeps the legacy translation setter");
   CHECK_MSG(Near(generator.rotation[0], 7.f) && Near(generator.rotation[5], 12.f) &&
                 Near(generator.rotation[8], 15.f),
             "retail effect orientation is left untouched");
-  CHECK_MSG(Near(generator.translation[0], 0.5f) && Near(generator.translation[1], -0.25f) &&
-                Near(generator.translation[2], 0.f),
+  CHECK_MSG(Near(generator.translation[0], locator.Get03()) &&
+                Near(generator.translation[1], locator.Get13()) &&
+                Near(generator.translation[2], locator.Get23()),
             "retail effect retains locator translation");
-}
-
-void TestRetailChargeEffectIsUnchangedByTheFix() {
-  // The retail control: the charge slot on a retail effect behaves exactly as before,
-  // whatever the muzzle-basis flag says.
-  CGeneratorRecorder generator(false);
-  NPortChargeFxDetail::SetLocalLocator(generator, SampledPowerLocator, true);
-  CHECK_MSG(generator.orientationCalls == 0, "retail charge effect still gets no orientation");
-  CHECK_MSG(generator.translationCalls == 1, "retail charge effect still gets the translation only");
-  CHECK_MSG(Near(generator.rotation[0], 7.f) && Near(generator.rotation[5], 12.f) &&
-                Near(generator.rotation[8], 15.f),
-            "retail charge effect orientation is left untouched");
-  CHECK_MSG(Near(generator.translation[1], 1.28631f), "retail charge effect keeps its translation");
 }
 } // namespace
 
 int main() {
-  TestConvertedChargeEffectGetsMuzzleBasis();
-  TestSampledTranslationIsUnchanged();
-  TestAuthoredSourceOffsetMapsBackAlongBarrel();
-  TestRotatedSampleLocatorComposes();
-  TestConvertedNonChargeEffectKeepsTheSampledLocator();
-  TestRetailKeepsLegacyTranslationOnly();
-  TestRetailChargeEffectIsUnchangedByTheFix();
+  for (const CTransform4f* locator :
+       {&IdentityLocator, &SampledPowerLocator, &QuarterTurnLocator, &RotatedLocator}) {
+    TestConvertedTakesTheSampledLocator(*locator);
+    TestRetailKeepsTranslationOnly(*locator);
+  }
   if (port_test::Failures() == 0) {
     std::puts("charge locator checks passed");
   }
